@@ -159,6 +159,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       schema: Schema;
       tenantId: string;
       defaultActorId?: string;
+      enableAuditLog?: boolean;
     },
   ) {
     this.graphConfig = parseSchemaToGraphConfig(options.schema);
@@ -554,6 +555,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
         : undefined,
       createdBy: options?.createdBy ?? this.options.defaultActorId,
       graphConfig: this.graphConfig,
+      enableAuditLog: this.options.enableAuditLog,
     });
   }
 
@@ -577,6 +579,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       object,
       actorId: actorId ?? this.options.defaultActorId,
       graphConfig: this.graphConfig,
+      enableAuditLog: this.options.enableAuditLog,
     });
   }
 
@@ -593,6 +596,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       entity,
       actorId: actorId ?? this.options.defaultActorId,
       graphConfig: this.graphConfig,
+      enableAuditLog: this.options.enableAuditLog,
     });
   }
 }

@@ -20,9 +20,18 @@ export const addRelation = mutation({
     condition: conditionValidator,
     createdBy: v.optional(v.string()),
     graphConfig: v.any(), // GraphConfig
+    enableAuditLog: v.optional(v.boolean()),
   },
   handler: async (ctx: any, args: any) => {
-    const { tenantId, subject, relation, object, condition, createdBy } = args;
+    const {
+      tenantId,
+      subject,
+      relation,
+      object,
+      condition,
+      createdBy,
+      enableAuditLog,
+    } = args;
     const graphConfig = args.graphConfig as GraphConfig;
 
     const existingRel = await ctx.db
@@ -55,18 +64,20 @@ export const addRelation = mutation({
       createdAt: Date.now(),
     });
 
-    await ctx.db.insert("auditLog", {
-      tenantId,
-      timestamp: Date.now(),
-      action: "relation_added",
-      userId: subject.type === "user" ? subject.id : "system",
-      actorId: createdBy,
-      details: {
-        relation,
-        subject: `${subject.type}:${subject.id}`,
-        object: `${object.type}:${object.id}`,
-      },
-    });
+    if (enableAuditLog !== false) {
+      await ctx.db.insert("auditLog", {
+        tenantId,
+        timestamp: Date.now(),
+        action: "relation_added",
+        userId: subject.type === "user" ? subject.id : "system",
+        actorId: createdBy,
+        details: {
+          relation,
+          subject: `${subject.type}:${subject.id}`,
+          object: `${object.type}:${object.id}`,
+        },
+      });
+    }
 
     const pathItem = {
       isDirect: true,
@@ -297,7 +308,7 @@ export const addRelation = mutation({
 });
 
 async function removeRelationInternal(ctx: any, args: any) {
-  const { tenantId, subject, relation, object, actorId } = args;
+  const { tenantId, subject, relation, object, actorId, enableAuditLog } = args;
   const graphConfig = args.graphConfig as GraphConfig;
 
   const existingRel = await ctx.db
@@ -317,18 +328,20 @@ async function removeRelationInternal(ctx: any, args: any) {
 
   await ctx.db.delete(existingRel._id);
 
-  await ctx.db.insert("auditLog", {
-    tenantId,
-    timestamp: Date.now(),
-    action: "relation_removed",
-    userId: subject.type === "user" ? subject.id : "system",
-    actorId,
-    details: {
-      relation,
-      subject: `${subject.type}:${subject.id}`,
-      object: `${object.type}:${object.id}`,
-    },
-  });
+  if (enableAuditLog !== false) {
+    await ctx.db.insert("auditLog", {
+      tenantId,
+      timestamp: Date.now(),
+      action: "relation_removed",
+      userId: subject.type === "user" ? subject.id : "system",
+      actorId,
+      details: {
+        relation,
+        subject: `${subject.type}:${subject.id}`,
+        object: `${object.type}:${object.id}`,
+      },
+    });
+  }
 
   const queue: Array<{
     subject: { type: string; id: string };
@@ -437,6 +450,7 @@ export const removeRelation = mutation({
     object: objectValidator,
     actorId: v.optional(v.string()),
     graphConfig: v.any(), // GraphConfig
+    enableAuditLog: v.optional(v.boolean()),
   },
   handler: async (ctx: any, args: any) => {
     const res = await removeRelationInternal(ctx, args);
@@ -450,9 +464,10 @@ export const deleteEntity = mutation({
     entity: subjectValidator, // { type, id }
     actorId: v.optional(v.string()),
     graphConfig: v.any(),
+    enableAuditLog: v.optional(v.boolean()),
   },
   handler: async (ctx: any, args: any) => {
-    const { tenantId, entity, actorId, graphConfig } = args;
+    const { tenantId, entity, actorId, graphConfig, enableAuditLog } = args;
 
     let relationshipsRemoved = 0;
     let effectiveRelationshipsRemoved = 0;
@@ -476,6 +491,7 @@ export const deleteEntity = mutation({
         object: { type: match.objectType, id: match.objectId },
         actorId,
         graphConfig,
+        enableAuditLog,
       });
       if (res) {
         relationshipsRemoved++;
@@ -502,6 +518,7 @@ export const deleteEntity = mutation({
         object: { type: match.objectType, id: match.objectId },
         actorId,
         graphConfig,
+        enableAuditLog,
       });
       if (res) {
         relationshipsRemoved++;

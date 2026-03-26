@@ -366,4 +366,62 @@ describe("Client API & Read-Time Inference", () => {
 
     expect(canView).toBe(true);
   });
+
+  test("auditLog is disabled when enableAuditLog is false", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const testSchema = createAuthSchema<any>()({
+      entities: {
+        user: {},
+        org: {
+          relations: {
+            owner: "user",
+          },
+        },
+      },
+    });
+
+    const authz = new Authz(api, {
+      schema: testSchema,
+      tenantId: "t1",
+      enableAuditLog: false,
+    });
+
+    const user = { type: "user", id: "u1" } as const;
+    const org = { type: "org", id: "o1" } as const;
+
+    await authz.addRelation(ctx, user, "owner", org);
+
+    // We can directly check if there are any auditLog entries
+    // Since auditLog doesn't have a check query exposed, we can do it via a generic internal or just delete it and check removal
+    // But since it's a test, we can use t.run to check the db
+    const logs = await t.run(async (innerCtx) => {
+      return await innerCtx.db.query("auditLog").collect();
+    });
+
+    expect(logs.length).toBe(0);
+
+    // Let's also verify that when enabled, it DOES create logs
+    const authzEnabled = new Authz(api, {
+      schema: testSchema,
+      tenantId: "t1",
+      enableAuditLog: true,
+    });
+
+    await authzEnabled.addRelation(
+      ctx,
+      { type: "user", id: "u2" },
+      "owner",
+      org,
+    );
+    const logsAfter = await t.run(async (innerCtx) => {
+      return await innerCtx.db.query("auditLog").collect();
+    });
+
+    expect(logsAfter.length).toBeGreaterThan(0);
+  });
 });
