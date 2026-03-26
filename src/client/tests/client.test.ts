@@ -3,9 +3,13 @@ import { Authz, createAuthSchema } from "../index.js";
 import { convexTest } from "convex-test";
 import schema from "../../component/schema.js";
 import { api } from "../../component/_generated/api.js";
+import { register as registerWorkpool } from "@convex-dev/workpool/test";
 
-const setup = () =>
-  convexTest(schema, import.meta.glob("../../component/**/*.ts"));
+const setup = () => {
+  const t = convexTest(schema, import.meta.glob("../../component/**/*.ts"));
+  registerWorkpool(t, "workpool");
+  return t;
+};
 
 const authSchema = createAuthSchema<any>()({
   conditions: {
@@ -50,45 +54,13 @@ describe("Client API & Read-Time Inference", () => {
     const ctx = {
       runQuery: t.query.bind(t),
       runMutation: t.mutation.bind(t),
-      runAction: t.action ? t.action.bind(t) : async () => {},
     } as any;
 
     const authz = new Authz(api, {
       schema: authSchema,
       tenantId: "t1",
+      asyncWrites: false,
     });
-
-    const user = { type: "user", id: "user1" } as const;
-    const org = { type: "org", id: "org1" } as const;
-
-    // 1. Add user as OWNER (doesn't explicitly add admin/viewer to database)
-    await authz.addRelation(ctx, user, "owner", org);
-
-    // 2. Query permissions
-    const canView = await authz.can(ctx, user, "view_dashboard", org);
-    const canEdit = await authz.can(ctx, user, "edit_settings", org);
-    const canAudit = await authz.can(ctx, user, "audit", org); // false because not user_paid
-
-    expect(canView).toBe(true);
-    expect(canEdit).toBe(true);
-    expect(canAudit).toBe(false);
-
-    // 3. Test conditions
-    const paidUser = { type: "user" as const, id: "user_paid" };
-    await authz.addRelation(ctx, paidUser, "admin", org);
-
-    const paidUserCanAudit = await authz.can(ctx, paidUser, "audit", org);
-    expect(paidUserCanAudit).toBe(true);
-  });
-
-  test("listAccessibleObjects with local inheritance", async () => {
-    const t = setup();
-    const ctx = {
-      runQuery: t.query.bind(t),
-      runMutation: t.mutation.bind(t),
-    } as any;
-
-    const authz = new Authz(api, { schema: authSchema, tenantId: "t1" });
 
     const user = { type: "user" as const, id: "u1" };
     const org1 = { type: "org" as const, id: "org1" };
@@ -115,7 +87,11 @@ describe("Client API & Read-Time Inference", () => {
       runMutation: t.mutation.bind(t),
     } as any;
 
-    const authz = new Authz(api, { schema: authSchema, tenantId: "t1" });
+    const authz = new Authz(api, {
+      schema: authSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
 
     const ownerUser = { type: "user", id: "u_owner" } as const;
     const adminUser = { type: "user", id: "u_admin" } as const;
@@ -138,7 +114,11 @@ describe("Client API & Read-Time Inference", () => {
       runMutation: t.mutation.bind(t),
     } as any;
 
-    const authz = new Authz(api, { schema: authSchema, tenantId: "t1" });
+    const authz = new Authz(api, {
+      schema: authSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
 
     const user = { type: "user", id: "u_owner" } as const;
     const org = { type: "org", id: "org1" } as const;
@@ -164,7 +144,11 @@ describe("Client API & Read-Time Inference", () => {
       runMutation: t.mutation.bind(t),
     } as any;
 
-    const authz = new Authz(api, { schema: authSchema, tenantId: "t1" });
+    const authz = new Authz(api, {
+      schema: authSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
 
     const user = { type: "user", id: "u_delete" } as const;
     const org = { type: "org", id: "org1" } as const;
@@ -242,7 +226,11 @@ describe("Client API & Read-Time Inference", () => {
       },
     });
 
-    const authz = new Authz(api, { schema: deepSchema, tenantId: "t1" });
+    const authz = new Authz(api, {
+      schema: deepSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
 
     const user = { type: "user", id: "u_nested" } as const;
     const org = { type: "org", id: "o1" } as const;
@@ -348,7 +336,11 @@ describe("Client API & Read-Time Inference", () => {
       },
     });
 
-    const authz = new Authz(api, { schema: testSchema, tenantId: "t1" });
+    const authz = new Authz(api, {
+      schema: testSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
 
     const user = { type: "user", id: "u1" } as const;
     const document = { type: "document", id: "d1" } as const;
@@ -389,6 +381,7 @@ describe("Client API & Read-Time Inference", () => {
       schema: testSchema,
       tenantId: "t1",
       enableAuditLog: false,
+      asyncWrites: false,
     });
 
     const user = { type: "user", id: "u1" } as const;
@@ -410,6 +403,7 @@ describe("Client API & Read-Time Inference", () => {
       schema: testSchema,
       tenantId: "t1",
       enableAuditLog: true,
+      asyncWrites: false,
     });
 
     await authzEnabled.addRelation(

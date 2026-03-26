@@ -6,6 +6,8 @@ import type {
 } from "convex/server";
 import { parseSchemaToGraphConfig } from "../component/helpers";
 
+import type { GraphConfig } from "../component/types";
+
 // ============================================================================
 // Type Definitions
 // ============================================================================
@@ -146,12 +148,43 @@ export type SchemaConditions<Schema extends AuthSchema<any>> = Schema extends {
   ? keyof C & string
   : never;
 
+export class PermissionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PermissionError";
+  }
+}
+
 // ============================================================================
-// Authz Client Class
+// Factory Function
 // ============================================================================
 
+/**
+ * Create a new Authz client instance.
+ * @param component The imported convex_rebac component
+ * @param options Configuration options
+ * @returns Authz client
+ */
+export function createAuthz<Schema extends AuthSchema<Data>, Data = any>(
+  component: any,
+  options: {
+    schema: Schema;
+    tenantId: string;
+    defaultActorId?: string;
+    enableAuditLog?: boolean;
+    maxWriteDepth?: number;
+    asyncWrites?: boolean;
+  },
+) {
+  return new Authz<Schema, Data>(component, options);
+}
+
 export class Authz<Schema extends AuthSchema<Data>, Data = any> {
-  private graphConfig: any;
+  private graphConfig: GraphConfig;
+  private permissionRelationsCache = new Map<
+    string,
+    Array<{ relation: string; condition?: string }>
+  >();
 
   constructor(
     public component: any,
@@ -168,6 +201,8 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     if (options.maxWriteDepth !== undefined) {
       this.graphConfig.maxWriteDepth = options.maxWriteDepth;
     }
+    this.options.enableAuditLog = options.enableAuditLog ?? true;
+    this.options.asyncWrites = options.asyncWrites ?? true;
   }
 
   withTenant(tenantId: string): Authz<Schema, Data> {
@@ -178,6 +213,11 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
   }
 
   private resolvePermissionRelations(objectType: string, permission: string) {
+    const cacheKey = `${objectType}:${permission}`;
+    if (this.permissionRelationsCache.has(cacheKey)) {
+      return this.permissionRelationsCache.get(cacheKey)!;
+    }
+
     const schema = this.options.schema;
     const perms = schema.entities[objectType]?.permissions?.[permission] || [];
     const results: Array<{ relation: string; condition?: string }> = [];
@@ -210,6 +250,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       }
     }
 
+    this.permissionRelationsCache.set(cacheKey, results);
     return results;
   }
 
@@ -292,6 +333,9 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     return true;
   }
 
+  /**
+   * Determine if a subject has a specific permission on an object.
+   */
   async can<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
@@ -339,6 +383,9 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     return false;
   }
 
+  /**
+   * Asserts that a subject has a specific permission on an object, throwing a PermissionError if denied.
+   */
   async require<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
@@ -358,12 +405,55 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       requestContext,
     );
     if (!allowed) {
-      throw new Error(
+      throw new PermissionError(
         `Permission denied: ${permission} on ${object.type}:${object.id}`,
       );
     }
   }
 
+  private async listWithValidation<T extends { id: string }>(
+    ctx: QueryCtx | ActionCtx,
+    effectiveRels: any[],
+    targets: Array<{ relation: string; condition?: string }>,
+    getId: (eff: any) => string,
+    subjectResolver: (eff: any, id: string) => SubjectOrObject,
+    objectResolver: (eff: any, id: string) => SubjectOrObject,
+    permission: string,
+    requestContext?: Data,
+  ): Promise<T[]> {
+    const results: T[] = [];
+    for (const eff of effectiveRels) {
+      const id = getId(eff);
+      if (results.some((r: any) => r.id === id)) continue;
+
+      const targetDef = targets.find((t) => t.relation === eff.relation);
+      let valid = false;
+
+      for (const path of eff.paths) {
+        const subject = subjectResolver(eff, id);
+        const object = objectResolver(eff, id);
+        const isValid = await this.validatePath(
+          path,
+          targetDef,
+          ctx,
+          subject,
+          object,
+          permission,
+          requestContext,
+        );
+        if (isValid) {
+          valid = true;
+          break;
+        }
+      }
+      if (valid) results.push({ id } as T);
+    }
+    return results;
+  }
+
+  /**
+   * Retrieve a list of objects a subject has a specific permission on.
+   */
   async listAccessibleObjects<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
@@ -390,44 +480,26 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       },
     );
 
-    const results: Array<{ objectId: string }> = [];
+    const results = await this.listWithValidation<{
+      id: string;
+      objectId: string;
+    }>(
+      ctx,
+      effectiveRels,
+      targets,
+      (eff) => eff.objectKey.split(":")[1],
+      () => subject,
+      (_, id) => ({ type: objectType, id }),
+      permission,
+      requestContext,
+    );
 
-    for (const eff of effectiveRels) {
-      const [_, effObjectId] = eff.objectKey.split(":");
-      // Early deduplication optimization: Skip if we already approved this objectId
-      if (results.some((r) => r.objectId === effObjectId)) {
-        continue;
-      }
-
-      const targetDef = targets.find((t) => t.relation === eff.relation);
-      let objectValid = false;
-
-      for (const path of eff.paths) {
-        const object = { type: objectType, id: effObjectId };
-        const isValid = await this.validatePath(
-          path,
-          targetDef,
-          ctx,
-          subject,
-          object,
-          permission,
-          requestContext,
-        );
-
-        if (isValid) {
-          objectValid = true;
-          break;
-        }
-      }
-
-      if (objectValid) {
-        results.push({ objectId: effObjectId });
-      }
-    }
-
-    return results;
+    return results.map((r) => ({ objectId: r.id }));
   }
 
+  /**
+   * Retrieve a list of subjects that have a specific permission on an object.
+   */
   async listUsersWithAccess<
     ObjectType extends keyof Schema["entities"] & string,
     Permission extends EntityPermissions<Schema, ObjectType>,
@@ -451,44 +523,26 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       },
     );
 
-    const results: Array<{ userId: string }> = [];
+    const results = await this.listWithValidation<{
+      id: string;
+      userId: string;
+    }>(
+      ctx,
+      effectiveRels,
+      targets,
+      (eff) => eff.subjectKey.split(":")[1],
+      (eff, id) => ({ type: eff.subjectKey.split(":")[0], id }),
+      () => object,
+      permission,
+      requestContext,
+    );
 
-    for (const eff of effectiveRels) {
-      const [effSubjectType, effSubjectId] = eff.subjectKey.split(":");
-      // Early deduplication optimization: Skip if we already approved this userId
-      if (results.some((r) => r.userId === effSubjectId)) {
-        continue;
-      }
-
-      const targetDef = targets.find((t) => t.relation === eff.relation);
-      let subjectValid = false;
-
-      for (const path of eff.paths) {
-        const subject = { type: effSubjectType, id: effSubjectId };
-        const isValid = await this.validatePath(
-          path,
-          targetDef,
-          ctx,
-          subject,
-          object,
-          permission,
-          requestContext,
-        );
-
-        if (isValid) {
-          subjectValid = true;
-          break;
-        }
-      }
-
-      if (subjectValid) {
-        results.push({ userId: effSubjectId });
-      }
-    }
-
-    return results;
+    return results.map((r) => ({ userId: r.id }));
   }
 
+  /**
+   * Add a relationship between a subject and an object.
+   */
   async addRelation<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
@@ -524,6 +578,9 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     });
   }
 
+  /**
+   * Remove a relationship between a subject and an object.
+   */
   async removeRelation<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
@@ -549,6 +606,9 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     });
   }
 
+  /**
+   * Delete an entity and all its associated relationships (both as subject and object).
+   */
   async deleteEntity<EntityType extends keyof Schema["entities"] & string>(
     ctx: MutationCtx | ActionCtx,
     entity: { type: EntityType; id: string },
