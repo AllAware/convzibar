@@ -14,7 +14,6 @@ export default defineSchema({
     createdBy: v.optional(v.string()),
     createdAt: v.number(),
   })
-    .index("by_tenant_subject", ["tenantId", "subjectType", "subjectId"])
     .index("by_tenant_object", ["tenantId", "objectType", "objectId"])
     .index("by_tenant_subject_relation_object", [
       "tenantId",
@@ -77,7 +76,4 @@ export default defineSchema({
       reason: v.optional(v.string()),
     }),
   })
-    .index("by_tenant_user", ["tenantId", "userId"])
-    .index("by_tenant_action", ["tenantId", "action"])
-    .index("by_tenant_timestamp", ["tenantId", "timestamp"]),
 });

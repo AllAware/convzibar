@@ -473,7 +473,7 @@ export const deleteEntity = mutation({
     // 1. Where entity is subject
     const subjectMatches = await ctx.db
       .query("relationships")
-      .withIndex("by_tenant_subject", (q: any) =>
+      .withIndex("by_tenant_subject_relation_object", (q: any) =>
         q
           .eq("tenantId", tenantId)
           .eq("subjectType", entity.type)
