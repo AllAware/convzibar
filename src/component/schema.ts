@@ -27,16 +27,11 @@ export default defineSchema({
   effectiveRelationships: defineTable({
     tenantId: v.optional(v.string()),
     subjectKey: v.string(), // `${subjectType}:${subjectId}`
-    subjectType: v.string(),
-    subjectId: v.string(),
     relation: v.string(),
     objectKey: v.string(), // `${objectType}:${objectId}`
-    objectType: v.string(),
-    objectId: v.string(),
 
     paths: v.array(
       v.object({
-        isDirect: v.boolean(),
         tokens: v.array(v.string()),
         conditions: v.optional(
           v.array(
@@ -75,5 +70,5 @@ export default defineSchema({
       object: v.optional(v.string()),
       reason: v.optional(v.string()),
     }),
-  })
+  }),
 });

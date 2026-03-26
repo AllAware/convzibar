@@ -65,7 +65,8 @@ export const listAccessibleObjectsFast = query({
         .collect();
 
       for (const match of matches) {
-        if (match.objectType === objectType) {
+        const [matchObjectType, _matchObjectId] = match.objectKey.split(":");
+        if (matchObjectType === objectType) {
           results.push(match);
         }
       }
@@ -97,7 +98,8 @@ export const listUsersWithAccessFast = query({
         .collect();
 
       for (const match of matches) {
-        if (match.subjectType === "user") {
+        const [matchSubjectType, _matchSubjectId] = match.subjectKey.split(":");
+        if (matchSubjectType === "user") {
           // Hardcode user as subject type, or parameterize it
           results.push(match);
         }

@@ -40,7 +40,6 @@ describe("ReBAC Core Engine (v3)", () => {
     expect(rels.length).toBe(1);
     expect(rels[0].relation).toBe(relation);
     expect(rels[0].paths.length).toBe(1);
-    expect(rels[0].paths[0].isDirect).toBe(true);
   });
 
   test("cross-object derived relationships are correctly expanded", async () => {
@@ -93,7 +92,6 @@ describe("ReBAC Core Engine (v3)", () => {
     expect(rels.length).toBe(1);
     expect(rels[0].relation).toBe("editor");
     expect(rels[0].paths.length).toBe(1);
-    expect(rels[0].paths[0].isDirect).toBe(false);
   });
 
   test("relationship conditions are successfully passed to paths", async () => {
@@ -475,7 +473,6 @@ describe("ReBAC Core Engine (v3)", () => {
       object: document,
     });
     expect(relsDoc.length).toBe(1);
-    expect(relsDoc[0].paths[0].isDirect).toBe(false);
     expect(relsDoc[0].paths[0].tokens.length).toBeGreaterThan(3); // Should have accumulated several tokens
 
     // Verify user has admin on the folder (2 hops away)

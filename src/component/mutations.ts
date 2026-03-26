@@ -80,7 +80,6 @@ export const addRelation = mutation({
     }
 
     const pathItem = {
-      isDirect: true,
       tokens: [relId],
       conditions: condition ? [condition] : undefined,
     };
@@ -133,7 +132,6 @@ export const addRelation = mutation({
           relation: reverseRel,
           object: subject,
           path: {
-            isDirect: true,
             tokens: [revId],
           },
         });
@@ -163,12 +161,8 @@ export const addRelation = mutation({
           _id: await ctx.db.insert("effectiveRelationships", {
             tenantId,
             subjectKey: sKey,
-            subjectType: current.subject.type,
-            subjectId: current.subject.id,
             relation: current.relation,
             objectKey: oKey,
-            objectType: current.object.type,
-            objectId: current.object.id,
             paths: [current.path],
           }),
         };
@@ -208,9 +202,11 @@ export const addRelation = mutation({
               .collect();
 
             for (const match of matches) {
+              const [matchSubjectType, matchSubjectId] =
+                match.subjectKey.split(":");
               const derivedSubject = {
-                type: match.subjectType,
-                id: match.subjectId,
+                type: matchSubjectType,
+                id: matchSubjectId,
               };
               const derivedObject = current.subject;
 
@@ -229,7 +225,6 @@ export const addRelation = mutation({
                   relation: rule.derivedRelation,
                   object: derivedObject,
                   path: {
-                    isDirect: false,
                     tokens: [
                       ...current.path.tokens,
                       ...matchPath.tokens,
@@ -258,11 +253,13 @@ export const addRelation = mutation({
               .collect();
 
             for (const match of matches) {
-              if (match.subjectType === rule.sourceObjectType) {
+              const [matchSubjectType, matchSubjectId] =
+                match.subjectKey.split(":");
+              if (matchSubjectType === rule.sourceObjectType) {
                 const derivedSubject = current.subject;
                 const derivedObject = {
-                  type: match.subjectType,
-                  id: match.subjectId,
+                  type: matchSubjectType,
+                  id: matchSubjectId,
                 };
 
                 for (const matchPath of match.paths) {
@@ -280,7 +277,6 @@ export const addRelation = mutation({
                     relation: rule.derivedRelation,
                     object: derivedObject,
                     path: {
-                      isDirect: false,
                       tokens: [
                         ...current.path.tokens,
                         ...matchPath.tokens,
@@ -399,8 +395,10 @@ async function removeRelationInternal(ctx: any, args: any) {
               .collect();
 
             for (const match of matches) {
+              const [matchSubjectType, matchSubjectId] =
+                match.subjectKey.split(":");
               queue.push({
-                subject: { type: match.subjectType, id: match.subjectId },
+                subject: { type: matchSubjectType, id: matchSubjectId },
                 relation: rule.derivedRelation,
                 object: current.subject,
                 removedRelationId: eff._id,
@@ -420,11 +418,13 @@ async function removeRelationInternal(ctx: any, args: any) {
               .collect();
 
             for (const match of matches) {
-              if (match.subjectType === rule.sourceObjectType) {
+              const [matchSubjectType, matchSubjectId] =
+                match.subjectKey.split(":");
+              if (matchSubjectType === rule.sourceObjectType) {
                 queue.push({
                   subject: current.subject,
                   relation: rule.derivedRelation,
-                  object: { type: match.subjectType, id: match.subjectId },
+                  object: { type: matchSubjectType, id: matchSubjectId },
                   removedRelationId: eff._id,
                 });
               }

@@ -388,8 +388,9 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     const results: Array<{ objectId: string }> = [];
 
     for (const eff of effectiveRels) {
+      const [_, effObjectId] = eff.objectKey.split(":");
       // Early deduplication optimization: Skip if we already approved this objectId
-      if (results.some((r) => r.objectId === eff.objectId)) {
+      if (results.some((r) => r.objectId === effObjectId)) {
         continue;
       }
 
@@ -397,7 +398,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       let objectValid = false;
 
       for (const path of eff.paths) {
-        const object = { type: objectType, id: eff.objectId };
+        const object = { type: objectType, id: effObjectId };
         const isValid = await this.validatePath(
           path,
           targetDef,
@@ -415,7 +416,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       }
 
       if (objectValid) {
-        results.push({ objectId: eff.objectId });
+        results.push({ objectId: effObjectId });
       }
     }
 
@@ -448,8 +449,9 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     const results: Array<{ userId: string }> = [];
 
     for (const eff of effectiveRels) {
+      const [effSubjectType, effSubjectId] = eff.subjectKey.split(":");
       // Early deduplication optimization: Skip if we already approved this userId
-      if (results.some((r) => r.userId === eff.subjectId)) {
+      if (results.some((r) => r.userId === effSubjectId)) {
         continue;
       }
 
@@ -457,7 +459,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       let subjectValid = false;
 
       for (const path of eff.paths) {
-        const subject = { type: eff.subjectType, id: eff.subjectId };
+        const subject = { type: effSubjectType, id: effSubjectId };
         const isValid = await this.validatePath(
           path,
           targetDef,
@@ -475,7 +477,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       }
 
       if (subjectValid) {
-        results.push({ userId: eff.subjectId });
+        results.push({ userId: effSubjectId });
       }
     }
 
