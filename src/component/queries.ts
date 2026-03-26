@@ -59,7 +59,7 @@ export const listAccessibleObjectsFast = query({
     for (const rel of relations) {
       const matches = await ctx.db
         .query("effectiveRelationships")
-        .withIndex("by_tenant_subject_relation", (q: any) =>
+        .withIndex("by_tenant_subject_relation_object", (q: any) =>
           q.eq("tenantId", tenantId).eq("subjectKey", sKey).eq("relation", rel),
         )
         .collect();

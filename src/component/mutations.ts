@@ -170,8 +170,6 @@ export const addRelation = mutation({
             objectType: current.object.type,
             objectId: current.object.id,
             paths: [current.path],
-            createdBy,
-            createdAt: Date.now(),
           }),
         };
         isNewOrUpdated = true;

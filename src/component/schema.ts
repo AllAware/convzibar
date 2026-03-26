@@ -23,12 +23,6 @@ export default defineSchema({
       "relation",
       "objectType",
       "objectId",
-    ])
-    .index("by_tenant_object_relation", [
-      "tenantId",
-      "objectType",
-      "objectId",
-      "relation",
     ]),
 
   effectiveRelationships: defineTable({
@@ -55,25 +49,14 @@ export default defineSchema({
         ),
       }),
     ),
-
-    involvedTokens: v.optional(v.string()), // For search index cleanup
-    createdBy: v.optional(v.string()),
-    createdAt: v.number(),
   })
-    .index("by_tenant_subject", ["tenantId", "subjectKey"])
-    .index("by_tenant_object", ["tenantId", "objectKey"])
-    .index("by_tenant_subject_relation", ["tenantId", "subjectKey", "relation"])
     .index("by_tenant_subject_relation_object", [
       "tenantId",
       "subjectKey",
       "relation",
       "objectKey",
     ])
-    .index("by_tenant_object_relation", ["tenantId", "objectKey", "relation"])
-    .searchIndex("search_involved_tokens", {
-      searchField: "involvedTokens",
-      filterFields: ["tenantId"],
-    }),
+    .index("by_tenant_object_relation", ["tenantId", "objectKey", "relation"]),
 
   auditLog: defineTable({
     tenantId: v.optional(v.string()),
