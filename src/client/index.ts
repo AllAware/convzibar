@@ -10,17 +10,17 @@ import { parseSchemaToGraphConfig } from "../component/helpers";
 // Type Definitions
 // ============================================================================
 
-export interface PolicyContext {
+export interface PolicyContext<Data = any> {
   subject: { type: string; id: string };
   resource?: { type: string; id: string };
   action?: string;
-  environment?: Record<string, unknown>;
-  [key: string]: unknown;
+  data: Data;
 }
 
-export type ConditionFunction = (
-  ctx: PolicyContext,
-) => boolean | Promise<boolean>;
+export type ConditionFunction<Data = any> = (
+  ctx: GenericQueryCtx<GenericDataModel> | GenericActionCtx<GenericDataModel>,
+  policyCtx: PolicyContext<Data>,
+) => boolean | Partial<Data> | Promise<boolean | Partial<Data>>;
 
 export type SchemaRelation =
   | string
@@ -40,13 +40,13 @@ export interface EntityDefinition {
   >;
 }
 
-export interface AuthSchema {
-  conditions?: Record<string, ConditionFunction>;
+export interface AuthSchema<Data = any> {
+  conditions?: Record<string, ConditionFunction<Data>>;
   entities: Record<string, EntityDefinition>;
 }
 
 // Validation types for strict autocomplete inside createAuthSchema
-export type ValidateAuthSchema<T extends AuthSchema> = {
+export type ValidateAuthSchema<T extends AuthSchema<any>> = {
   conditions?: T["conditions"];
   entities: {
     [E in keyof T["entities"]]: {
@@ -102,10 +102,12 @@ export function defineEntity<const T extends EntityDefinition>(def: T): T {
   return def;
 }
 
-export function createAuthSchema<const T extends AuthSchema>(
-  schema: T & ValidateAuthSchema<T>,
-): T {
-  return schema;
+export function createAuthSchema<Data = any>() {
+  return function <const T extends AuthSchema<Data>>(
+    schema: T & ValidateAuthSchema<T>,
+  ): T {
+    return schema;
+  };
 }
 
 // ============================================================================
@@ -138,7 +140,7 @@ export type EntityRelations<
   ? keyof R & string
   : never;
 
-export type SchemaConditions<Schema extends AuthSchema> = Schema extends {
+export type SchemaConditions<Schema extends AuthSchema<any>> = Schema extends {
   conditions: infer C;
 }
   ? keyof C & string
@@ -148,7 +150,7 @@ export type SchemaConditions<Schema extends AuthSchema> = Schema extends {
 // Authz Client Class
 // ============================================================================
 
-export class Authz<Schema extends AuthSchema> {
+export class Authz<Schema extends AuthSchema<Data>, Data = any> {
   private graphConfig: any;
 
   constructor(
@@ -162,8 +164,11 @@ export class Authz<Schema extends AuthSchema> {
     this.graphConfig = parseSchemaToGraphConfig(options.schema);
   }
 
-  withTenant(tenantId: string): Authz<Schema> {
-    return new Authz(this.component, { ...this.options, tenantId });
+  withTenant(tenantId: string): Authz<Schema, Data> {
+    return new Authz<Schema, Data>(this.component, {
+      ...this.options,
+      tenantId,
+    });
   }
 
   private resolvePermissionRelations(objectType: string, permission: string) {
@@ -204,23 +209,24 @@ export class Authz<Schema extends AuthSchema> {
 
   private async evaluateCondition(
     conditionName: string,
+    ctx: QueryCtx | ActionCtx | MutationCtx,
     subject: SubjectOrObject,
     object: SubjectOrObject,
     permission: string,
-    requestContext?: Record<string, unknown>,
-  ): Promise<boolean> {
+    data: Data,
+  ): Promise<boolean | Partial<Data>> {
     const conditionFn = this.options.schema.conditions?.[conditionName];
     if (!conditionFn) return false;
 
-    const ctx: PolicyContext = {
+    const policyCtx: PolicyContext<Data> = {
       subject,
       resource: object,
       action: permission,
-      ...requestContext,
+      data,
     };
 
     try {
-      return await Promise.resolve(conditionFn(ctx));
+      return await Promise.resolve(conditionFn(ctx as any, policyCtx));
     } catch {
       return false;
     }
@@ -235,7 +241,7 @@ export class Authz<Schema extends AuthSchema> {
     subject: { type: SubjectType; id: string },
     permission: Permission,
     object: { type: ObjectType; id: string },
-    requestContext?: Record<string, unknown>,
+    requestContext?: Data,
   ): Promise<boolean> {
     const targets = this.resolvePermissionRelations(object.type, permission);
     if (targets.length === 0) return false;
@@ -257,23 +263,31 @@ export class Authz<Schema extends AuthSchema> {
 
       for (const path of eff.paths) {
         let pathValid = true;
+        let currentData = {
+          ...(requestContext || {}),
+          ...(path.conditions?.[0]?.conditionContext || {}),
+        } as Data;
 
         if (path.conditions) {
           for (const c of path.conditions) {
-            const combinedContext = {
-              ...(requestContext || {}),
-              ...(c.conditionContext || {}),
-            };
+            // Include context from the relationship edge
+            if (c !== path.conditions[0] && c.conditionContext) {
+              currentData = { ...currentData, ...c.conditionContext };
+            }
+
             const ok = await this.evaluateCondition(
               c.condition,
+              ctx,
               subject,
               object,
               permission,
-              combinedContext,
+              currentData,
             );
-            if (!ok) {
+            if (ok === false) {
               pathValid = false;
               break;
+            } else if (typeof ok === "object" && ok !== null) {
+              currentData = { ...currentData, ...ok };
             }
           }
         }
@@ -281,12 +295,13 @@ export class Authz<Schema extends AuthSchema> {
         if (pathValid && targetDef?.condition) {
           const ok = await this.evaluateCondition(
             targetDef.condition,
+            ctx,
             subject,
             object,
             permission,
-            requestContext,
+            currentData,
           );
-          if (!ok) {
+          if (ok === false) {
             pathValid = false;
           }
         }
@@ -307,7 +322,7 @@ export class Authz<Schema extends AuthSchema> {
     subject: { type: SubjectType; id: string },
     permission: Permission,
     object: { type: ObjectType; id: string },
-    requestContext?: Record<string, unknown>,
+    requestContext?: Data,
   ): Promise<void> {
     const allowed = await this.can(
       ctx,
@@ -332,7 +347,7 @@ export class Authz<Schema extends AuthSchema> {
     subject: { type: SubjectType; id: string },
     permission: Permission,
     objectType: ObjectType,
-    requestContext?: Record<string, unknown>,
+    requestContext?: Data,
   ): Promise<Array<{ objectId: string }>> {
     const targets = this.resolvePermissionRelations(objectType, permission);
     if (targets.length === 0) return [];
@@ -358,23 +373,31 @@ export class Authz<Schema extends AuthSchema> {
       for (const path of eff.paths) {
         let pathValid = true;
         const object = { type: objectType, id: eff.objectId };
+        let currentData = {
+          ...(requestContext || {}),
+          ...(path.conditions?.[0]?.conditionContext || {}),
+        } as Data;
 
         if (path.conditions) {
           for (const c of path.conditions) {
-            const combinedContext = {
-              ...(requestContext || {}),
-              ...(c.conditionContext || {}),
-            };
+            // Include context from the relationship edge
+            if (c !== path.conditions[0] && c.conditionContext) {
+              currentData = { ...currentData, ...c.conditionContext };
+            }
+
             const ok = await this.evaluateCondition(
               c.condition,
+              ctx,
               subject,
               object,
               permission,
-              combinedContext,
+              currentData,
             );
-            if (!ok) {
+            if (ok === false) {
               pathValid = false;
               break;
+            } else if (typeof ok === "object" && ok !== null) {
+              currentData = { ...currentData, ...ok };
             }
           }
         }
@@ -382,12 +405,13 @@ export class Authz<Schema extends AuthSchema> {
         if (pathValid && targetDef?.condition) {
           const ok = await this.evaluateCondition(
             targetDef.condition,
+            ctx,
             subject,
             object,
             permission,
-            requestContext,
+            currentData,
           );
-          if (!ok) {
+          if (ok === false) {
             pathValid = false;
           }
         }
@@ -416,7 +440,7 @@ export class Authz<Schema extends AuthSchema> {
     ctx: QueryCtx | ActionCtx,
     object: { type: ObjectType; id: string },
     permission: Permission,
-    requestContext?: Record<string, unknown>,
+    requestContext?: Data,
   ): Promise<Array<{ userId: string }>> {
     const targets = this.resolvePermissionRelations(object.type, permission);
     if (targets.length === 0) return [];
@@ -441,23 +465,31 @@ export class Authz<Schema extends AuthSchema> {
       for (const path of eff.paths) {
         let pathValid = true;
         const subject = { type: eff.subjectType, id: eff.subjectId };
+        let currentData = {
+          ...(requestContext || {}),
+          ...(path.conditions?.[0]?.conditionContext || {}),
+        } as Data;
 
         if (path.conditions) {
           for (const c of path.conditions) {
-            const combinedContext = {
-              ...(requestContext || {}),
-              ...(c.conditionContext || {}),
-            };
+            // Include context from the relationship edge
+            if (c !== path.conditions[0] && c.conditionContext) {
+              currentData = { ...currentData, ...c.conditionContext };
+            }
+
             const ok = await this.evaluateCondition(
               c.condition,
+              ctx,
               subject,
               object,
               permission,
-              combinedContext,
+              currentData,
             );
-            if (!ok) {
+            if (ok === false) {
               pathValid = false;
               break;
+            } else if (typeof ok === "object" && ok !== null) {
+              currentData = { ...currentData, ...ok };
             }
           }
         }
@@ -465,12 +497,13 @@ export class Authz<Schema extends AuthSchema> {
         if (pathValid && targetDef?.condition) {
           const ok = await this.evaluateCondition(
             targetDef.condition,
+            ctx,
             subject,
             object,
             permission,
-            requestContext,
+            currentData,
           );
-          if (!ok) {
+          if (ok === false) {
             pathValid = false;
           }
         }

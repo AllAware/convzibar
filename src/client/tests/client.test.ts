@@ -7,13 +7,13 @@ import { api } from "../../component/_generated/api.js";
 const setup = () =>
   convexTest(schema, import.meta.glob("../../component/**/*.ts"));
 
-const authSchema = createAuthSchema({
+const authSchema = createAuthSchema<any>()({
   conditions: {
-    isBusinessHours: (ctx) => {
-      return ctx.timezone === "EST";
+    isBusinessHours: (ctx, policyCtx) => {
+      return policyCtx.data?.timezone === "EST";
     },
-    hasPaidPlan: (ctx) => {
-      return ctx.subject.id === "user_paid";
+    hasPaidPlan: (ctx, policyCtx) => {
+      return policyCtx.subject.id === "user_paid";
     },
   },
   entities: {
@@ -205,10 +205,10 @@ describe("Client API & Read-Time Inference", () => {
       runMutation: t.mutation.bind(t),
     } as any;
 
-    const deepSchema = createAuthSchema({
+    const deepSchema = createAuthSchema<any>()({
       conditions: {
-        isApproved: (ctx) => ctx.approved === true,
-        isActive: (ctx) => ctx.active === true,
+        isApproved: (ctx, policy) => policy.data?.approved === true,
+        isActive: (ctx, policy) => policy.data?.active === true,
       },
       entities: {
         user: {},
@@ -322,9 +322,9 @@ describe("Client API & Read-Time Inference", () => {
       runMutation: t.mutation.bind(t),
     } as any;
 
-    const testSchema = createAuthSchema({
+    const testSchema = createAuthSchema<any>()({
       conditions: {
-        isActive: (ctx) => ctx.active === true,
+        isActive: (ctx, policy) => policy.data?.active === true,
       },
       entities: {
         user: {},

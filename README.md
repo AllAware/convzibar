@@ -56,11 +56,32 @@ serves as the single source of truth and powers the TypeScript inference.
 import { createAuthSchema, Authz } from "@csilvas/convex-rebac";
 import { components } from "./_generated/api";
 
-export const authSchema = createAuthSchema({
+export type MyContext = {
+  timezone?: string;
+  active?: boolean;
+  userRank?: "novice" | "expert";
+};
+
+export const authSchema = createAuthSchema<MyContext>()({
   // Define dynamic conditions (ABAC)
   conditions: {
-    isBusinessHours: (ctx) => ctx.timezone === "EST",
-    isActive: (ctx) => ctx.active === true,
+    // 1. Conditions can return a boolean to allow/deny access
+    isBusinessHours: (ctx, { data }) => data.timezone === "EST",
+    isActive: (ctx, { data }) => data.active === true,
+
+    // 2. Conditions can also act as "middleware" by returning an object.
+    // This object is merged into the context (`data`) for all subsequent
+    // condition checks in the evaluation chain! You have full access to `ctx` (QueryCtx).
+    injectUserRank: async (ctx, { subject, data }) => {
+      // e.g. Query your database to fetch additional data
+      const user = await ctx.runQuery(components.api.users.get, {
+        id: subject.id,
+      });
+      return { userRank: user?.rank || "novice" };
+    },
+
+    // This condition relies on the `userRank` injected above
+    isExpert: (ctx, { data }) => data.userRank === "expert",
   },
 
   // Define your Entity Graph (ReBAC)
@@ -93,6 +114,9 @@ export const authSchema = createAuthSchema({
       permissions: {
         // Permissions can require conditions
         edit: [{ relation: "editor", condition: "isBusinessHours" }],
+
+        // A condition can rely on data injected by a previous condition in the evaluation chain!
+        delete: [{ relation: "editor", condition: "isExpert" }],
       },
     },
   },
@@ -136,10 +160,21 @@ export const createProject = mutation({
 });
 ```
 
-You can also attach conditions directly to the graph edges:
+You can also attach conditions directly to the graph edges. Edges in a path are
+evaluated first, allowing them to act as middleware that injects context for
+later conditions!
 
 ```typescript
-// This relationship is only valid if the context provides { active: true }
+// This edge uses our middleware condition to dynamically fetch and inject the user's rank
+await authz.addRelation(
+  ctx,
+  { type: "user", id: userId },
+  "editor",
+  { type: "project", id: projId },
+  { condition: "injectUserRank" },
+);
+
+// This edge is only valid if the explicit context provides { active: true }
 await authz.addRelation(
   ctx,
   { type: "user", id: userId },
@@ -185,7 +220,73 @@ export const getProjectData = query({
 });
 ```
 
-### 4. Fetching Lists
+### 4. React Hooks
+
+We provide a specialized hook to check permissions on the client, caching them
+using `useQuery` under the hood. To use `useCan`, you must expose a query
+handler using the `authz.checkPermissionFast` query and wrap your application in
+the `AuthzProvider`.
+
+```typescript
+// convex/queries.ts
+import { query } from "./_generated/server";
+import { authz } from "./authz";
+
+// Expose a public query to your frontend
+export const checkPermission = query({
+  args: {
+    permission: v.string(),
+    resource: v.object({ type: v.string(), id: v.string() }),
+    requestContext: v.any(), // Important if using MyContext!
+  },
+  handler: async (ctx, args) => {
+    // Determine subject from the auth context (e.g. convex auth)
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return false;
+
+    return await authz.can(
+      ctx,
+      { type: "user", id: identity.subject },
+      args.permission as any,
+      args.resource as any,
+      args.requestContext,
+    );
+  },
+});
+```
+
+Then in your React app:
+
+```tsx
+// app/providers.tsx
+import { AuthzProvider } from "@csilvas/convex-rebac/react";
+import { api } from "../convex/_generated/api";
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  return (
+    <AuthzProvider checkPermissionQuery={api.queries.checkPermission}>
+      {children}
+    </AuthzProvider>
+  );
+}
+
+// app/MyComponent.tsx
+import { useCan } from "@csilvas/convex-rebac/react";
+
+export function MyComponent({ projectId }: { projectId: string }) {
+  // Pass runtime context that aligns with `MyContext`
+  const canEdit = useCan(
+    "edit",
+    { type: "project", id: projectId },
+    { timezone: "EST" },
+  );
+
+  if (!canEdit) return <div>Access Denied</div>;
+  return <button>Edit Project</button>;
+}
+```
+
+### 5. Fetching Lists
 
 You can query the graph bi-directionally in O(1) time.
 
@@ -214,7 +315,7 @@ const users = await authz.listUsersWithAccess(
 // Returns: [{ userId: "user_456" }, ...]
 ```
 
-### 5. Cleaning Up
+### 6. Cleaning Up
 
 When an entity is deleted from your application, you must remove it from the
 authorization graph to prevent stale access and clean up the traversal cache.
