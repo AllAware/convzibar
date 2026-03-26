@@ -3,8 +3,13 @@ import { convexTest } from "convex-test";
 import schema from "../schema.js";
 import { api } from "../_generated/api.js";
 import type { GraphConfig } from "../types.js";
+import { register as registerWorkpool } from "@convex-dev/workpool/test";
 
-const setup = () => convexTest(schema, import.meta.glob("../**/*.ts"));
+const setup = () => {
+  const t = convexTest(schema, import.meta.glob("../**/*.ts"));
+  registerWorkpool(t, "workpool");
+  return t;
+};
 
 describe("ReBAC Core Engine (v3)", () => {
   test("direct relationships are correctly inserted into relationships and effectiveRelationships", async () => {
@@ -700,5 +705,84 @@ describe("ReBAC Core Engine (v3)", () => {
     });
 
     expect(rels.length).toBe(0); // Should not reach n4
+  });
+
+  test("asyncWrites correctly processes BFS via workpool", async () => {
+    const t = setup();
+    const graphConfig: GraphConfig = {
+      traversalRules: [
+        {
+          sourceObjectType: "project",
+          sourceRelation: "parent_org",
+          targetRelation: "admin",
+          derivedRelation: "editor",
+        },
+      ],
+      reverseEdges: {},
+    };
+
+    const user = { type: "user", id: "u_async" };
+    const org = { type: "org", id: "org_async" };
+    const project = { type: "project", id: "proj_async" };
+
+    // Add relation with asyncWrites: true
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: project,
+      relation: "parent_org",
+      object: org,
+      graphConfig,
+      asyncWrites: true,
+    });
+
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: user,
+      relation: "admin",
+      object: org,
+      graphConfig,
+      asyncWrites: true,
+    });
+
+    // Run workpool scheduled jobs
+    for (let i = 0; i < 10; i++) {
+      await t.finishInProgressScheduledFunctions();
+      // Sleep a tiny bit to allow event loop
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    const rels = await t.query(api.queries.checkPermissionFast, {
+      tenantId: "t1",
+      subject: user,
+      relations: ["editor"],
+      object: project,
+    });
+
+    expect(rels.length).toBe(1);
+    expect(rels[0].relation).toBe("editor");
+
+    // Remove relation with asyncWrites: true
+    await t.mutation(api.mutations.removeRelation, {
+      tenantId: "t1",
+      subject: user,
+      relation: "admin",
+      object: org,
+      graphConfig,
+      asyncWrites: true,
+    });
+
+    for (let i = 0; i < 10; i++) {
+      await t.finishInProgressScheduledFunctions();
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    const relsAfter = await t.query(api.queries.checkPermissionFast, {
+      tenantId: "t1",
+      subject: user,
+      relations: ["editor"],
+      object: project,
+    });
+
+    expect(relsAfter.length).toBe(0);
   });
 });

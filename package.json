@@ -98,5 +98,8 @@
     "vitest": "^4.1.0"
   },
   "types": "./dist/client/index.d.ts",
-  "module": "./dist/client/index.js"
+  "module": "./dist/client/index.js",
+  "dependencies": {
+    "@convex-dev/workpool": "^0.4.6"
+  }
 }

@@ -13,6 +13,7 @@ import type * as mutations from "../mutations.js";
 import type * as queries from "../queries.js";
 import type * as types from "../types.js";
 import type * as validators from "../validators.js";
+import type * as workpool from "../workpool.js";
 
 import type {
   ApiFromModules,
@@ -26,6 +27,7 @@ declare const fullApi: ApiFromModules<{
   queries: typeof queries;
   types: typeof types;
   validators: typeof validators;
+  workpool: typeof workpool;
 }>;
 
 /**
@@ -54,4 +56,6 @@ export declare const internal: FilterApi<
   FunctionReference<any, "internal">
 >;
 
-export declare const components: {};
+export declare const components: {
+  workpool: import("@convex-dev/workpool/_generated/component.js").ComponentApi<"workpool">;
+};

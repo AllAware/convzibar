@@ -161,6 +161,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       defaultActorId?: string;
       enableAuditLog?: boolean;
       maxWriteDepth?: number;
+      asyncWrites?: boolean;
     },
   ) {
     this.graphConfig = parseSchemaToGraphConfig(options.schema);
@@ -519,6 +520,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       createdBy: options?.createdBy ?? this.options.defaultActorId,
       graphConfig: this.graphConfig,
       enableAuditLog: this.options.enableAuditLog,
+      asyncWrites: this.options.asyncWrites,
     });
   }
 
@@ -543,6 +545,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       actorId: actorId ?? this.options.defaultActorId,
       graphConfig: this.graphConfig,
       enableAuditLog: this.options.enableAuditLog,
+      asyncWrites: this.options.asyncWrites,
     });
   }
 
@@ -560,6 +563,7 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       actorId: actorId ?? this.options.defaultActorId,
       graphConfig: this.graphConfig,
       enableAuditLog: this.options.enableAuditLog,
+      asyncWrites: this.options.asyncWrites,
     });
   }
 }
