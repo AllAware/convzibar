@@ -572,4 +572,133 @@ describe("ReBAC Core Engine (v3)", () => {
     });
     expect(relsProject.length).toBe(0);
   });
+
+  test("cycle detection prevents infinite loops", async () => {
+    const t = setup();
+
+    const graphConfig: GraphConfig = {
+      traversalRules: [
+        {
+          sourceObjectType: "node",
+          sourceRelation: "link",
+          targetRelation: "link",
+          derivedRelation: "link",
+        },
+      ],
+      reverseEdges: {},
+    };
+
+    const n1 = { type: "node", id: "1" };
+    const n2 = { type: "node", id: "2" };
+
+    // If cycle detection doesn't work, deriving link -> link -> link will infinite loop
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: n1,
+      relation: "link",
+      object: n2,
+      graphConfig,
+    });
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: n2,
+      relation: "link",
+      object: n2,
+      graphConfig,
+    });
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: n2,
+      relation: "link",
+      object: n1,
+      graphConfig,
+    });
+
+    const rels = await t.query(api.queries.checkPermissionFast, {
+      tenantId: "t1",
+      subject: n1,
+      relations: ["link"],
+      object: n1,
+    });
+
+    expect(rels).toBeDefined();
+  });
+
+  test("maxWriteDepth halts deep derivations", async () => {
+    const t = setup();
+
+    const graphConfig: GraphConfig = {
+      traversalRules: [
+        {
+          sourceObjectType: "node",
+          sourceRelation: "next",
+          targetRelation: "reachable",
+          derivedRelation: "reachable",
+        },
+      ],
+      reverseEdges: {},
+      maxWriteDepth: 2, // Severely limit depth
+    };
+
+    const n1 = { type: "node", id: "1" };
+    const n2 = { type: "node", id: "2" };
+    const n3 = { type: "node", id: "3" };
+    const n4 = { type: "node", id: "4" };
+
+    // Base connections
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: n1,
+      relation: "reachable",
+      object: n2,
+      graphConfig,
+    });
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: n2,
+      relation: "reachable",
+      object: n3,
+      graphConfig,
+    });
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: n3,
+      relation: "reachable",
+      object: n4,
+      graphConfig,
+    });
+
+    // Link them together with next
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: n1,
+      relation: "next",
+      object: n2,
+      graphConfig,
+    });
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: n2,
+      relation: "next",
+      object: n3,
+      graphConfig,
+    });
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: n3,
+      relation: "next",
+      object: n4,
+      graphConfig,
+    });
+
+    // Because maxWriteDepth is 2, the derivation should stop before n1 reaches n4
+    const rels = await t.query(api.queries.checkPermissionFast, {
+      tenantId: "t1",
+      subject: n1,
+      relations: ["reachable"],
+      object: n4,
+    });
+
+    expect(rels.length).toBe(0); // Should not reach n4
+  });
 });

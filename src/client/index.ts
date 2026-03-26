@@ -160,9 +160,13 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       tenantId: string;
       defaultActorId?: string;
       enableAuditLog?: boolean;
+      maxWriteDepth?: number;
     },
   ) {
     this.graphConfig = parseSchemaToGraphConfig(options.schema);
+    if (options.maxWriteDepth !== undefined) {
+      this.graphConfig.maxWriteDepth = options.maxWriteDepth;
+    }
   }
 
   withTenant(tenantId: string): Authz<Schema, Data> {

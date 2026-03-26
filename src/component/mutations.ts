@@ -89,14 +89,18 @@ export const addRelation = mutation({
       relation: string;
       object: { type: string; id: string };
       path: any;
+      depth: number;
     }> = [
       {
         subject,
         relation,
         object,
         path: pathItem,
+        depth: 1,
       },
     ];
+
+    const maxWriteDepth = graphConfig.maxWriteDepth ?? 10;
 
     const reverseRel = graphConfig.reverseEdges?.[object.type]?.[relation];
     if (reverseRel) {
@@ -134,6 +138,7 @@ export const addRelation = mutation({
           path: {
             tokens: [revId],
           },
+          depth: 1,
         });
       }
     }
@@ -220,6 +225,13 @@ export const addRelation = mutation({
                   ...schemaCondition,
                 ];
 
+                const hasCycle = current.path.tokens.some((t: string) =>
+                  matchPath.tokens.includes(t),
+                );
+                if (hasCycle) continue;
+
+                if (current.depth >= maxWriteDepth) continue;
+
                 queue.push({
                   subject: derivedSubject,
                   relation: rule.derivedRelation,
@@ -236,6 +248,7 @@ export const addRelation = mutation({
                         ? combinedConditions
                         : undefined,
                   },
+                  depth: current.depth + 1,
                 });
               }
             }
@@ -272,6 +285,13 @@ export const addRelation = mutation({
                     ...schemaCondition,
                   ];
 
+                  const hasCycle = current.path.tokens.some((t: string) =>
+                    matchPath.tokens.includes(t),
+                  );
+                  if (hasCycle) continue;
+
+                  if (current.depth >= maxWriteDepth) continue;
+
                   queue.push({
                     subject: derivedSubject,
                     relation: rule.derivedRelation,
@@ -288,6 +308,7 @@ export const addRelation = mutation({
                           ? combinedConditions
                           : undefined,
                     },
+                    depth: current.depth + 1,
                   });
                 }
               }
