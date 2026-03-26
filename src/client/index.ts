@@ -233,6 +233,60 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     }
   }
 
+  private async validatePath(
+    path: any,
+    targetDef: { relation: string; condition?: string } | undefined,
+    ctx: QueryCtx | ActionCtx | MutationCtx,
+    subject: SubjectOrObject,
+    object: SubjectOrObject,
+    permission: string,
+    requestContext?: Data,
+  ): Promise<boolean> {
+    let currentData = {
+      ...(requestContext || {}),
+      ...(path.conditions?.[0]?.conditionContext || {}),
+    } as Data;
+
+    if (path.conditions) {
+      for (const c of path.conditions) {
+        // Include context from the relationship edge
+        if (c !== path.conditions[0] && c.conditionContext) {
+          currentData = { ...currentData, ...c.conditionContext };
+        }
+
+        const ok = await this.evaluateCondition(
+          c.condition,
+          ctx,
+          subject,
+          object,
+          permission,
+          currentData,
+        );
+        if (ok === false) {
+          return false;
+        } else if (typeof ok === "object" && ok !== null) {
+          currentData = { ...currentData, ...ok };
+        }
+      }
+    }
+
+    if (targetDef?.condition) {
+      const ok = await this.evaluateCondition(
+        targetDef.condition,
+        ctx,
+        subject,
+        object,
+        permission,
+        currentData,
+      );
+      if (ok === false) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   async can<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
@@ -263,51 +317,17 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
       const targetDef = targets.find((t) => t.relation === eff.relation);
 
       for (const path of eff.paths) {
-        let pathValid = true;
-        let currentData = {
-          ...(requestContext || {}),
-          ...(path.conditions?.[0]?.conditionContext || {}),
-        } as Data;
+        const isValid = await this.validatePath(
+          path,
+          targetDef,
+          ctx,
+          subject,
+          object,
+          permission,
+          requestContext,
+        );
 
-        if (path.conditions) {
-          for (const c of path.conditions) {
-            // Include context from the relationship edge
-            if (c !== path.conditions[0] && c.conditionContext) {
-              currentData = { ...currentData, ...c.conditionContext };
-            }
-
-            const ok = await this.evaluateCondition(
-              c.condition,
-              ctx,
-              subject,
-              object,
-              permission,
-              currentData,
-            );
-            if (ok === false) {
-              pathValid = false;
-              break;
-            } else if (typeof ok === "object" && ok !== null) {
-              currentData = { ...currentData, ...ok };
-            }
-          }
-        }
-
-        if (pathValid && targetDef?.condition) {
-          const ok = await this.evaluateCondition(
-            targetDef.condition,
-            ctx,
-            subject,
-            object,
-            permission,
-            currentData,
-          );
-          if (ok === false) {
-            pathValid = false;
-          }
-        }
-
-        if (pathValid) return true;
+        if (isValid) return true;
       }
     }
 
@@ -368,66 +388,34 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     const results: Array<{ objectId: string }> = [];
 
     for (const eff of effectiveRels) {
+      // Early deduplication optimization: Skip if we already approved this objectId
+      if (results.some((r) => r.objectId === eff.objectId)) {
+        continue;
+      }
+
       const targetDef = targets.find((t) => t.relation === eff.relation);
       let objectValid = false;
 
       for (const path of eff.paths) {
-        let pathValid = true;
         const object = { type: objectType, id: eff.objectId };
-        let currentData = {
-          ...(requestContext || {}),
-          ...(path.conditions?.[0]?.conditionContext || {}),
-        } as Data;
+        const isValid = await this.validatePath(
+          path,
+          targetDef,
+          ctx,
+          subject,
+          object,
+          permission,
+          requestContext,
+        );
 
-        if (path.conditions) {
-          for (const c of path.conditions) {
-            // Include context from the relationship edge
-            if (c !== path.conditions[0] && c.conditionContext) {
-              currentData = { ...currentData, ...c.conditionContext };
-            }
-
-            const ok = await this.evaluateCondition(
-              c.condition,
-              ctx,
-              subject,
-              object,
-              permission,
-              currentData,
-            );
-            if (ok === false) {
-              pathValid = false;
-              break;
-            } else if (typeof ok === "object" && ok !== null) {
-              currentData = { ...currentData, ...ok };
-            }
-          }
-        }
-
-        if (pathValid && targetDef?.condition) {
-          const ok = await this.evaluateCondition(
-            targetDef.condition,
-            ctx,
-            subject,
-            object,
-            permission,
-            currentData,
-          );
-          if (ok === false) {
-            pathValid = false;
-          }
-        }
-
-        if (pathValid) {
+        if (isValid) {
           objectValid = true;
           break;
         }
       }
 
       if (objectValid) {
-        // Dedup
-        if (!results.find((r) => r.objectId === eff.objectId)) {
-          results.push({ objectId: eff.objectId });
-        }
+        results.push({ objectId: eff.objectId });
       }
     }
 
@@ -460,65 +448,34 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     const results: Array<{ userId: string }> = [];
 
     for (const eff of effectiveRels) {
+      // Early deduplication optimization: Skip if we already approved this userId
+      if (results.some((r) => r.userId === eff.subjectId)) {
+        continue;
+      }
+
       const targetDef = targets.find((t) => t.relation === eff.relation);
       let subjectValid = false;
 
       for (const path of eff.paths) {
-        let pathValid = true;
         const subject = { type: eff.subjectType, id: eff.subjectId };
-        let currentData = {
-          ...(requestContext || {}),
-          ...(path.conditions?.[0]?.conditionContext || {}),
-        } as Data;
+        const isValid = await this.validatePath(
+          path,
+          targetDef,
+          ctx,
+          subject,
+          object,
+          permission,
+          requestContext,
+        );
 
-        if (path.conditions) {
-          for (const c of path.conditions) {
-            // Include context from the relationship edge
-            if (c !== path.conditions[0] && c.conditionContext) {
-              currentData = { ...currentData, ...c.conditionContext };
-            }
-
-            const ok = await this.evaluateCondition(
-              c.condition,
-              ctx,
-              subject,
-              object,
-              permission,
-              currentData,
-            );
-            if (ok === false) {
-              pathValid = false;
-              break;
-            } else if (typeof ok === "object" && ok !== null) {
-              currentData = { ...currentData, ...ok };
-            }
-          }
-        }
-
-        if (pathValid && targetDef?.condition) {
-          const ok = await this.evaluateCondition(
-            targetDef.condition,
-            ctx,
-            subject,
-            object,
-            permission,
-            currentData,
-          );
-          if (ok === false) {
-            pathValid = false;
-          }
-        }
-
-        if (pathValid) {
+        if (isValid) {
           subjectValid = true;
           break;
         }
       }
 
       if (subjectValid) {
-        if (!results.find((r) => r.userId === eff.subjectId)) {
-          results.push({ userId: eff.subjectId });
-        }
+        results.push({ userId: eff.subjectId });
       }
     }
 
