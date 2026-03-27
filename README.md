@@ -245,11 +245,23 @@ export const checkPermission = query({
 });
 ```
 
-Then in your React app:
+Then in your React app, you can generate fully type-safe hooks by passing
+`typeof authSchema` to `createReactAuthz`:
+
+```tsx
+// lib/authz.ts
+import { createReactAuthz } from "@csilvas/convzibar/react";
+import type { authSchema } from "../convex/zbar"; // Import your schema type
+
+export const { AuthzProvider, useCan, usePermissions } =
+  createReactAuthz<typeof authSchema>();
+```
+
+Now use your generated provider and hooks anywhere:
 
 ```tsx
 // app/providers.tsx
-import { AuthzProvider } from "@csilvas/convzibar/react";
+import { AuthzProvider } from "../lib/authz";
 import { api } from "../convex/_generated/api";
 
 export function Providers({ children }: { children: React.ReactNode }) {
@@ -261,7 +273,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
 }
 
 // app/MyComponent.tsx
-import { useCan } from "@csilvas/convzibar/react";
+import { useCan } from "../lib/authz";
 
 export function MyComponent({ projectId }: { projectId: string }) {
   // Pass runtime context that aligns with `MyContext`
