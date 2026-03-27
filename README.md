@@ -336,9 +336,21 @@ const relationships = await zbar.getRelationships(
   ctx,
   { type: "user", id: userId },
   { type: "project", id: projId },
-  { timezone: "EST" },
+  {
+    requestContext: { timezone: "EST" }, // Optional conditions context
+    includeInherited: true, // (default) Expands inheritance
+  },
 );
 // Returns: ["viewer", "editor", "owner"] (respects local inheritance!)
+
+// To get only explicit relations and exclude inherited ones:
+const explicitRels = await zbar.getRelationships(
+  ctx,
+  { type: "user", id: userId },
+  { type: "project", id: projId },
+  { includeInherited: false },
+);
+// Returns: ["owner"]
 ```
 
 ### 6. Cleaning Up

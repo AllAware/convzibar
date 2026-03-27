@@ -515,13 +515,18 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     ctx: QueryCtx | ActionCtx,
     subject: { type: SubjectType; id: string },
     object: { type: ObjectType; id: string },
-    requestContext?: Data,
+    options?: {
+      requestContext?: Data;
+      includeInherited?: boolean;
+    },
   ): Promise<Array<EntityRelations<Schema, ObjectType>>> {
     const objectRelations = Object.keys(
       this.options.schema.entities[object.type]?.relations || {},
     ) as Array<EntityRelations<Schema, ObjectType>>;
 
     if (objectRelations.length === 0) return [];
+
+    const includeInherited = options?.includeInherited ?? true;
 
     // 1. Expand all possible relations to find every target we might need
     const relationTargets = new Map<
@@ -531,7 +536,9 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     const allAcceptableRelations = new Set<string>();
 
     for (const rel of objectRelations) {
-      const targets = this.resolveRelationInheritance(object.type, rel);
+      const targets = includeInherited
+        ? this.resolveRelationInheritance(object.type, rel)
+        : [{ relation: rel, condition: undefined }];
       relationTargets.set(rel, targets);
       for (const t of targets) {
         allAcceptableRelations.add(t.relation);
@@ -570,7 +577,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
             subject,
             object,
             rel,
-            requestContext,
+            options?.requestContext,
           );
 
           if (isValid) {
