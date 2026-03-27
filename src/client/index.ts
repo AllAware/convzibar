@@ -238,7 +238,7 @@ export class PermissionError extends Error {
 
 /**
  * Create a new Authz client instance.
- * @param component The imported convex_rebac component
+ * @param component The imported convzibar component
  * @param options Configuration options
  * @returns Authz client
  */

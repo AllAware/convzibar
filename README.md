@@ -1,4 +1,4 @@
-# @csilvas/convex-rebac
+# @csilvas/convzibar
 
 A high-performance, strictly typed ReBAC and ABAC authorization engine built
 specifically for Convex, heavily inspired by Google Zanzibar.
@@ -31,17 +31,17 @@ write amplification.
 ## Installation
 
 ```bash
-npm install @csilvas/convex-rebac
+npm install @csilvas/convzibar
 ```
 
 Register the component in your `convex.config.ts`:
 
 ```typescript
 import { defineApp } from "convex/server";
-import authz from "@csilvas/convex-rebac/convex.config";
+import zbar from "@csilvas/convzibar/convex.config";
 
 const app = defineApp();
-app.use(authz);
+app.use(zbar);
 export default app;
 ```
 
@@ -49,11 +49,11 @@ export default app;
 
 ### 1. Define your Authorization Schema
 
-Create a shared file (e.g., `convex/authz.ts`) to define your schema. This
+Create a shared file (e.g., `convex/zbar.ts`) to define your schema. This
 serves as the single source of truth and powers the TypeScript inference.
 
 ```typescript
-import { createAuthSchema, Authz } from "@csilvas/convex-rebac";
+import { createAuthSchema, Authz } from "@csilvas/convzibar";
 import { components } from "./_generated/api";
 
 export type MyContext = {
@@ -123,7 +123,7 @@ export const authSchema = createAuthSchema<MyContext>()({
 });
 
 // Export the strictly typed client instance
-export const authz = new Authz(components.convex_rebac, {
+export const zbar = new Authz(components.convzibar, {
   schema: authSchema,
   tenantId: "default", // Useful for multi-tenant isolation
 });
@@ -137,14 +137,14 @@ lightning-fast reads.
 
 ```typescript
 import { mutation } from "./_generated/server";
-import { authz } from "./authz";
+import { zbar } from "./zbar";
 
 export const createProject = mutation({
   handler: async (ctx, args) => {
     // ... create project and org in your db ...
 
     // Link the project to the org
-    await authz.addRelation(
+    await zbar.addRelation(
       ctx,
       { type: "project", id: projId },
       "parent_org",
@@ -152,7 +152,7 @@ export const createProject = mutation({
     );
 
     // Add a user as an admin to the org
-    await authz.addRelation(ctx, { type: "user", id: userId }, "admin", {
+    await zbar.addRelation(ctx, { type: "user", id: userId }, "admin", {
       type: "org",
       id: orgId,
     });
@@ -166,7 +166,7 @@ later conditions!
 
 ```typescript
 // This edge uses our middleware condition to dynamically fetch and inject the user's rank
-await authz.addRelation(
+await zbar.addRelation(
   ctx,
   { type: "user", id: userId },
   "editor",
@@ -175,7 +175,7 @@ await authz.addRelation(
 );
 
 // This edge is only valid if the explicit context provides { active: true }
-await authz.addRelation(
+await zbar.addRelation(
   ctx,
   { type: "user", id: userId },
   "viewer",
@@ -191,12 +191,12 @@ infers local inheritance and evaluates conditions dynamically.
 
 ```typescript
 import { query } from "./_generated/server";
-import { authz } from "./authz";
+import { zbar } from "./zbar";
 
 export const getProjectData = query({
   handler: async (ctx, args) => {
     // Check permission (throws Error if denied)
-    await authz.require(
+    await zbar.require(
       ctx,
       { type: "user", id: userId },
       "edit",
@@ -205,7 +205,7 @@ export const getProjectData = query({
     );
 
     // Or safely check boolean
-    const canEdit = await authz.can(
+    const canEdit = await zbar.can(
       ctx,
       { type: "user", id: userId },
       "edit",
@@ -224,13 +224,13 @@ export const getProjectData = query({
 
 We provide a specialized hook to check permissions on the client, caching them
 using `useQuery` under the hood. To use `useCan`, you must expose a query
-handler using the `authz.checkPermissionFast` query and wrap your application in
+handler using the `zbar.checkPermissionFast` query and wrap your application in
 the `AuthzProvider`.
 
 ```typescript
 // convex/queries.ts
 import { query } from "./_generated/server";
-import { authz } from "./authz";
+import { zbar } from "./zbar";
 
 // Expose a public query to your frontend
 export const checkPermission = query({
@@ -244,7 +244,7 @@ export const checkPermission = query({
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) return false;
 
-    return await authz.can(
+    return await zbar.can(
       ctx,
       { type: "user", id: identity.subject },
       args.permission as any,
@@ -259,7 +259,7 @@ Then in your React app:
 
 ```tsx
 // app/providers.tsx
-import { AuthzProvider } from "@csilvas/convex-rebac/react";
+import { AuthzProvider } from "@csilvas/convzibar/react";
 import { api } from "../convex/_generated/api";
 
 export function Providers({ children }: { children: React.ReactNode }) {
@@ -271,7 +271,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
 }
 
 // app/MyComponent.tsx
-import { useCan } from "@csilvas/convex-rebac/react";
+import { useCan } from "@csilvas/convzibar/react";
 
 export function MyComponent({ projectId }: { projectId: string }) {
   // Pass runtime context that aligns with `MyContext`
@@ -293,7 +293,7 @@ You can query the graph bi-directionally in O(1) time.
 **Find all objects a user can access:**
 
 ```typescript
-const projects = await authz.listAccessibleObjects(
+const projects = await zbar.listAccessibleObjects(
   ctx,
   { type: "user", id: userId },
   "edit",
@@ -306,7 +306,7 @@ const projects = await authz.listAccessibleObjects(
 **Find all users who have access to an object:**
 
 ```typescript
-const users = await authz.listUsersWithAccess(
+const users = await zbar.listUsersWithAccess(
   ctx,
   { type: "project", id: projId },
   "edit",
@@ -325,7 +325,7 @@ export const deleteProject = mutation({
   handler: async (ctx, args) => {
     // Scours the graph for any incoming or outgoing relationships involving this project,
     // deletes them, and safely cascade-deletes all derived paths in the cache.
-    await authz.deleteEntity(ctx, { type: "project", id: projId });
+    await zbar.deleteEntity(ctx, { type: "project", id: projId });
   },
 });
 ```

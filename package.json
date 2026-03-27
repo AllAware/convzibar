@@ -1,10 +1,10 @@
 {
-  "name": "@csilvas/convex-rebac",
+  "name": "@csilvas/convzibar",
   "description": "A highly-optimized ReBAC and ABAC authorization engine tailored for Convex, inspired by Google Zanzibar.",
-  "repository": "github:csilvas/convex-rebac",
-  "homepage": "https://github.com/csilvas/convex-rebac#readme",
+  "repository": "github:csilvas/convzibar",
+  "homepage": "https://github.com/csilvas/convzibar#readme",
   "bugs": {
-    "url": "https://github.com/csilvas/convex-rebac/issues"
+    "url": "https://github.com/csilvas/convzibar/issues"
   },
   "version": "1.0.0",
   "license": "Apache-2.0",
