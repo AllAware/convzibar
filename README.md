@@ -24,7 +24,7 @@ write amplification.
   evaluated with injected runtime context.
 - **Bidirectional Relationships:** Automatically insert and maintain reverse
   edges (e.g., `org -> owner_of_org -> user`) to allow reverse queries.
-- **Perfect TypeScript Inference:** The `createAuthSchema` definition provides
+- **Perfect TypeScript Inference:** The `createZbarSchema` definition provides
   100% strict type-checking and autocomplete for all subjects, objects,
   relations, and permissions without any codegen steps.
 
@@ -53,7 +53,7 @@ Create a shared file (e.g., `convex/zbar.ts`) to define your schema. This serves
 as the single source of truth and powers the TypeScript inference.
 
 ```typescript
-import { createAuthSchema, Authz } from "@csilvas/convzibar";
+import { createZbarSchema, Zbar } from "@csilvas/convzibar";
 import { components } from "./_generated/api";
 
 export type MyContext = {
@@ -62,7 +62,7 @@ export type MyContext = {
   userRank?: "novice" | "expert";
 };
 
-export const authSchema = createAuthSchema<MyContext>()
+export const zbarSchema = createZbarSchema<MyContext>()
   // Define dynamic conditions (ABAC)
   // 1. Conditions can return a boolean to allow/deny access
   .condition("isBusinessHours", (ctx, { data }) => data.timezone === "EST")
@@ -115,8 +115,8 @@ export const authSchema = createAuthSchema<MyContext>()
   .build();
 
 // Export the strictly typed client instance
-export const zbar = new Authz(components.convzibar, {
-  schema: authSchema,
+export const zbar = new Zbar(components.convzibar, {
+  schema: zbarSchema,
   tenantId: "default", // Useful for multi-tenant isolation
 });
 ```
@@ -215,7 +215,7 @@ export const getProjectData = query({
 We provide a specialized hook to check permissions on the client, caching them
 using `useQuery` under the hood. To use `useCan`, you must expose a query
 handler using the `zbar.checkPermissionFast` query and wrap your application in
-the `AuthzProvider`.
+the `ZbarProvider`.
 
 ```typescript
 // convex/queries.ts
@@ -246,34 +246,34 @@ export const checkPermission = query({
 ```
 
 Then in your React app, you can generate fully type-safe hooks by passing
-`typeof authSchema` to `createReactAuthz`:
+`typeof zbarSchema` to `createReactZbar`:
 
 ```tsx
-// lib/authz.ts
-import { createReactAuthz } from "@csilvas/convzibar/react";
-import type { authSchema } from "../convex/zbar"; // Import your schema type
+// lib/zbar.ts
+import { createReactZbar } from "@csilvas/convzibar/react";
+import type { zbarSchema } from "../convex/zbar"; // Import your schema type
 
-export const { AuthzProvider, useCan, usePermissions } =
-  createReactAuthz<typeof authSchema>();
+export const { ZbarProvider, useCan, usePermissions } =
+  createReactZbar<typeof zbarSchema>();
 ```
 
 Now use your generated provider and hooks anywhere:
 
 ```tsx
 // app/providers.tsx
-import { AuthzProvider } from "../lib/authz";
+import { ZbarProvider } from "../lib/zbar";
 import { api } from "../convex/_generated/api";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
-    <AuthzProvider checkPermissionQuery={api.queries.checkPermission}>
+    <ZbarProvider checkPermissionQuery={api.queries.checkPermission}>
       {children}
-    </AuthzProvider>
+    </ZbarProvider>
   );
 }
 
 // app/MyComponent.tsx
-import { useCan } from "../lib/authz";
+import { useCan } from "../lib/zbar";
 
 export function MyComponent({ projectId }: { projectId: string }) {
   // Pass runtime context that aligns with `MyContext`

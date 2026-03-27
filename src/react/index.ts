@@ -3,37 +3,37 @@
 import React, { createContext, useContext } from "react";
 import type { ReactNode } from "react";
 import { useQuery } from "convex/react";
-import type { AuthSchema, EntityPermissions } from "../client/index.js";
+import type { ZbarSchema, EntityPermissions } from "../client/index.js";
 
 // Utility to infer the Data type from the Schema
-type InferData<Schema extends AuthSchema<any>> =
-  Schema extends AuthSchema<infer D> ? D : any;
+type InferData<Schema extends ZbarSchema<any>> =
+  Schema extends ZbarSchema<infer D> ? D : any;
 
-export interface AuthzContextType {
+export interface ZbarContextType {
   checkPermissionQuery: any;
   checkPermissionsQuery?: any;
 }
 
-export interface AuthzProviderProps {
+export interface ZbarProviderProps {
   checkPermissionQuery: any;
   checkPermissionsQuery?: any;
   children: ReactNode;
 }
 
-export function createReactAuthz<Schema extends AuthSchema<any>>(
+export function createReactZbar<Schema extends ZbarSchema<any>>(
   _schema?: Schema,
 ) {
   type Data = InferData<Schema>;
 
-  const AuthzContext = createContext<AuthzContextType | null>(null);
+  const ZbarContext = createContext<ZbarContextType | null>(null);
 
-  function AuthzProvider({
+  function ZbarProvider({
     checkPermissionQuery,
     checkPermissionsQuery,
     children,
-  }: AuthzProviderProps) {
+  }: ZbarProviderProps) {
     return React.createElement(
-      AuthzContext.Provider,
+      ZbarContext.Provider,
       { value: { checkPermissionQuery, checkPermissionsQuery } },
       children,
     );
@@ -47,9 +47,9 @@ export function createReactAuthz<Schema extends AuthSchema<any>>(
     resource: { type: ObjectType; id: string },
     requestContext?: Data,
   ): boolean {
-    const ctx = useContext(AuthzContext);
+    const ctx = useContext(ZbarContext);
     if (!ctx) {
-      throw new Error("useCan must be used within an AuthzProvider");
+      throw new Error("useCan must be used within an ZbarProvider");
     }
 
     // The fallback is `false` while loading.
@@ -70,14 +70,14 @@ export function createReactAuthz<Schema extends AuthSchema<any>>(
     permissions: Permission[],
     requestContext?: Data,
   ): Record<Permission, boolean> {
-    const ctx = useContext(AuthzContext);
+    const ctx = useContext(ZbarContext);
     if (!ctx) {
-      throw new Error("usePermissions must be used within an AuthzProvider");
+      throw new Error("usePermissions must be used within an ZbarProvider");
     }
 
     if (!ctx.checkPermissionsQuery) {
       throw new Error(
-        "usePermissions requires checkPermissionsQuery to be passed to AuthzProvider",
+        "usePermissions requires checkPermissionsQuery to be passed to ZbarProvider",
       );
     }
 
@@ -90,5 +90,5 @@ export function createReactAuthz<Schema extends AuthSchema<any>>(
     return result ?? ({} as Record<Permission, boolean>);
   }
 
-  return { AuthzProvider, useCan, usePermissions };
+  return { ZbarProvider, useCan, usePermissions };
 }

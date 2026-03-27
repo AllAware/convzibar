@@ -43,12 +43,12 @@ export interface EntityDefinition {
   >;
 }
 
-export interface AuthSchema<Data = any> {
+export interface ZbarSchema<Data = any> {
   conditions?: Record<string, ConditionFunction<Data>>;
   entities: Record<string, EntityDefinition>;
 }
 
-export type BuiltAuthSchema<
+export type BuiltZbarSchema<
   Data,
   Conditions extends Record<string, any>,
   Entities extends Record<
@@ -180,12 +180,12 @@ export class SchemaBuilder<
     return this as any;
   }
 
-  build(): BuiltAuthSchema<Data, Conditions, Entities> {
+  build(): BuiltZbarSchema<Data, Conditions, Entities> {
     return this._schema;
   }
 }
 
-export function createAuthSchema<Data = any>() {
+export function createZbarSchema<Data = any>() {
   return new SchemaBuilder<Data>();
 }
 
@@ -206,20 +206,20 @@ export interface SubjectOrObject {
 }
 
 export type EntityPermissions<
-  Schema extends AuthSchema,
+  Schema extends ZbarSchema,
   ObjectType extends keyof Schema["entities"],
 > = Schema["entities"][ObjectType] extends { permissions: infer P }
   ? keyof P & string
   : never;
 
 export type EntityRelations<
-  Schema extends AuthSchema,
+  Schema extends ZbarSchema,
   ObjectType extends keyof Schema["entities"],
 > = Schema["entities"][ObjectType] extends { relations: infer R }
   ? keyof R & string
   : never;
 
-export type SchemaConditions<Schema extends AuthSchema<any>> = Schema extends {
+export type SchemaConditions<Schema extends ZbarSchema<any>> = Schema extends {
   conditions: infer C;
 }
   ? keyof C & string
@@ -237,12 +237,12 @@ export class PermissionError extends Error {
 // ============================================================================
 
 /**
- * Create a new Authz client instance.
+ * Create a new Zbar client instance.
  * @param component The imported convzibar component
  * @param options Configuration options
- * @returns Authz client
+ * @returns Zbar client
  */
-export function createAuthz<Schema extends AuthSchema<Data>, Data = any>(
+export function createZbar<Schema extends ZbarSchema<Data>, Data = any>(
   component: any,
   options: {
     schema: Schema;
@@ -253,10 +253,10 @@ export function createAuthz<Schema extends AuthSchema<Data>, Data = any>(
     asyncWrites?: boolean;
   },
 ) {
-  return new Authz<Schema, Data>(component, options);
+  return new Zbar<Schema, Data>(component, options);
 }
 
-export class Authz<Schema extends AuthSchema<Data>, Data = any> {
+export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
   private graphConfig: GraphConfig;
   private permissionRelationsCache = new Map<
     string,
@@ -282,8 +282,8 @@ export class Authz<Schema extends AuthSchema<Data>, Data = any> {
     this.options.asyncWrites = options.asyncWrites ?? true;
   }
 
-  withTenant(tenantId: string): Authz<Schema, Data> {
-    return new Authz<Schema, Data>(this.component, {
+  withTenant(tenantId: string): Zbar<Schema, Data> {
+    return new Zbar<Schema, Data>(this.component, {
       ...this.options,
       tenantId,
     });
