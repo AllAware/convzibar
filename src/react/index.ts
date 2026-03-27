@@ -140,6 +140,7 @@ export function createReactZbar<Schema extends ZbarSchema<any>>(
   >(
     resource: { type: ObjectType; id: string },
     requestContext?: Data,
+    options?: { includeInherited?: boolean },
   ): Array<EntityRelations<Schema, ObjectType>> {
     const ctx = useContext(ZbarContext);
     if (!ctx) {
@@ -155,6 +156,7 @@ export function createReactZbar<Schema extends ZbarSchema<any>>(
     const result = useQuery(ctx.getRelationshipsQuery, {
       resource,
       requestContext,
+      options,
     });
 
     return result ?? [];

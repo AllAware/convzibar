@@ -515,8 +515,8 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     ctx: QueryCtx | ActionCtx,
     subject: { type: SubjectType; id: string },
     object: { type: ObjectType; id: string },
+    requestContext?: Data,
     options?: {
-      requestContext?: Data;
       includeInherited?: boolean;
     },
   ): Promise<Array<EntityRelations<Schema, ObjectType>>> {
@@ -526,7 +526,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
 
     if (objectRelations.length === 0) return [];
 
-    const includeInherited = options?.includeInherited ?? true;
+    const includeInherited = options?.includeInherited ?? false;
 
     // 1. Expand all possible relations to find every target we might need
     const relationTargets = new Map<
@@ -577,7 +577,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
             subject,
             object,
             rel,
-            options?.requestContext,
+            requestContext,
           );
 
           if (isValid) {

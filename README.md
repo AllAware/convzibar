@@ -1,4 +1,4 @@
-# @csilvas/convzibar
+# Convzibar (Convex x Zanzibar)
 
 A high-performance, strictly typed ReBAC and ABAC authorization engine built
 specifically for Convex, heavily inspired by Google Zanzibar.
@@ -332,25 +332,22 @@ const isEditor = await zbar.hasRelationship(
 **Get all valid relationships a subject has on an object:**
 
 ```typescript
-const relationships = await zbar.getRelationships(
-  ctx,
-  { type: "user", id: userId },
-  { type: "project", id: projId },
-  {
-    requestContext: { timezone: "EST" }, // Optional conditions context
-    includeInherited: true, // (default) Expands inheritance
-  },
-);
-// Returns: ["viewer", "editor", "owner"] (respects local inheritance!)
-
-// To get only explicit relations and exclude inherited ones:
+// To get only explicit relations and exclude inherited ones (default):
 const explicitRels = await zbar.getRelationships(
   ctx,
   { type: "user", id: userId },
   { type: "project", id: projId },
-  { includeInherited: false },
 );
 // Returns: ["owner"]
+
+const relationships = await zbar.getRelationships(
+  ctx,
+  { type: "user", id: userId },
+  { type: "project", id: projId },
+  { timezone: "EST" }, // Optional conditions context
+  { includeInherited: true }, // Expands inheritance
+);
+// Returns: ["viewer", "editor", "owner"] (respects local inheritance!)
 ```
 
 ### 6. Cleaning Up

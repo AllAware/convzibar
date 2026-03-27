@@ -440,17 +440,17 @@ describe("Client API & Read-Time Inference", () => {
 
     await zbar.addRelation(ctx, ownerUser, "owner", org);
 
+    // Should ONLY return owner by default (includeInherited is false)
+    const explicitRels = await zbar.getRelationships(ctx, ownerUser, org);
+    expect(explicitRels.length).toBe(1);
+    expect(explicitRels).toEqual(["owner"]);
+
     // Should return owner, admin, and viewer because of inheritance!
-    const rels = await zbar.getRelationships(ctx, ownerUser, org);
+    const rels = await zbar.getRelationships(ctx, ownerUser, org, undefined, {
+      includeInherited: true,
+    });
 
     expect(rels.length).toBe(3);
     expect(rels.sort()).toEqual(["admin", "owner", "viewer"]);
-
-    // Should ONLY return owner when includeInherited is false
-    const explicitRels = await zbar.getRelationships(ctx, ownerUser, org, {
-      includeInherited: false,
-    });
-    expect(explicitRels.length).toBe(1);
-    expect(explicitRels).toEqual(["owner"]);
   });
 });
