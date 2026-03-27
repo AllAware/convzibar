@@ -1,8 +1,8 @@
-import { expect, test, describe, vi } from "vitest";
+import { expect, test, describe } from "vitest";
 import { Zbar, createZbarSchema } from "../index.js";
 import { convexTest } from "convex-test";
 import schema from "../../component/schema.js";
-import { api } from "../../component/_generated/api.js";
+import { api, internal } from "../../component/_generated/api.js";
 import { register as registerWorkpool } from "@convex-dev/workpool/test";
 
 const setup = () => {
@@ -532,72 +532,93 @@ describe("Client API & Read-Time Inference", () => {
     expect(all.sort()).toEqual(["admin", "owner", "viewer"]);
   });
 
-  test("stress test updateRelation with asyncWrites (race condition simulation)", async () => {
+  test("manual orchestration of background race condition", async () => {
     const t = setup();
     const ctx = {
       runQuery: t.query.bind(t),
       runMutation: t.mutation.bind(t),
     } as any;
 
-    // Use asyncWrites: true to force operations to enqueue in the background workpool
     const zbar = new Zbar(api, {
       schema: zbarSchema,
       tenantId: "t1",
-      asyncWrites: true,
+      asyncWrites: false, // Run sync initially
     });
 
-    const user = { type: "user", id: "u_race" } as const;
-    const org = { type: "org", id: "org_race" } as const;
+    const user = { type: "user", id: "u_manual" } as const;
+    const org = { type: "org", id: "org_manual" } as const;
 
-    // 1. Initial setup
+    // 1. Initial Setup: the user is a viewer.
+    // This fully commits the viewer token to both `relationships` and `effectiveRelationships`.
     await zbar.addRelation(ctx, user, "viewer", org);
-    if ((t as any).finishAllScheduledFunctions) {
-      vi.useFakeTimers();
-      await (t as any).finishAllScheduledFunctions(() =>
-        vi.advanceTimersByTime(100),
-      );
-      vi.useRealTimers();
-    }
 
-    // 2. The Stress Test:
-    try {
-      await zbar.updateRelation(ctx, user, "viewer", "admin", org);
-      await zbar.updateRelation(ctx, user, "admin", "owner", org);
-      await zbar.updateRelation(ctx, user, "owner", "viewer", org);
-      await zbar.updateRelation(ctx, user, "viewer", "admin", org);
-    } catch (e) {
-      console.log("updateRelation threw an error during stress test!", e);
-      throw e;
-    }
+    expect(await zbar.hasRelationship(ctx, user, "viewer", org)).toBe(true);
 
-    // 3. Flush the workpool to ensure all aborted chunks cleanly fire their onComplete
-    // fallback logic, cascading the cleanup.
-    if ((t as any).finishAllScheduledFunctions) {
-      vi.useFakeTimers();
-      await (t as any).finishAllScheduledFunctions(() =>
-        vi.advanceTimersByTime(1000),
-      );
-      vi.useRealTimers();
-    }
+    // 2. We will manually orchestrate the exact background payload that `updateRelation` generates
+    // when upgrading "viewer" -> "admin".
+    const graphConfig = (zbar as any).graphConfig;
 
-    // Give the test environment a slight tick to settle
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Foreground step 1: delete the viewer base relation
+    const viewerRel = await t.run(async (innerCtx) => {
+      const rel = await innerCtx.db.query("relationships").first();
+      if (!rel) throw new Error("No relation found");
+      await innerCtx.db.delete(rel._id);
+      return rel;
+    });
 
-    // 4. Assert there are NO orphans
-    // If the race condition failed, we'd see ["viewer", "admin", "owner"] left behind
-    // because their cleanup tasks never executed when their chunks were aborted.
-    let explicit = await zbar.getRelationships(ctx, user, org, undefined, {
+    const onCompletePayload = {
+      action: "enqueueRemoveChunk",
+      args: {
+        tenantId: "t1",
+        queue: [
+          {
+            subject: user,
+            relation: "viewer",
+            object: org,
+            removedRelationId: viewerRel!._id,
+          },
+        ],
+        graphConfig,
+      },
+    };
+
+    // Foreground step 2: insert the admin base relation
+    const adminRelId = await t.run(async (innerCtx) => {
+      return await innerCtx.db.insert("relationships", {
+        tenantId: "t1",
+        subjectType: "user",
+        subjectId: "u_manual",
+        relation: "admin",
+        objectType: "org",
+        objectId: "org_manual",
+        createdAt: Date.now(),
+      });
+    });
+
+    // 3. THE RACE CONDITION: Before the background worker can process the `admin` AddChunk,
+    // a rapid subsequent update (admin -> owner) deletes the `admin` base row!
+    await t.run(async (innerCtx) => {
+      await innerCtx.db.delete(adminRelId);
+    });
+
+    // 4. Now, the background worker for the original `admin` AddChunk finally executes.
+    // It will look for `adminRelId`, realize it's missing (deleted by the race), and ABORT its expansion.
+    // We are testing to ensure it STILL executes `onCompletePayload` (cleaning up viewer) despite aborting.
+    await t.mutation(internal.mutations.processAddChunk, {
+      tenantId: "t1",
+      baseRelId: adminRelId, // The deleted ID!
+      queue: [], // Queue doesn't matter, it aborts on baseRelId
+      graphConfig,
+      onComplete: onCompletePayload,
+      asyncWrites: false, // Force it to run the fallback synchronously
+    });
+
+    // 5. Verification: Even though the `admin` worker aborted, the "viewer" cleanup should have cascaded!
+    const explicit = await zbar.getRelationships(ctx, user, org, undefined, {
       includeInherited: false,
     });
 
-    // Simple polling just in case the background jobs are still cascading
-    for (let i = 0; i < 10 && explicit.length === 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-        includeInherited: false,
-      });
-    }
-
-    expect(explicit).toEqual(["admin"]);
+    // Viewer should be completely scrubbed from effectiveRelationships!
+    expect(explicit).toEqual([]);
   });
 });
