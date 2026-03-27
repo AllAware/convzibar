@@ -459,4 +459,115 @@ describe("Asynchronous Race Conditions", () => {
     );
     expect(hasDeepAccessAfterRemove).toBe(false);
   });
+
+  test("bug: toggling parallel paths causes memory leak in downstream derived relationships", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const deepSchema = createZbarSchema<any>()
+      .entity("user")
+      .entity("org", (e) => e.relation("admin", "user"))
+      .entity("project", (e) =>
+        e.relation("parent", "org").relation("editor", "user", "parent.admin"),
+      )
+      .entity("document", (e) =>
+        e
+          .relation("parent", "project")
+          .relation("writer", "user", "parent.editor"),
+      )
+      .build();
+
+    const zbar = new Zbar(api, {
+      schema: deepSchema,
+      tenantId: "t1",
+      asyncWrites: false, // Run sync
+    });
+
+    const user = { type: "user", id: "u_bloat" } as const;
+    const org1 = { type: "org", id: "org_bloat1" } as const;
+    const org2 = { type: "org", id: "org_bloat2" } as const;
+    const proj = { type: "project", id: "proj_bloat" } as const;
+    const doc = { type: "document", id: "doc_bloat" } as const;
+
+    await zbar.addRelation(ctx, doc, "parent", proj);
+    await zbar.addRelation(ctx, proj, "parent", org1);
+    await zbar.addRelation(ctx, proj, "parent", org2);
+
+    // Constant relation that keeps the effective nodes alive
+    await zbar.addRelation(ctx, user, "admin", org2);
+
+    // Toggle the org1 admin relation 10 times!
+    for (let i = 0; i < 10; i++) {
+      await zbar.addRelation(ctx, user, "admin", org1);
+      await zbar.removeRelation(ctx, user, "admin", org1);
+    }
+
+    // Look at the DB state for User -> writer -> Doc
+    const writerEff = await t.run(async (innerCtx) => {
+      return await innerCtx.db
+        .query("effectiveRelationships")
+        .filter((q: any) => q.eq(q.field("subjectKey"), "user:u_bloat"))
+        .filter((q: any) => q.eq(q.field("relation"), "writer"))
+        .filter((q: any) => q.eq(q.field("objectKey"), "document:doc_bloat"))
+        .first();
+    });
+
+    // If there is no bloat, there should only be exactly ONE path (the current valid "admin" path).
+    expect(writerEff!.paths.length).toBe(1);
+  });
+
+  test("bug: processRemoveChunk leaves orphaned paths in derived relationships if parent is not fully deleted", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const zbar = new Zbar(api, {
+      schema: zbarSchema,
+      tenantId: "t1",
+      asyncWrites: false, // Run sync
+    });
+
+    const user = { type: "user", id: "u_orphan" } as const;
+    const org = { type: "org", id: "org_orphan" } as const;
+    const proj = { type: "project", id: "proj_orphan" } as const;
+
+    // 1. Proj is a child of Org.
+    await zbar.addRelation(ctx, proj, "parent_org", org);
+
+    // 2. User is BOTH owner AND admin of Org explicitly.
+    // owner grants admin and viewer. admin grants viewer.
+    // So admin on Org has 2 paths.
+    await zbar.addRelation(ctx, user, "owner", org);
+    await zbar.addRelation(ctx, user, "admin", org);
+
+    // Verify User has "editor" access to Proj (via admin -> editor)
+    expect(await zbar.hasRelationship(ctx, user, "editor", proj)).toBe(true);
+
+    // 3. REMOVE the explicit "owner" relation.
+    // User is STILL an "admin" of Org, so they should theoretically STILL be an "editor" of Proj.
+    // But removing "owner" reduces the number of paths on "admin" from 2 to 1.
+    await zbar.removeRelation(ctx, user, "owner", org);
+
+    // Now REMOVE the explicit "admin" relation.
+    // If the path was orphaned because processRemoveChunk failed to cascade on the partial removal,
+    // they might STILL have editor access!
+    await zbar.removeRelation(ctx, user, "admin", org);
+
+    // After removing both owner and admin, they should have NO access to Org explicitly.
+    const explicit = await zbar.getRelationships(ctx, user, org, undefined, {
+      includeInherited: false,
+    });
+    expect(explicit).toEqual([]);
+
+    // They should definitely NOT be an editor of the project anymore.
+    const hasEditor = await zbar.hasRelationship(ctx, user, "editor", proj);
+
+    // THIS WILL FAIL IF THERE ARE ORPHANED PATHS!
+    expect(hasEditor).toBe(false);
+  });
 });

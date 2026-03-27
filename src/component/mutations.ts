@@ -653,11 +653,22 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
         (p: any) => !p.tokens || !p.tokens.includes(current.removedRelationId),
       );
 
+      let shouldCascade = false;
+      let cascadeId = current.removedRelationId;
+
       if (remainingPaths.length === 0) {
         await ctx.db.delete(eff._id);
         effectiveRelationshipsRemoved++;
+        shouldCascade = true;
+        cascadeId = eff._id;
+      } else if (remainingPaths.length !== eff.paths.length) {
+        await ctx.db.patch(eff._id, { paths: remainingPaths });
+        shouldCascade = true;
+        cascadeId = current.removedRelationId;
+      }
 
-        // If this effective relationship is fully deleted, cascade the deletion
+      if (shouldCascade) {
+        // If this effective relationship was modified or deleted, cascade the token downstream
         for (const rule of graphConfig.traversalRules) {
           if (
             current.subject.type === rule.sourceObjectType &&
@@ -680,7 +691,7 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
                 subject: { type: matchSubjectType, id: matchSubjectId },
                 relation: rule.derivedRelation,
                 object: current.subject,
-                removedRelationId: eff._id,
+                removedRelationId: cascadeId,
               });
             }
           }
@@ -704,14 +715,12 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
                   subject: current.subject,
                   relation: rule.derivedRelation,
                   object: { type: matchSubjectType, id: matchSubjectId },
-                  removedRelationId: eff._id,
+                  removedRelationId: cascadeId,
                 });
               }
             }
           }
         }
-      } else if (remainingPaths.length !== eff.paths.length) {
-        await ctx.db.patch(eff._id, { paths: remainingPaths });
       }
     }
   }
