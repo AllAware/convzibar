@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-empty-object-type */
 import type {
   GenericActionCtx,
   GenericDataModel,
@@ -47,69 +48,145 @@ export interface AuthSchema<Data = any> {
   entities: Record<string, EntityDefinition>;
 }
 
-// Validation types for strict autocomplete inside createAuthSchema
-export type ValidateAuthSchema<T extends AuthSchema<any>> = {
-  conditions?: T["conditions"];
+export type BuiltAuthSchema<
+  Data,
+  Conditions extends Record<string, any>,
+  Entities extends Record<
+    string,
+    { relations: Record<string, string>; permissions: string }
+  >,
+> = {
+  conditions: Record<keyof Conditions & string, ConditionFunction<Data>>;
   entities: {
-    [E in keyof T["entities"]]: {
-      relations?: {
-        [R in keyof T["entities"][E]["relations"]]:
-          | (keyof T["entities"] & string)
-          | (keyof T["entities"][E]["relations"] & string)
-          | `${keyof T["entities"][E]["relations"] & string}.${string}`
-          | { type: keyof T["entities"] & string; reverse?: string }
-          | {
-              relation:
-                | (keyof T["entities"][E]["relations"] & string)
-                | `${keyof T["entities"][E]["relations"] & string}.${string}`;
-              condition: T["conditions"] extends Record<string, any>
-                ? keyof T["conditions"] & string
-                : never;
-            }
-          | ReadonlyArray<
-              | (keyof T["entities"] & string)
-              | (keyof T["entities"][E]["relations"] & string)
-              | `${keyof T["entities"][E]["relations"] & string}.${string}`
-              | { type: keyof T["entities"] & string; reverse?: string }
-              | {
-                  relation:
-                    | (keyof T["entities"][E]["relations"] & string)
-                    | `${keyof T["entities"][E]["relations"] & string}.${string}`;
-                  condition: T["conditions"] extends Record<string, any>
-                    ? keyof T["conditions"] & string
-                    : never;
-                }
-            >;
-      };
-      permissions?: {
-        [P in keyof T["entities"][E]["permissions"]]: ReadonlyArray<
-          | (keyof T["entities"][E]["relations"] & string)
-          | {
-              relation: keyof T["entities"][E]["relations"] & string;
-              condition: T["conditions"] extends Record<string, any>
-                ? keyof T["conditions"] & string
-                : never;
-            }
-        >;
-      };
+    [E in keyof Entities]: {
+      relations: Record<
+        keyof Entities[E]["relations"] & string,
+        SchemaRelation
+      >;
+      permissions: Record<
+        Entities[E]["permissions"] & string,
+        Array<string | { relation: string; condition: string }>
+      >;
     };
   };
 };
 
 // ============================================================================
-// Helper Functions
+// Fluent Schema Builder
 // ============================================================================
 
-export function defineEntity<const T extends EntityDefinition>(def: T): T {
-  return def;
+export class EntityBuilder<
+  EntName extends string,
+  Conditions extends Record<string, any>,
+  Entities extends Record<
+    string,
+    { relations: Record<string, string>; permissions: string }
+  >,
+  Relations extends Record<string, string> = {},
+  Permissions extends string = never,
+> {
+  declare _relations: Relations;
+  declare _permissions: Permissions;
+
+  public def: any = { relations: {}, permissions: {} };
+
+  relation<RelName extends string, Target extends keyof Entities & string>(
+    name: RelName,
+    ...targets: Array<
+      | Target
+      | keyof Relations
+      | {
+          [K in keyof Relations &
+            string]: `${K}.${keyof Entities[Relations[K]]["relations"] & string}`;
+        }[keyof Relations & string]
+      | { type: Target; reverse?: string }
+      | {
+          relation:
+            | keyof Relations
+            | {
+                [K in keyof Relations &
+                  string]: `${K}.${keyof Entities[Relations[K]]["relations"] & string}`;
+              }[keyof Relations & string];
+          condition: keyof Conditions & string;
+        }
+    >
+  ): EntityBuilder<
+    EntName,
+    Conditions,
+    Entities,
+    Relations & Record<RelName, Target>,
+    Permissions
+  > {
+    this.def.relations[name] = targets.length === 1 ? targets[0] : targets;
+    return this as any;
+  }
+
+  permission<PermName extends string>(
+    name: PermName,
+    ...targets: Array<
+      | keyof Relations
+      | { relation: keyof Relations; condition: keyof Conditions & string }
+    >
+  ): EntityBuilder<
+    EntName,
+    Conditions,
+    Entities,
+    Relations,
+    Permissions | PermName
+  > {
+    this.def.permissions[name] = targets;
+    return this as any;
+  }
+}
+
+export class SchemaBuilder<
+  Data,
+  Conditions extends Record<string, any> = {},
+  Entities extends Record<
+    string,
+    { relations: Record<string, string>; permissions: string }
+  > = {},
+> {
+  public _schema: any = { conditions: {}, entities: {} };
+
+  condition<Name extends string>(
+    name: Name,
+    fn: ConditionFunction<Data>,
+  ): SchemaBuilder<Data, Conditions & Record<Name, true>, Entities> {
+    this._schema.conditions[name] = fn;
+    return this as any;
+  }
+
+  entity<
+    Name extends string,
+    Rel extends Record<string, string> = {},
+    Perm extends string = never,
+  >(
+    name: Name,
+    build?: (
+      e: EntityBuilder<Name, Conditions, Entities, {}, never>,
+    ) => EntityBuilder<Name, Conditions, Entities, Rel, Perm>,
+  ): SchemaBuilder<
+    Data,
+    Conditions,
+    Entities & Record<Name, { relations: Rel; permissions: Perm }>
+  > {
+    if (build) {
+      const e = build(new EntityBuilder());
+      this._schema.entities[name] = e.def;
+    } else {
+      this._schema.entities[name] = { relations: {}, permissions: {} };
+    }
+    return this as any;
+  }
+
+  build(): BuiltAuthSchema<Data, Conditions, Entities> {
+    return this._schema;
+  }
 }
 
 export function createAuthSchema<Data = any>() {
-  return function <const T extends AuthSchema<Data>>(
-    schema: T & ValidateAuthSchema<T>,
-  ): T {
-    return schema;
-  };
+  return new SchemaBuilder<Data>();
 }
 
 // ============================================================================

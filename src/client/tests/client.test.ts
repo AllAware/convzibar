@@ -11,40 +11,30 @@ const setup = () => {
   return t;
 };
 
-const authSchema = createAuthSchema<any>()({
-  conditions: {
-    isBusinessHours: (ctx, policyCtx) => {
-      return policyCtx.data?.timezone === "EST";
-    },
-    hasPaidPlan: (ctx, policyCtx) => {
-      return policyCtx.subject.id === "user_paid";
-    },
-  },
-  entities: {
-    user: {},
-    org: {
-      relations: {
-        owner: { type: "user", reverse: "owner_of_org" },
-        admin: ["user", "owner"], // Admin includes Owner (local inheritance)
-        viewer: ["user", "admin"], // Viewer includes Admin
-      },
-      permissions: {
-        edit_settings: ["admin"],
-        view_dashboard: ["viewer"],
-        audit: [{ relation: "admin", condition: "hasPaidPlan" }],
-      },
-    },
-    project: {
-      relations: {
-        parent_org: "org",
-        editor: ["user", "parent_org.admin"], // Cross-object
-      },
-      permissions: {
-        edit: ["editor"],
-      },
-    },
-  },
-});
+const authSchema = createAuthSchema<any>()
+  .condition("isBusinessHours", (ctx, policyCtx) => {
+    return policyCtx.data?.timezone === "EST";
+  })
+  .condition("hasPaidPlan", (ctx, policyCtx) => {
+    return policyCtx.subject.id === "user_paid";
+  })
+  .entity("user")
+  .entity("org", (e) =>
+    e
+      .relation("owner", { type: "user", reverse: "owner_of_org" })
+      .relation("admin", "user", "owner")
+      .relation("viewer", "user", "admin")
+      .permission("edit_settings", "admin")
+      .permission("view_dashboard", "viewer")
+      .permission("audit", { relation: "admin", condition: "hasPaidPlan" }),
+  )
+  .entity("project", (e) =>
+    e
+      .relation("parent_org", "org")
+      .relation("editor", "user", "parent_org.admin")
+      .permission("edit", "editor"),
+  )
+  .build();
 
 describe("Client API & Read-Time Inference", () => {
   test(".can() infers local inheritance", async () => {
@@ -189,42 +179,28 @@ describe("Client API & Read-Time Inference", () => {
       runMutation: t.mutation.bind(t),
     } as any;
 
-    const deepSchema = createAuthSchema<any>()({
-      conditions: {
-        isApproved: (ctx, policy) => policy.data?.approved === true,
-        isActive: (ctx, policy) => policy.data?.active === true,
-      },
-      entities: {
-        user: {},
-        document: {
-          relations: {
-            parent_folder: "folder",
-            viewer: ["user", "parent_folder.viewer"],
-          },
-          permissions: {
-            // Document read requires viewer relation AND isApproved condition
-            read: [{ relation: "viewer", condition: "isApproved" }],
-          },
-        },
-        folder: {
-          relations: {
-            parent_project: "project",
-            viewer: ["user", "parent_project.viewer"],
-          },
-        },
-        project: {
-          relations: {
-            parent_org: "org",
-            viewer: ["user", "parent_org.viewer"],
-          },
-        },
-        org: {
-          relations: {
-            viewer: ["user"],
-          },
-        },
-      },
-    });
+    const deepSchema = createAuthSchema<any>()
+      .condition("isApproved", (ctx, policy) => policy.data?.approved === true)
+      .condition("isActive", (ctx, policy) => policy.data?.active === true)
+      .entity("user")
+      .entity("org", (e) => e.relation("viewer", "user"))
+      .entity("project", (e) =>
+        e
+          .relation("parent_org", "org")
+          .relation("viewer", "user", "parent_org.viewer"),
+      )
+      .entity("folder", (e) =>
+        e
+          .relation("parent_project", "project")
+          .relation("viewer", "user", "parent_project.viewer"),
+      )
+      .entity("document", (e) =>
+        e
+          .relation("parent_folder", "folder")
+          .relation("viewer", "user", "parent_folder.viewer")
+          .permission("read", { relation: "viewer", condition: "isApproved" }),
+      )
+      .build();
 
     const authz = new Authz(api, {
       schema: deepSchema,
@@ -310,31 +286,20 @@ describe("Client API & Read-Time Inference", () => {
       runMutation: t.mutation.bind(t),
     } as any;
 
-    const testSchema = createAuthSchema<any>()({
-      conditions: {
-        isActive: (ctx, policy) => policy.data?.active === true,
-      },
-      entities: {
-        user: {},
-        document: {
-          relations: {
-            parent_folder: "folder",
-            viewer: [
-              "user",
-              { relation: "parent_folder.viewer", condition: "isActive" },
-            ],
-          },
-          permissions: {
-            view: ["viewer"],
-          },
-        },
-        folder: {
-          relations: {
-            viewer: ["user"],
-          },
-        },
-      },
-    });
+    const testSchema = createAuthSchema<any>()
+      .condition("isActive", (ctx, policy) => policy.data?.active === true)
+      .entity("user")
+      .entity("folder", (e) => e.relation("viewer", "user"))
+      .entity("document", (e) =>
+        e
+          .relation("parent_folder", "folder")
+          .relation("viewer", "user", {
+            relation: "parent_folder.viewer",
+            condition: "isActive",
+          })
+          .permission("view", "viewer"),
+      )
+      .build();
 
     const authz = new Authz(api, {
       schema: testSchema,
@@ -366,16 +331,10 @@ describe("Client API & Read-Time Inference", () => {
       runMutation: t.mutation.bind(t),
     } as any;
 
-    const testSchema = createAuthSchema<any>()({
-      entities: {
-        user: {},
-        org: {
-          relations: {
-            owner: "user",
-          },
-        },
-      },
-    });
+    const testSchema = createAuthSchema<any>()
+      .entity("user")
+      .entity("org", (e) => e.relation("owner", "user"))
+      .build();
 
     const authz = new Authz(api, {
       schema: testSchema,
@@ -389,16 +348,12 @@ describe("Client API & Read-Time Inference", () => {
 
     await authz.addRelation(ctx, user, "owner", org);
 
-    // We can directly check if there are any auditLog entries
-    // Since auditLog doesn't have a check query exposed, we can do it via a generic internal or just delete it and check removal
-    // But since it's a test, we can use t.run to check the db
     const logs = await t.run(async (innerCtx) => {
       return await innerCtx.db.query("auditLog").collect();
     });
 
     expect(logs.length).toBe(0);
 
-    // Let's also verify that when enabled, it DOES create logs
     const authzEnabled = new Authz(api, {
       schema: testSchema,
       tenantId: "t1",
