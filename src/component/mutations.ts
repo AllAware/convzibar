@@ -208,9 +208,30 @@ async function executeOnComplete(
   if (onComplete.action === "removeRelation") {
     await removeRelationInternal(ctx, { ...onComplete.args, asyncWrites });
   } else if (onComplete.action === "removeRelationBatch") {
-    // For setRelation: there might be multiple existing relations we want to drop
     for (const args of onComplete.args) {
       await removeRelationInternal(ctx, { ...args, asyncWrites });
+    }
+  } else if (onComplete.action === "enqueueRemoveChunk") {
+    if (asyncWrites) {
+      await expansionPool.enqueueMutation(
+        ctx,
+        internal.mutations.processRemoveChunk,
+        onComplete.args,
+      );
+    } else {
+      await processRemoveChunkInternal(ctx, onComplete.args);
+    }
+  } else if (onComplete.action === "enqueueRemoveChunkBatch") {
+    for (const args of onComplete.args) {
+      if (asyncWrites) {
+        await expansionPool.enqueueMutation(
+          ctx,
+          internal.mutations.processRemoveChunk,
+          args,
+        );
+      } else {
+        await processRemoveChunkInternal(ctx, args);
+      }
     }
   }
 }
@@ -428,8 +449,58 @@ async function processAddChunkInternal(ctx: any, args: any) {
   }
 }
 
+async function deleteBaseRelationAndLog(ctx: any, args: any) {
+  const {
+    tenantId,
+    subject,
+    relation,
+    object,
+    actorId,
+    enableAuditLog,
+    existingRel,
+  } = args;
+
+  await ctx.db.delete(existingRel._id);
+
+  if (enableAuditLog !== false) {
+    await ctx.db.insert("auditLog", {
+      tenantId,
+      timestamp: Date.now(),
+      action: "relation_removed",
+      userId: subject.type === "user" ? subject.id : "system",
+      actorId,
+      details: {
+        relation,
+        subject: `${subject.type}:${subject.id}`,
+        object: `${object.type}:${object.id}`,
+      },
+    });
+  }
+
+  return {
+    tenantId,
+    queue: [
+      {
+        subject,
+        relation,
+        object,
+        removedRelationId: existingRel._id,
+      },
+    ],
+    graphConfig: args.graphConfig,
+  };
+}
+
 async function removeRelationInternal(ctx: any, args: any) {
-  const { tenantId, subject, relation, object, actorId, enableAuditLog } = args;
+  const {
+    tenantId,
+    subject,
+    relation,
+    object,
+    actorId,
+    enableAuditLog,
+    expectedRelId,
+  } = args;
   const graphConfig = args.graphConfig as GraphConfig;
 
   const existingRel = await ctx.db
@@ -445,7 +516,15 @@ async function removeRelationInternal(ctx: any, args: any) {
     )
     .unique();
 
-  if (!existingRel) return false;
+  if (!existingRel) {
+    return false;
+  }
+
+  // In a concurrent rapid-update scenario, the relation might have been deleted and re-added.
+  // If we are executing an onComplete cleanup from an older update, we MUST NOT delete the new row!
+  if (expectedRelId && existingRel._id !== expectedRelId) {
+    return false;
+  }
 
   await ctx.db.delete(existingRel._id);
 
@@ -747,19 +826,38 @@ export const updateRelation = mutation({
       asyncWrites,
     } = args;
 
-    // We add the new relation first, and pass the old relation removal as the onComplete callback
-    const onComplete = {
-      action: "removeRelation",
-      args: {
+    const existingOldRel = await ctx.db
+      .query("relationships")
+      .withIndex("by_tenant_subject_relation_object", (q: any) =>
+        q
+          .eq("tenantId", tenantId)
+          .eq("subjectType", subject.type)
+          .eq("subjectId", subject.id)
+          .eq("relation", oldRelation)
+          .eq("objectType", object.type)
+          .eq("objectId", object.id),
+      )
+      .unique();
+
+    let onComplete: any = undefined;
+
+    if (existingOldRel) {
+      const removedData = await deleteBaseRelationAndLog(ctx, {
         tenantId,
         subject,
         relation: oldRelation,
         object,
         actorId: createdBy,
-        graphConfig,
         enableAuditLog,
-      },
-    };
+        existingRel: existingOldRel,
+        graphConfig,
+      });
+
+      onComplete = {
+        action: "enqueueRemoveChunk",
+        args: removedData,
+      };
+    }
 
     return addRelationInternal(ctx, {
       tenantId,
@@ -820,20 +918,25 @@ export const setRelation = mutation({
         r.relation !== relation,
     );
 
-    const onCompleteArgs = relationsToDrop.map((r: any) => ({
-      tenantId,
-      subject,
-      relation: r.relation,
-      object,
-      actorId: createdBy,
-      graphConfig,
-      enableAuditLog,
-    }));
+    const onCompleteArgs = [];
+    for (const r of relationsToDrop) {
+      const removedData = await deleteBaseRelationAndLog(ctx, {
+        tenantId,
+        subject,
+        relation: r.relation,
+        object,
+        actorId: createdBy,
+        enableAuditLog,
+        existingRel: r,
+        graphConfig,
+      });
+      onCompleteArgs.push(removedData);
+    }
 
     const onComplete =
       onCompleteArgs.length > 0
         ? {
-            action: "removeRelationBatch",
+            action: "enqueueRemoveChunkBatch",
             args: onCompleteArgs,
           }
         : undefined;

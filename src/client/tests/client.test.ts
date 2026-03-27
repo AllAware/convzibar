@@ -1,4 +1,4 @@
-import { expect, test, describe } from "vitest";
+import { expect, test, describe, vi } from "vitest";
 import { Zbar, createZbarSchema } from "../index.js";
 import { convexTest } from "convex-test";
 import schema from "../../component/schema.js";
@@ -530,5 +530,74 @@ describe("Client API & Read-Time Inference", () => {
       includeInherited: true,
     });
     expect(all.sort()).toEqual(["admin", "owner", "viewer"]);
+  });
+
+  test("stress test updateRelation with asyncWrites (race condition simulation)", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    // Use asyncWrites: true to force operations to enqueue in the background workpool
+    const zbar = new Zbar(api, {
+      schema: zbarSchema,
+      tenantId: "t1",
+      asyncWrites: true,
+    });
+
+    const user = { type: "user", id: "u_race" } as const;
+    const org = { type: "org", id: "org_race" } as const;
+
+    // 1. Initial setup
+    await zbar.addRelation(ctx, user, "viewer", org);
+    if ((t as any).finishAllScheduledFunctions) {
+      vi.useFakeTimers();
+      await (t as any).finishAllScheduledFunctions(() =>
+        vi.advanceTimersByTime(100),
+      );
+      vi.useRealTimers();
+    }
+
+    // 2. The Stress Test:
+    try {
+      await zbar.updateRelation(ctx, user, "viewer", "admin", org);
+      await zbar.updateRelation(ctx, user, "admin", "owner", org);
+      await zbar.updateRelation(ctx, user, "owner", "viewer", org);
+      await zbar.updateRelation(ctx, user, "viewer", "admin", org);
+    } catch (e) {
+      console.log("updateRelation threw an error during stress test!", e);
+      throw e;
+    }
+
+    // 3. Flush the workpool to ensure all aborted chunks cleanly fire their onComplete
+    // fallback logic, cascading the cleanup.
+    if ((t as any).finishAllScheduledFunctions) {
+      vi.useFakeTimers();
+      await (t as any).finishAllScheduledFunctions(() =>
+        vi.advanceTimersByTime(1000),
+      );
+      vi.useRealTimers();
+    }
+
+    // Give the test environment a slight tick to settle
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    // 4. Assert there are NO orphans
+    // If the race condition failed, we'd see ["viewer", "admin", "owner"] left behind
+    // because their cleanup tasks never executed when their chunks were aborted.
+    let explicit = await zbar.getRelationships(ctx, user, org, undefined, {
+      includeInherited: false,
+    });
+
+    // Simple polling just in case the background jobs are still cascading
+    for (let i = 0; i < 10 && explicit.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      explicit = await zbar.getRelationships(ctx, user, org, undefined, {
+        includeInherited: false,
+      });
+    }
+
+    expect(explicit).toEqual(["admin"]);
   });
 });
