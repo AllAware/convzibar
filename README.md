@@ -49,8 +49,8 @@ export default app;
 
 ### 1. Define your Authorization Schema
 
-Create a shared file (e.g., `convex/zbar.ts`) to define your schema. This
-serves as the single source of truth and powers the TypeScript inference.
+Create a shared file (e.g., `convex/zbar.ts`) to define your schema. This serves
+as the single source of truth and powers the TypeScript inference.
 
 ```typescript
 import { createAuthSchema, Authz } from "@csilvas/convzibar";
@@ -62,65 +62,57 @@ export type MyContext = {
   userRank?: "novice" | "expert";
 };
 
-export const authSchema = createAuthSchema<MyContext>()({
+export const authSchema = createAuthSchema<MyContext>()
   // Define dynamic conditions (ABAC)
-  conditions: {
-    // 1. Conditions can return a boolean to allow/deny access
-    isBusinessHours: (ctx, { data }) => data.timezone === "EST",
-    isActive: (ctx, { data }) => data.active === true,
+  // 1. Conditions can return a boolean to allow/deny access
+  .condition("isBusinessHours", (ctx, { data }) => data.timezone === "EST")
+  .condition("isActive", (ctx, { data }) => data.active === true)
 
-    // 2. Conditions can also act as "middleware" by returning an object.
-    // This object is merged into the context (`data`) for all subsequent
-    // condition checks in the evaluation chain! You have full access to `ctx` (QueryCtx).
-    injectUserRank: async (ctx, { subject, data }) => {
-      // e.g. Query your database to fetch additional data
-      const user = await ctx.runQuery(components.api.users.get, {
-        id: subject.id,
-      });
-      return { userRank: user?.rank || "novice" };
-    },
+  // 2. Conditions can also act as "middleware" by returning an object.
+  // This object is merged into the context (`data`) for all subsequent
+  // condition checks in the evaluation chain! You have full access to `ctx` (QueryCtx).
+  .condition("injectUserRank", async (ctx, { subject, data }) => {
+    // e.g. Query your database to fetch additional data
+    const user = await ctx.runQuery(components.api.users.get, {
+      id: subject.id,
+    });
+    return { userRank: user?.rank || "novice" };
+  })
 
-    // This condition relies on the `userRank` injected above
-    isExpert: (ctx, { data }) => data.userRank === "expert",
-  },
+  // This condition relies on the `userRank` injected above
+  .condition("isExpert", (ctx, { data }) => data.userRank === "expert")
 
   // Define your Entity Graph (ReBAC)
-  entities: {
-    user: {},
-    org: {
-      relations: {
-        // Reverse edges are automatically created!
-        owner: { type: "user", reverse: "owner_of_org" },
+  .entity("user")
+  .entity("org", (e) =>
+    e
+      // Reverse edges are automatically created!
+      .relation("owner", { type: "user", reverse: "owner_of_org" })
 
-        // Local Inheritance: Admins include Owners
-        admin: ["user", "owner"],
+      // Local Inheritance: Admins include Owners
+      .relation("admin", "user", "owner")
 
-        // Local Inheritance: Viewers include Admins
-        viewer: ["user", "admin"],
-      },
-      permissions: {
-        edit_settings: ["admin"],
-        view_dashboard: ["viewer"],
-      },
-    },
-    project: {
-      relations: {
-        parent_org: "org",
+      // Local Inheritance: Viewers include Admins
+      .relation("viewer", "user", "admin")
 
-        // Cross-Object Traversal:
-        // A project editor includes direct users AND any admin of the parent org
-        editor: ["user", "parent_org.admin"],
-      },
-      permissions: {
-        // Permissions can require conditions
-        edit: [{ relation: "editor", condition: "isBusinessHours" }],
+      .permission("edit_settings", "admin")
+      .permission("view_dashboard", "viewer"),
+  )
+  .entity("project", (e) =>
+    e
+      .relation("parent_org", "org")
 
-        // A condition can rely on data injected by a previous condition in the evaluation chain!
-        delete: [{ relation: "editor", condition: "isExpert" }],
-      },
-    },
-  },
-});
+      // Cross-Object Traversal:
+      // A project editor includes direct users AND any admin of the parent org
+      .relation("editor", "user", "parent_org.admin")
+
+      // Permissions can require conditions
+      .permission("edit", { relation: "editor", condition: "isBusinessHours" })
+
+      // A condition can rely on data injected by a previous condition in the evaluation chain!
+      .permission("delete", { relation: "editor", condition: "isExpert" }),
+  )
+  .build();
 
 // Export the strictly typed client instance
 export const zbar = new Authz(components.convzibar, {
@@ -144,12 +136,10 @@ export const createProject = mutation({
     // ... create project and org in your db ...
 
     // Link the project to the org
-    await zbar.addRelation(
-      ctx,
-      { type: "project", id: projId },
-      "parent_org",
-      { type: "org", id: orgId },
-    );
+    await zbar.addRelation(ctx, { type: "project", id: projId }, "parent_org", {
+      type: "org",
+      id: orgId,
+    });
 
     // Add a user as an admin to the org
     await zbar.addRelation(ctx, { type: "user", id: userId }, "admin", {
