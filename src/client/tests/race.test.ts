@@ -26,7 +26,84 @@ const zbarSchema = createZbarSchema<any>()
   )
   .build();
 
+const executeNextMockTask = async (t: any) => {
+  const task = await t.mutation(internal.mutations.popMockWorkpool);
+  if (!task) return false;
+
+  // Dynamically call the correct internal mutation
+  if (task.mutationName === "processAddChunk") {
+    await t.mutation(internal.mutations.processAddChunk, task.args);
+  } else if (task.mutationName === "processRemoveChunk") {
+    await t.mutation(internal.mutations.processRemoveChunk, task.args);
+  } else {
+    throw new Error(`Unknown mock task: ${task.mutationName}`);
+  }
+  return true;
+};
+
+const drainMockWorkpool = async (t: any) => {
+  let executed = true;
+  while (executed) {
+    executed = await executeNextMockTask(t);
+  }
+};
+
 describe("Asynchronous Race Conditions", () => {
+  test("mockWorkpool: setRelation followed by synchronous delete leaves no orphans", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const zbar = new Zbar(api, {
+      schema: zbarSchema,
+      tenantId: "t1",
+      asyncWrites: true,
+    });
+
+    // Enable the mock workpool interceptor
+    (zbar as any).graphConfig.mockWorkpool = true;
+
+    const user = { type: "user", id: "u_mock" } as const;
+    const org = { type: "org", id: "org_mock" } as const;
+
+    // Initial explicit setup
+    await zbar.addRelation(ctx, user, "viewer", org);
+    await drainMockWorkpool(t);
+
+    expect(
+      await zbar.getRelationships(ctx, user, org, undefined, {
+        includeInherited: false,
+      }),
+    ).toEqual(["viewer"]);
+
+    // 1. Call setRelation to "owner". This drops "viewer" and adds "owner".
+    // Because mockWorkpool is true, the `processAddChunk` tasks are safely queued in the mock table.
+    await zbar.setRelation(ctx, user, "owner", org);
+
+    // 2. Before we run ANY of those mock tasks, we synchronously delete the newly inserted "owner" relation.
+    // We can do this easily by turning off asyncWrites temporarily or calling removeRelation directly.
+    const zbarSync = new Zbar(api, {
+      schema: zbarSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+    await zbarSync.removeRelation(ctx, user, "owner", org);
+
+    // 3. Now we execute the mock workpool tasks that were trapped from the `setRelation`.
+    // The `processAddChunk` for "owner" will run, see the base relation is gone, abort its expansion,
+    // but crucially STILL FIRE its batched cleanup for "viewer".
+    await drainMockWorkpool(t);
+
+    // The user should have NO explicit relationships left (viewer was cleaned up, owner was deleted sync)
+    const explicit = await zbar.getRelationships(ctx, user, org, undefined, {
+      includeInherited: false,
+    });
+
+    expect(explicit).toEqual([]);
+  });
+
   // Move the manual orchestration test here
   test("manual orchestration of background race condition (updateRelation)", async () => {
     const t = setup();

@@ -1,4 +1,21 @@
 import { internalMutation, mutation } from "./_generated/server";
+async function enqueueToWorkpool(
+  ctx: any,
+  mutationRef: any,
+  args: any,
+  graphConfig: any,
+) {
+  if (graphConfig?.mockWorkpool) {
+    const mutationName =
+      args.baseRelId !== undefined ? "processAddChunk" : "processRemoveChunk";
+    await ctx.db.insert("mockWorkpool", {
+      mutationName,
+      args,
+    });
+  } else {
+    await expansionPool.enqueueMutation(ctx, mutationRef, args);
+  }
+}
 import { v } from "convex/values";
 import {
   conditionValidator,
@@ -158,7 +175,7 @@ async function addRelationInternal(ctx: any, args: any) {
   }
 
   if (args.asyncWrites) {
-    await expansionPool.enqueueMutation(
+    await enqueueToWorkpool(
       ctx,
       internal.mutations.processAddChunk,
       {
@@ -169,6 +186,7 @@ async function addRelationInternal(ctx: any, args: any) {
         onComplete,
         asyncWrites: true,
       },
+      graphConfig,
     );
   } else {
     await processAddChunkInternal(ctx, {
@@ -213,10 +231,11 @@ async function executeOnComplete(
     }
   } else if (onComplete.action === "enqueueRemoveChunk") {
     if (asyncWrites) {
-      await expansionPool.enqueueMutation(
+      await enqueueToWorkpool(
         ctx,
         internal.mutations.processRemoveChunk,
         onComplete.args,
+        onComplete.args.graphConfig,
       );
     } else {
       await processRemoveChunkInternal(ctx, onComplete.args);
@@ -224,10 +243,11 @@ async function executeOnComplete(
   } else if (onComplete.action === "enqueueRemoveChunkBatch") {
     for (const args of onComplete.args) {
       if (asyncWrites) {
-        await expansionPool.enqueueMutation(
+        await enqueueToWorkpool(
           ctx,
           internal.mutations.processRemoveChunk,
           args,
+          args.graphConfig,
         );
       } else {
         await processRemoveChunkInternal(ctx, args);
@@ -433,7 +453,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
 
   if (queue.length > 0) {
     if (asyncWrites) {
-      await expansionPool.enqueueMutation(
+      await enqueueToWorkpool(
         ctx,
         internal.mutations.processAddChunk,
         {
@@ -444,6 +464,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
           onComplete,
           asyncWrites,
         },
+        graphConfig,
       );
     } else {
       await processAddChunkInternal(ctx, {
@@ -571,7 +592,7 @@ async function removeRelationInternal(ctx: any, args: any) {
   let effectiveRelationshipsRemoved = 0;
 
   if (args.asyncWrites) {
-    await expansionPool.enqueueMutation(
+    await enqueueToWorkpool(
       ctx,
       internal.mutations.processRemoveChunk,
       {
@@ -579,6 +600,7 @@ async function removeRelationInternal(ctx: any, args: any) {
         queue,
         graphConfig,
       },
+      graphConfig,
     );
   } else {
     effectiveRelationshipsRemoved = await processRemoveChunkInternal(ctx, {
@@ -696,7 +718,7 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
 
   if (queue.length > 0) {
     if (asyncWrites) {
-      await expansionPool.enqueueMutation(
+      await enqueueToWorkpool(
         ctx,
         internal.mutations.processRemoveChunk,
         {
@@ -705,6 +727,7 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
           graphConfig,
           asyncWrites,
         },
+        graphConfig,
       );
     } else {
       effectiveRelationshipsRemoved += await processRemoveChunkInternal(ctx, {
@@ -733,6 +756,32 @@ export const removeRelation = mutation({
   handler: async (ctx: any, args: any) => {
     const res = await removeRelationInternal(ctx, args);
     return res ? res.removed : false;
+  },
+});
+
+export const popMockWorkpool = internalMutation({
+  args: {},
+  handler: async (ctx: any) => {
+    const task = await ctx.db.query("mockWorkpool").first();
+    if (task) {
+      await ctx.db.delete(task._id);
+      return task;
+    }
+    return null;
+  },
+});
+
+export const getMockWorkpool = internalMutation({
+  args: {},
+  handler: async (ctx: any) => {
+    return await ctx.db.query("mockWorkpool").collect();
+  },
+});
+
+export const deleteMockWorkpoolTask = internalMutation({
+  args: { id: v.id("mockWorkpool") },
+  handler: async (ctx: any, args: any) => {
+    await ctx.db.delete(args.id);
   },
 });
 

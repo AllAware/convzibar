@@ -71,4 +71,10 @@ export default defineSchema({
       reason: v.optional(v.string()),
     }),
   }),
+
+  // Used purely for rigorous race condition testing
+  mockWorkpool: defineTable({
+    mutationName: v.string(),
+    args: v.any(),
+  }),
 });
