@@ -24,149 +24,165 @@ export const addRelation = mutation({
     graphConfig: v.any(), // GraphConfig
     enableAuditLog: v.optional(v.boolean()),
     asyncWrites: v.optional(v.boolean()),
+    onComplete: v.optional(v.any()), // { action: "remove", args: any } | { action: "removeBatch", args: any[] }
   },
   handler: async (ctx: any, args: any) => {
-    const {
+    return addRelationInternal(ctx, args);
+  },
+});
+
+async function addRelationInternal(ctx: any, args: any) {
+  const {
+    tenantId,
+    subject,
+    relation,
+    object,
+    condition,
+    createdBy,
+    enableAuditLog,
+    onComplete,
+  } = args;
+  const graphConfig = args.graphConfig as GraphConfig;
+
+  const existingRel = await ctx.db
+    .query("relationships")
+    .withIndex("by_tenant_subject_relation_object", (q: any) =>
+      q
+        .eq("tenantId", tenantId)
+        .eq("subjectType", subject.type)
+        .eq("subjectId", subject.id)
+        .eq("relation", relation)
+        .eq("objectType", object.type)
+        .eq("objectId", object.id),
+    )
+    .unique();
+
+  if (existingRel) {
+    // If the relationship already exists, we don't need to do the Add graph expansion.
+    // However, if there are pending `onComplete` tasks (like cleaning up old relations in an update),
+    // we MUST execute them immediately, because we aren't going to fire off the processAddChunk job.
+    if (onComplete) {
+      await executeOnComplete(ctx, onComplete, args.asyncWrites);
+    }
+    return existingRel._id;
+  }
+
+  const relId = await ctx.db.insert("relationships", {
+    tenantId,
+    subjectType: subject.type,
+    subjectId: subject.id,
+    relation,
+    objectType: object.type,
+    objectId: object.id,
+    condition: condition?.condition,
+    conditionContext: condition?.conditionContext,
+    createdBy,
+    createdAt: Date.now(),
+  });
+
+  if (enableAuditLog !== false) {
+    await ctx.db.insert("auditLog", {
       tenantId,
+      timestamp: Date.now(),
+      action: "relation_added",
+      userId: subject.type === "user" ? subject.id : "system",
+      actorId: createdBy,
+      details: {
+        relation,
+        subject: `${subject.type}:${subject.id}`,
+        object: `${object.type}:${object.id}`,
+      },
+    });
+  }
+
+  const pathItem = {
+    tokens: [relId],
+    conditions: condition ? [condition] : undefined,
+  };
+
+  const queue: Array<{
+    subject: { type: string; id: string };
+    relation: string;
+    object: { type: string; id: string };
+    path: any;
+    depth: number;
+  }> = [
+    {
       subject,
       relation,
       object,
-      condition,
-      createdBy,
-      enableAuditLog,
-    } = args;
-    const graphConfig = args.graphConfig as GraphConfig;
+      path: pathItem,
+      depth: 1,
+    },
+  ];
 
-    const existingRel = await ctx.db
+  const reverseRel = graphConfig.reverseEdges?.[object.type]?.[relation];
+  if (reverseRel) {
+    const existingReverse = await ctx.db
       .query("relationships")
       .withIndex("by_tenant_subject_relation_object", (q: any) =>
         q
           .eq("tenantId", tenantId)
-          .eq("subjectType", subject.type)
-          .eq("subjectId", subject.id)
-          .eq("relation", relation)
-          .eq("objectType", object.type)
-          .eq("objectId", object.id),
+          .eq("subjectType", object.type)
+          .eq("subjectId", object.id)
+          .eq("relation", reverseRel)
+          .eq("objectType", subject.type)
+          .eq("objectId", subject.id),
       )
       .unique();
 
-    if (existingRel) {
-      return existingRel._id;
-    }
-
-    const relId = await ctx.db.insert("relationships", {
-      tenantId,
-      subjectType: subject.type,
-      subjectId: subject.id,
-      relation,
-      objectType: object.type,
-      objectId: object.id,
-      condition: condition?.condition,
-      conditionContext: condition?.conditionContext,
-      createdBy,
-      createdAt: Date.now(),
-    });
-
-    if (enableAuditLog !== false) {
-      await ctx.db.insert("auditLog", {
+    if (!existingReverse) {
+      // Insert reverse relationship into relationships table too
+      const revId = await ctx.db.insert("relationships", {
         tenantId,
-        timestamp: Date.now(),
-        action: "relation_added",
-        userId: subject.type === "user" ? subject.id : "system",
-        actorId: createdBy,
-        details: {
-          relation,
-          subject: `${subject.type}:${subject.id}`,
-          object: `${object.type}:${object.id}`,
+        subjectType: object.type,
+        subjectId: object.id,
+        relation: reverseRel,
+        objectType: subject.type,
+        objectId: subject.id,
+        createdBy,
+        createdAt: Date.now(),
+      });
+
+      // Queue it for effectiveRelationships and traversals
+      queue.push({
+        subject: object,
+        relation: reverseRel,
+        object: subject,
+        path: {
+          tokens: [revId],
         },
+        depth: 1,
       });
     }
+  }
 
-    const pathItem = {
-      tokens: [relId],
-      conditions: condition ? [condition] : undefined,
-    };
-
-    const queue: Array<{
-      subject: { type: string; id: string };
-      relation: string;
-      object: { type: string; id: string };
-      path: any;
-      depth: number;
-    }> = [
+  if (args.asyncWrites) {
+    await expansionPool.enqueueMutation(
+      ctx,
+      internal.mutations.processAddChunk,
       {
-        subject,
-        relation,
-        object,
-        path: pathItem,
-        depth: 1,
-      },
-    ];
-
-    const reverseRel = graphConfig.reverseEdges?.[object.type]?.[relation];
-    if (reverseRel) {
-      const existingReverse = await ctx.db
-        .query("relationships")
-        .withIndex("by_tenant_subject_relation_object", (q: any) =>
-          q
-            .eq("tenantId", tenantId)
-            .eq("subjectType", object.type)
-            .eq("subjectId", object.id)
-            .eq("relation", reverseRel)
-            .eq("objectType", subject.type)
-            .eq("objectId", subject.id),
-        )
-        .unique();
-
-      if (!existingReverse) {
-        // Insert reverse relationship into relationships table too
-        const revId = await ctx.db.insert("relationships", {
-          tenantId,
-          subjectType: object.type,
-          subjectId: object.id,
-          relation: reverseRel,
-          objectType: subject.type,
-          objectId: subject.id,
-          createdBy,
-          createdAt: Date.now(),
-        });
-
-        // Queue it for effectiveRelationships and traversals
-        queue.push({
-          subject: object,
-          relation: reverseRel,
-          object: subject,
-          path: {
-            tokens: [revId],
-          },
-          depth: 1,
-        });
-      }
-    }
-
-    if (args.asyncWrites) {
-      await expansionPool.enqueueMutation(
-        ctx,
-        internal.mutations.processAddChunk,
-        {
-          tenantId,
-          baseRelId: relId,
-          queue,
-          graphConfig,
-        },
-      );
-    } else {
-      await processAddChunkInternal(ctx, {
         tenantId,
         baseRelId: relId,
         queue,
         graphConfig,
-      });
-    }
+        onComplete,
+        asyncWrites: true,
+      },
+    );
+  } else {
+    await processAddChunkInternal(ctx, {
+      tenantId,
+      baseRelId: relId,
+      queue,
+      graphConfig,
+      onComplete,
+      asyncWrites: false,
+    });
+  }
 
-    return relId;
-  },
-});
+  return relId;
+}
 
 export const processAddChunk = internalMutation({
   args: {
@@ -174,14 +190,34 @@ export const processAddChunk = internalMutation({
     baseRelId: v.id("relationships"),
     queue: v.array(v.any()),
     graphConfig: v.any(),
+    onComplete: v.optional(v.any()),
+    asyncWrites: v.optional(v.boolean()),
   },
   handler: async (ctx: any, args: any) => {
     await processAddChunkInternal(ctx, args);
   },
 });
 
+async function executeOnComplete(
+  ctx: any,
+  onComplete: any,
+  asyncWrites?: boolean,
+) {
+  if (!onComplete) return;
+
+  if (onComplete.action === "removeRelation") {
+    await removeRelationInternal(ctx, { ...onComplete.args, asyncWrites });
+  } else if (onComplete.action === "removeRelationBatch") {
+    // For setRelation: there might be multiple existing relations we want to drop
+    for (const args of onComplete.args) {
+      await removeRelationInternal(ctx, { ...args, asyncWrites });
+    }
+  }
+}
+
 async function processAddChunkInternal(ctx: any, args: any) {
-  const { tenantId, baseRelId, queue, graphConfig } = args;
+  const { tenantId, baseRelId, queue, graphConfig, onComplete, asyncWrites } =
+    args;
 
   // Validation: Ensure the base relationship still exists. If not, abort.
   const baseRel = await ctx.db.get(baseRelId);
@@ -378,8 +414,12 @@ async function processAddChunkInternal(ctx: any, args: any) {
         baseRelId,
         queue,
         graphConfig,
+        onComplete,
+        asyncWrites,
       },
     );
+  } else if (onComplete) {
+    await executeOnComplete(ctx, onComplete, asyncWrites);
   }
 }
 
@@ -672,5 +712,138 @@ export const deleteEntity = mutation({
       relationshipsRemoved,
       effectiveRelationshipsRemoved,
     };
+  },
+});
+
+export const updateRelation = mutation({
+  args: {
+    tenantId: v.optional(v.string()),
+    subject: subjectValidator,
+    oldRelation: v.string(),
+    newRelation: v.string(),
+    object: objectValidator,
+    condition: conditionValidator,
+    createdBy: v.optional(v.string()),
+    graphConfig: v.any(), // GraphConfig
+    enableAuditLog: v.optional(v.boolean()),
+    asyncWrites: v.optional(v.boolean()),
+  },
+  handler: async (ctx: any, args: any) => {
+    const {
+      tenantId,
+      subject,
+      oldRelation,
+      newRelation,
+      object,
+      condition,
+      createdBy,
+      enableAuditLog,
+      graphConfig,
+      asyncWrites,
+    } = args;
+
+    // We add the new relation first, and pass the old relation removal as the onComplete callback
+    const onComplete = {
+      action: "removeRelation",
+      args: {
+        tenantId,
+        subject,
+        relation: oldRelation,
+        object,
+        actorId: createdBy,
+        graphConfig,
+        enableAuditLog,
+      },
+    };
+
+    return addRelationInternal(ctx, {
+      tenantId,
+      subject,
+      relation: newRelation,
+      object,
+      condition,
+      createdBy,
+      enableAuditLog,
+      graphConfig,
+      asyncWrites,
+      onComplete,
+    });
+  },
+});
+
+export const setRelation = mutation({
+  args: {
+    tenantId: v.optional(v.string()),
+    subject: subjectValidator,
+    relation: v.string(),
+    object: objectValidator,
+    condition: conditionValidator,
+    createdBy: v.optional(v.string()),
+    graphConfig: v.any(), // GraphConfig
+    enableAuditLog: v.optional(v.boolean()),
+    asyncWrites: v.optional(v.boolean()),
+  },
+  handler: async (ctx: any, args: any) => {
+    const {
+      tenantId,
+      subject,
+      relation,
+      object,
+      condition,
+      createdBy,
+      enableAuditLog,
+      graphConfig,
+      asyncWrites,
+    } = args;
+
+    // Find all existing relations for this subject and object
+    const existingRels = await ctx.db
+      .query("relationships")
+      .withIndex("by_tenant_subject_relation_object", (q: any) =>
+        q
+          .eq("tenantId", tenantId)
+          .eq("subjectType", subject.type)
+          .eq("subjectId", subject.id),
+      )
+      .collect();
+
+    // Filter to exactly this object
+    const relationsToDrop = existingRels.filter(
+      (r: any) =>
+        r.objectType === object.type &&
+        r.objectId === object.id &&
+        r.relation !== relation,
+    );
+
+    const onCompleteArgs = relationsToDrop.map((r: any) => ({
+      tenantId,
+      subject,
+      relation: r.relation,
+      object,
+      actorId: createdBy,
+      graphConfig,
+      enableAuditLog,
+    }));
+
+    const onComplete =
+      onCompleteArgs.length > 0
+        ? {
+            action: "removeRelationBatch",
+            args: onCompleteArgs,
+          }
+        : undefined;
+
+    return addRelationInternal(ctx, {
+      tenantId,
+      subject,
+      relation,
+      object,
+      condition,
+      createdBy,
+      enableAuditLog,
+      graphConfig,
+      asyncWrites,
+      onComplete,
+    });
   },
 });

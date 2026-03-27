@@ -453,4 +453,82 @@ describe("Client API & Read-Time Inference", () => {
     expect(rels.length).toBe(3);
     expect(rels.sort()).toEqual(["admin", "owner", "viewer"]);
   });
+
+  test("updateRelation swaps relationships via Add-before-Remove", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const zbar = new Zbar(api, {
+      schema: zbarSchema,
+      tenantId: "t1",
+      asyncWrites: false, // forces synchronous execution so we can immediately assert
+    });
+
+    const user = { type: "user", id: "u_update" } as const;
+    const org = { type: "org", id: "org1" } as const;
+
+    // Start with viewer
+    await zbar.addRelation(ctx, user, "viewer", org);
+
+    expect(await zbar.hasRelationship(ctx, user, "viewer", org)).toBe(true);
+    expect(await zbar.hasRelationship(ctx, user, "admin", org)).toBe(false);
+
+    // Update to admin
+    await zbar.updateRelation(ctx, user, "viewer", "admin", org);
+
+    // Should now be admin
+    expect(await zbar.hasRelationship(ctx, user, "admin", org)).toBe(true);
+    // Since admin inherits viewer, they should still technically have viewer access
+    expect(await zbar.hasRelationship(ctx, user, "viewer", org)).toBe(true);
+
+    // However, if we check explicitly (includeInherited: false), viewer should be GONE
+    const explicit = await zbar.getRelationships(ctx, user, org, undefined, {
+      includeInherited: false,
+    });
+    expect(explicit).toEqual(["admin"]);
+  });
+
+  test("setRelation replaces all existing relationships with a single new one", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const zbar = new Zbar(api, {
+      schema: zbarSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const user = { type: "user", id: "u_set" } as const;
+    const org = { type: "org", id: "org1" } as const;
+
+    // Start with explicitly BOTH viewer and admin
+    await zbar.addRelation(ctx, user, "viewer", org);
+    await zbar.addRelation(ctx, user, "admin", org);
+
+    let explicit = await zbar.getRelationships(ctx, user, org, undefined, {
+      includeInherited: false,
+    });
+    expect(explicit.sort()).toEqual(["admin", "viewer"]);
+
+    // Override with JUST owner
+    await zbar.setRelation(ctx, user, "owner", org);
+
+    // The explicit relationships should ONLY be "owner" now
+    explicit = await zbar.getRelationships(ctx, user, org, undefined, {
+      includeInherited: false,
+    });
+    expect(explicit).toEqual(["owner"]);
+
+    // But due to inheritance, they still have admin and viewer powers
+    const all = await zbar.getRelationships(ctx, user, org, undefined, {
+      includeInherited: true,
+    });
+    expect(all.sort()).toEqual(["admin", "owner", "viewer"]);
+  });
 });

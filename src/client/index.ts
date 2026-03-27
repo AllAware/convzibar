@@ -838,6 +838,87 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
   }
 
   /**
+   * Update a relationship between a subject and an object to a new relation, executed atomically via Add-Before-Remove.
+   */
+  async updateRelation<
+    SubjectType extends keyof Schema["entities"] & string,
+    ObjectType extends keyof Schema["entities"] & string,
+    OldRelation extends
+      | EntityRelations<Schema, ObjectType>
+      | EntityRelations<Schema, SubjectType>,
+    NewRelation extends
+      | EntityRelations<Schema, ObjectType>
+      | EntityRelations<Schema, SubjectType>,
+  >(
+    ctx: MutationCtx | ActionCtx,
+    subject: { type: SubjectType; id: string },
+    oldRelation: OldRelation,
+    newRelation: NewRelation,
+    object: { type: ObjectType; id: string },
+    options?: {
+      condition?: SchemaConditions<Schema>;
+      conditionContext?: unknown;
+      createdBy?: string;
+    },
+  ): Promise<string> {
+    return ctx.runMutation(this.component.mutations.updateRelation, {
+      tenantId: this.options.tenantId,
+      subject,
+      oldRelation,
+      newRelation,
+      object,
+      condition: options?.condition
+        ? {
+            condition: options.condition,
+            conditionContext: options.conditionContext,
+          }
+        : undefined,
+      createdBy: options?.createdBy ?? this.options.defaultActorId,
+      graphConfig: this.graphConfig,
+      enableAuditLog: this.options.enableAuditLog,
+      asyncWrites: this.options.asyncWrites,
+    });
+  }
+
+  /**
+   * Add a relationship between a subject and an object, clearing any existing relationships between them atomically.
+   */
+  async setRelation<
+    SubjectType extends keyof Schema["entities"] & string,
+    ObjectType extends keyof Schema["entities"] & string,
+    Relation extends
+      | EntityRelations<Schema, ObjectType>
+      | EntityRelations<Schema, SubjectType>,
+  >(
+    ctx: MutationCtx | ActionCtx,
+    subject: { type: SubjectType; id: string },
+    relation: Relation,
+    object: { type: ObjectType; id: string },
+    options?: {
+      condition?: SchemaConditions<Schema>;
+      conditionContext?: unknown;
+      createdBy?: string;
+    },
+  ): Promise<string> {
+    return ctx.runMutation(this.component.mutations.setRelation, {
+      tenantId: this.options.tenantId,
+      subject,
+      relation,
+      object,
+      condition: options?.condition
+        ? {
+            condition: options.condition,
+            conditionContext: options.conditionContext,
+          }
+        : undefined,
+      createdBy: options?.createdBy ?? this.options.defaultActorId,
+      graphConfig: this.graphConfig,
+      enableAuditLog: this.options.enableAuditLog,
+      asyncWrites: this.options.asyncWrites,
+    });
+  }
+
+  /**
    * Remove a relationship between a subject and an object.
    */
   async removeRelation<

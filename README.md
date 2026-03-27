@@ -174,6 +174,28 @@ await zbar.addRelation(
 );
 ```
 
+You can also seamlessly change and override relationships. Because this system
+performs zero-downtime Add-before-Remove background chaining, the user will
+never experience a temporary loss of access during the update:
+
+```typescript
+// Replace "viewer" with "admin" seamlessly
+await zbar.updateRelation(
+  ctx,
+  { type: "user", id: userId },
+  "viewer", // old
+  "admin", // new
+  { type: "project", id: projId },
+);
+
+// Force the user to be an "owner" and automatically delete any
+// other relationships they might already have on this object.
+await zbar.setRelation(ctx, { type: "user", id: userId }, "owner", {
+  type: "project",
+  id: projId,
+});
+```
+
 ### 3. Checking Permissions (Read-Time)
 
 Checking permissions takes a single, fast O(1) database query. The client engine
