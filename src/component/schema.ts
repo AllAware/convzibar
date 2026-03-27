@@ -1,7 +1,7 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
-export default defineSchema({
+const schema = {
   relationships: defineTable({
     tenantId: v.optional(v.string()),
     subjectType: v.string(),
@@ -71,10 +71,19 @@ export default defineSchema({
       reason: v.optional(v.string()),
     }),
   }),
+};
 
-  // Used purely for rigorous race condition testing
-  mockWorkpool: defineTable({
+// ============================================================================
+// Test-Time Only Schema
+// ============================================================================
+
+// The mockWorkpool table is strictly used for testing async worker logic locally.
+// It is intentionally stripped from production schemas to avoid database pollution.
+if (process.env.NODE_ENV === "test") {
+  (schema as any).mockWorkpool = defineTable({
     mutationName: v.string(),
     args: v.any(),
-  }),
-});
+  });
+}
+
+export default defineSchema(schema);
