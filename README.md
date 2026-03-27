@@ -317,6 +317,30 @@ const users = await zbar.listUsersWithAccess(
 // Returns: [{ userId: "user_456" }, ...]
 ```
 
+**Check if a subject has a specific relationship on an object:**
+
+```typescript
+const isEditor = await zbar.hasRelationship(
+  ctx,
+  { type: "user", id: userId },
+  "editor",
+  { type: "project", id: projId },
+  { timezone: "EST" }, // Optional context
+);
+```
+
+**Get all valid relationships a subject has on an object:**
+
+```typescript
+const relationships = await zbar.getRelationships(
+  ctx,
+  { type: "user", id: userId },
+  { type: "project", id: projId },
+  { timezone: "EST" },
+);
+// Returns: ["viewer", "editor", "owner"] (respects local inheritance!)
+```
+
 ### 6. Cleaning Up
 
 When an entity is deleted from your application, you must remove it from the

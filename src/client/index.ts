@@ -410,9 +410,134 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     return true;
   }
 
+  private resolveRelationInheritance(objectType: string, relation: string) {
+    const cacheKey = `rel_inh:${objectType}:${relation}`;
+    if (this.permissionRelationsCache.has(cacheKey)) {
+      return this.permissionRelationsCache.get(cacheKey)!;
+    }
+
+    const schema = this.options.schema;
+    const results: Array<{ relation: string; condition?: string }> = [];
+
+    const expand = (rel: string, currentCondition?: string) => {
+      if (
+        results.some(
+          (r) => r.relation === rel && r.condition === currentCondition,
+        )
+      )
+        return;
+      results.push({ relation: rel, condition: currentCondition });
+
+      const relDef = schema.entities[objectType]?.relations?.[rel];
+      if (relDef) {
+        const defs = Array.isArray(relDef) ? relDef : [relDef];
+        for (const d of defs) {
+          if (typeof d === "string" && !d.includes(".")) {
+            expand(d, currentCondition);
+          } else if (typeof d === "object" && d !== null && "relation" in d) {
+            if (
+              typeof (d as any).relation === "string" &&
+              !(d as any).relation.includes(".")
+            ) {
+              expand(
+                (d as any).relation,
+                (d as any).condition || currentCondition,
+              );
+            }
+          }
+        }
+      }
+    };
+
+    expand(relation, undefined);
+
+    this.permissionRelationsCache.set(cacheKey, results);
+    return results;
+  }
+
   /**
-   * Determine if a subject has a specific permission on an object.
+   * Determine if a subject has a specific relationship with an object.
    */
+  async hasRelationship<
+    SubjectType extends keyof Schema["entities"] & string,
+    ObjectType extends keyof Schema["entities"] & string,
+    Relation extends EntityRelations<Schema, ObjectType>,
+  >(
+    ctx: QueryCtx | ActionCtx,
+    subject: { type: SubjectType; id: string },
+    relation: Relation,
+    object: { type: ObjectType; id: string },
+    requestContext?: Data,
+  ): Promise<boolean> {
+    const targets = this.resolveRelationInheritance(object.type, relation);
+    if (targets.length === 0) return false;
+
+    const acceptableRelations = targets.map((t) => t.relation);
+
+    const effectiveRels = await ctx.runQuery(
+      this.component.queries.checkPermissionFast,
+      {
+        tenantId: this.options.tenantId,
+        subject,
+        relations: acceptableRelations,
+        object,
+      },
+    );
+
+    for (const eff of effectiveRels) {
+      const targetDef = targets.find((t) => t.relation === eff.relation);
+
+      for (const path of eff.paths) {
+        const isValid = await this.validatePath(
+          path,
+          targetDef,
+          ctx,
+          subject,
+          object,
+          relation,
+          requestContext,
+        );
+
+        if (isValid) return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Retrieve a list of all relationships a subject has on an object.
+   */
+  async getRelationships<
+    SubjectType extends keyof Schema["entities"] & string,
+    ObjectType extends keyof Schema["entities"] & string,
+  >(
+    ctx: QueryCtx | ActionCtx,
+    subject: { type: SubjectType; id: string },
+    object: { type: ObjectType; id: string },
+    requestContext?: Data,
+  ): Promise<Array<EntityRelations<Schema, ObjectType>>> {
+    const objectRelations = Object.keys(
+      this.options.schema.entities[object.type]?.relations || {},
+    ) as Array<EntityRelations<Schema, ObjectType>>;
+
+    if (objectRelations.length === 0) return [];
+
+    const checks = await Promise.all(
+      objectRelations.map(async (rel) => {
+        const has = await this.hasRelationship(
+          ctx,
+          subject,
+          rel,
+          object,
+          requestContext,
+        );
+        return { rel, has };
+      }),
+    );
+
+    return checks.filter((c) => c.has).map((c) => c.rel);
+  }
   async can<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,

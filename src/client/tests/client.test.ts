@@ -373,4 +373,77 @@ describe("Client API & Read-Time Inference", () => {
 
     expect(logsAfter.length).toBeGreaterThan(0);
   });
+
+  test("hasRelationship respects inheritance and conditions", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const zbar = new Zbar(api, {
+      schema: zbarSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const ownerUser = { type: "user", id: "u_owner" } as const;
+    const adminUser = { type: "user", id: "u_admin" } as const;
+    const org = { type: "org", id: "org1" } as const;
+
+    await zbar.addRelation(ctx, ownerUser, "owner", org);
+    await zbar.addRelation(ctx, adminUser, "admin", org);
+
+    // Owner should have "viewer" because owner -> admin -> viewer
+    const ownerHasViewer = await zbar.hasRelationship(
+      ctx,
+      ownerUser,
+      "viewer",
+      org,
+    );
+    expect(ownerHasViewer).toBe(true);
+
+    // Admin should have "viewer"
+    const adminHasViewer = await zbar.hasRelationship(
+      ctx,
+      adminUser,
+      "viewer",
+      org,
+    );
+    expect(adminHasViewer).toBe(true);
+
+    // Admin should NOT have "owner"
+    const adminHasOwner = await zbar.hasRelationship(
+      ctx,
+      adminUser,
+      "owner",
+      org,
+    );
+    expect(adminHasOwner).toBe(false);
+  });
+
+  test("getRelationships returns all relationships for a subject and object", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const zbar = new Zbar(api, {
+      schema: zbarSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const ownerUser = { type: "user", id: "u_owner" } as const;
+    const org = { type: "org", id: "org1" } as const;
+
+    await zbar.addRelation(ctx, ownerUser, "owner", org);
+
+    // Should return owner, admin, and viewer because of inheritance!
+    const rels = await zbar.getRelationships(ctx, ownerUser, org);
+
+    expect(rels.length).toBe(3);
+    expect(rels.sort()).toEqual(["admin", "owner", "viewer"]);
+  });
 });
