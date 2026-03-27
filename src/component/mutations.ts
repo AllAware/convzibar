@@ -252,7 +252,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
   }
 
   const maxWriteDepth = graphConfig.maxWriteDepth ?? 10;
-  const CHUNK_SIZE = 50;
+  const CHUNK_SIZE = graphConfig.maxChunkSize ?? 50;
   let processed = 0;
 
   while (queue.length > 0 && processed < CHUNK_SIZE) {
@@ -432,18 +432,29 @@ async function processAddChunkInternal(ctx: any, args: any) {
   }
 
   if (queue.length > 0) {
-    await expansionPool.enqueueMutation(
-      ctx,
-      internal.mutations.processAddChunk,
-      {
+    if (asyncWrites) {
+      await expansionPool.enqueueMutation(
+        ctx,
+        internal.mutations.processAddChunk,
+        {
+          tenantId,
+          baseRelId,
+          queue,
+          graphConfig,
+          onComplete,
+          asyncWrites,
+        },
+      );
+    } else {
+      await processAddChunkInternal(ctx, {
         tenantId,
         baseRelId,
         queue,
         graphConfig,
         onComplete,
         asyncWrites,
-      },
-    );
+      });
+    }
   } else if (onComplete) {
     await executeOnComplete(ctx, onComplete, asyncWrites);
   }
@@ -585,6 +596,7 @@ export const processRemoveChunk = internalMutation({
     tenantId: v.optional(v.string()),
     queue: v.array(v.any()),
     graphConfig: v.any(),
+    asyncWrites: v.optional(v.boolean()),
   },
   handler: async (ctx: any, args: any) => {
     await processRemoveChunkInternal(ctx, args);
@@ -592,9 +604,9 @@ export const processRemoveChunk = internalMutation({
 });
 
 async function processRemoveChunkInternal(ctx: any, args: any) {
-  const { tenantId, queue, graphConfig } = args;
+  const { tenantId, queue, graphConfig, asyncWrites } = args;
   let effectiveRelationshipsRemoved = 0;
-  const CHUNK_SIZE = 50;
+  const CHUNK_SIZE = graphConfig.maxChunkSize ?? 50;
   let processed = 0;
 
   while (queue.length > 0 && processed < CHUNK_SIZE) {
@@ -683,15 +695,25 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
   }
 
   if (queue.length > 0) {
-    await expansionPool.enqueueMutation(
-      ctx,
-      internal.mutations.processRemoveChunk,
-      {
+    if (asyncWrites) {
+      await expansionPool.enqueueMutation(
+        ctx,
+        internal.mutations.processRemoveChunk,
+        {
+          tenantId,
+          queue,
+          graphConfig,
+          asyncWrites,
+        },
+      );
+    } else {
+      effectiveRelationshipsRemoved += await processRemoveChunkInternal(ctx, {
         tenantId,
         queue,
         graphConfig,
-      },
-    );
+        asyncWrites,
+      });
+    }
   }
 
   return effectiveRelationshipsRemoved;

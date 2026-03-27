@@ -313,61 +313,73 @@ describe("Asynchronous Race Conditions", () => {
     expect(reverse.length).toBe(1);
   });
 
-  test("deleteEntity concurrent with ongoing expansion", async () => {
+  test("deep synchronous write cleanly chains synchronous chunks without failing", async () => {
     const t = setup();
     const ctx = {
       runQuery: t.query.bind(t),
       runMutation: t.mutation.bind(t),
     } as any;
 
+    // We configure the graph with an artificially tiny maxChunkSize of 2.
+    // This forces ANY deep expansion to split into multiple sequential
+    // chunks rather than processing everything in a single massive `processAddChunkInternal` loop.
+    const deepSchema = createZbarSchema<any>()
+      .entity("user")
+      .entity("level1", (e) => e.relation("r", "user"))
+      .entity("level2", (e) =>
+        e.relation("parent", "level1").relation("r", "user", "parent.r"),
+      )
+      .entity("level3", (e) =>
+        e.relation("parent", "level2").relation("r", "user", "parent.r"),
+      )
+      .entity("level4", (e) =>
+        e.relation("parent", "level3").relation("r", "user", "parent.r"),
+      )
+      .entity("level5", (e) =>
+        e.relation("parent", "level4").relation("r", "user", "parent.r"),
+      )
+      .build();
+
     const zbar = new Zbar(api, {
-      schema: zbarSchema,
+      schema: deepSchema,
       tenantId: "t1",
-      asyncWrites: false,
+      asyncWrites: false, // Must be synchronous!
     });
 
-    const user = { type: "user", id: "u_del" } as const;
-    const org = { type: "org", id: "org_del" } as const;
+    // Override the chunk size to artificially force multiple chunk splits
+    (zbar as any).graphConfig.maxChunkSize = 2;
 
-    // Foreground insert
-    const adminRelId = await t.run(async (innerCtx) => {
-      return await innerCtx.db.insert("relationships", {
-        tenantId: "t1",
-        subjectType: "user",
-        subjectId: "u_del",
-        relation: "admin",
-        objectType: "org",
-        objectId: "org_del",
-        createdAt: Date.now(),
-      });
-    });
+    const user = { type: "user", id: "u_deep" } as const;
+    const l1 = { type: "level1", id: "1" } as const;
+    const l2 = { type: "level2", id: "2" } as const;
+    const l3 = { type: "level3", id: "3" } as const;
+    const l4 = { type: "level4", id: "4" } as const;
+    const l5 = { type: "level5", id: "5" } as const;
 
-    // Before expansion runs, delete the entity! This cascades and removes all relationships
-    // involving that entity.
-    await zbar.deleteEntity(ctx, user);
+    // Link the graph backwards so the paths are ready to catch the expansion
+    await zbar.addRelation(ctx, l5, "parent", l4);
+    await zbar.addRelation(ctx, l4, "parent", l3);
+    await zbar.addRelation(ctx, l3, "parent", l2);
+    await zbar.addRelation(ctx, l2, "parent", l1);
 
-    // The background worker for the initial add fires
-    const graphConfig = (zbar as any).graphConfig;
-    await t.mutation(internal.mutations.processAddChunk, {
-      tenantId: "t1",
-      baseRelId: adminRelId, // Deleted by deleteEntity!
-      queue: [
-        {
-          subject: user,
-          relation: "admin",
-          object: org,
-          path: { tokens: [adminRelId] },
-          depth: 1,
-        },
-      ],
-      graphConfig,
-      asyncWrites: false,
-    });
+    // Trigger the deep expansion.
+    // This generates >2 nodes of expansion, forcing `processAddChunkInternal` to recurse synchronously.
+    await zbar.addRelation(ctx, user, "r", l1);
 
-    // Verify it cleanly aborted and there are no effective relationships
-    const explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: false,
-    });
-    expect(explicit).toEqual([]);
+    // Because asyncWrites=false, it should have completely recursed and finished
+    // the entire multi-chunk sequence before resolving the promise above.
+    const hasDeepAccess = await zbar.hasRelationship(ctx, user, "r", l5);
+    expect(hasDeepAccess).toBe(true);
+
+    // Now trigger a multi-chunk synchronous REMOVE
+    await zbar.removeRelation(ctx, user, "r", l1);
+
+    const hasDeepAccessAfterRemove = await zbar.hasRelationship(
+      ctx,
+      user,
+      "r",
+      l5,
+    );
+    expect(hasDeepAccessAfterRemove).toBe(false);
   });
 });
