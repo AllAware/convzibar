@@ -222,6 +222,11 @@ async function processAddChunkInternal(ctx: any, args: any) {
   // Validation: Ensure the base relationship still exists. If not, abort.
   const baseRel = await ctx.db.get(baseRelId);
   if (!baseRel) {
+    // If we get aborted by a rapid subsequent update,
+    // ensure we still fire our cleanup tasks so nothing gets orphaned!
+    if (onComplete) {
+      await executeOnComplete(ctx, onComplete, asyncWrites);
+    }
     return; // Base relation was deleted, abort expansion
   }
 
