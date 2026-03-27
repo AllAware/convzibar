@@ -523,20 +523,70 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
 
     if (objectRelations.length === 0) return [];
 
-    const checks = await Promise.all(
-      objectRelations.map(async (rel) => {
-        const has = await this.hasRelationship(
-          ctx,
-          subject,
-          rel,
-          object,
-          requestContext,
-        );
-        return { rel, has };
-      }),
+    // 1. Expand all possible relations to find every target we might need
+    const relationTargets = new Map<
+      string,
+      Array<{ relation: string; condition?: string }>
+    >();
+    const allAcceptableRelations = new Set<string>();
+
+    for (const rel of objectRelations) {
+      const targets = this.resolveRelationInheritance(object.type, rel);
+      relationTargets.set(rel, targets);
+      for (const t of targets) {
+        allAcceptableRelations.add(t.relation);
+      }
+    }
+
+    if (allAcceptableRelations.size === 0) return [];
+
+    // 2. Fetch all effective relationships in a SINGLE query
+    const effectiveRels = await ctx.runQuery(
+      this.component.queries.checkPermissionFast,
+      {
+        tenantId: this.options.tenantId,
+        subject,
+        relations: Array.from(allAcceptableRelations),
+        object,
+      },
     );
 
-    return checks.filter((c) => c.has).map((c) => c.rel);
+    // 3. Evaluate each relation locally using the fetched effective relationships
+    const validRelations: Array<EntityRelations<Schema, ObjectType>> = [];
+
+    for (const rel of objectRelations) {
+      const targets = relationTargets.get(rel)!;
+      let hasRel = false;
+
+      for (const eff of effectiveRels) {
+        const targetDef = targets.find((t) => t.relation === eff.relation);
+        if (!targetDef) continue;
+
+        for (const path of eff.paths) {
+          const isValid = await this.validatePath(
+            path,
+            targetDef,
+            ctx,
+            subject,
+            object,
+            rel,
+            requestContext,
+          );
+
+          if (isValid) {
+            hasRel = true;
+            break;
+          }
+        }
+        if (hasRel) break;
+      }
+
+      if (hasRel) {
+        validRelations.push(rel);
+      }
+    }
+
+    return validRelations;
   }
   async can<
     SubjectType extends keyof Schema["entities"] & string,
