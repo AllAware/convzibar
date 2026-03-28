@@ -170,5 +170,74 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
     }
   }
 
-  return { traversalRules: rules, reverseEdges };
+  // Third pass: Optimize traversal rules by pruning redundant local derivations
+  const optimizedRules: TraversalRule[] = [];
+  const triggerGroups = new Map<string, TraversalRule[]>();
+
+  // Group rules by their trigger edge
+  for (const rule of rules) {
+    const triggerKey = `${rule.sourceObjectType}:${rule.sourceRelation}:${rule.targetRelation}`;
+    if (!triggerGroups.has(triggerKey)) {
+      triggerGroups.set(triggerKey, []);
+    }
+    triggerGroups.get(triggerKey)!.push(rule);
+  }
+
+  for (const [triggerKey, group] of triggerGroups.entries()) {
+    // Determine the source object type for this trigger
+    const sourceObjectType = triggerKey.split(":")[0];
+
+    for (let i = 0; i < group.length; i++) {
+      let isDominated = false;
+      const ruleB = group[i];
+
+      for (let j = 0; j < group.length; j++) {
+        if (i === j) continue;
+        const ruleA = group[j];
+
+        // Check condition compatibility: RuleA's conditions must be a subset of RuleB's
+        // If RuleA has no conditions, it's always compatible.
+        let conditionCompatible = false;
+        if (!ruleA.conditions || ruleA.conditions.length === 0) {
+          conditionCompatible = true;
+        } else if (ruleB.conditions) {
+          // Check if every condition in ruleA exists in ruleB
+          conditionCompatible = ruleA.conditions.every((c) =>
+            ruleB.conditions!.includes(c),
+          );
+        }
+
+        if (conditionCompatible) {
+          // Check local implication: Does ruleA.derivedRelation imply ruleB.derivedRelation?
+          // Since ruleA and ruleB are in the same trigger group, they apply to the same source object.
+          // Therefore, if ruleB's derived relation locally implies ruleA's derived relation (meaning
+          // having ruleA is sufficient to satisfy ruleB), then ruleA dominates ruleB, meaning ruleB
+          // is redundant and can be pruned.
+          const expandedB = expandRelation(
+            schema,
+            sourceObjectType,
+            ruleB.derivedRelation,
+          );
+          if (expandedB.some((exp) => exp.relation === ruleA.derivedRelation)) {
+            // Break ties if two rules derive the exact same relation to prevent pruning both
+            if (ruleA.derivedRelation === ruleB.derivedRelation) {
+              if (i > j) {
+                isDominated = true;
+                break;
+              }
+            } else {
+              isDominated = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!isDominated) {
+        optimizedRules.push(ruleB);
+      }
+    }
+  }
+
+  return { traversalRules: optimizedRules, reverseEdges };
 }
