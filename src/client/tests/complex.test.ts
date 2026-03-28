@@ -11,6 +11,23 @@ const setup = () => {
   return t;
 };
 
+async function assertDbState(
+  t: any,
+  expectedRelationships: number,
+  expectedEffectiveRelationships: number,
+) {
+  const relationships = await t.run(
+    async (innerCtx: any) => await innerCtx.db.query("relationships").collect(),
+  );
+  const effectiveRelationships = await t.run(
+    async (innerCtx: any) =>
+      await innerCtx.db.query("effectiveRelationships").collect(),
+  );
+
+  expect(relationships.length).toBe(expectedRelationships);
+  expect(effectiveRelationships.length).toBe(expectedEffectiveRelationships);
+}
+
 const complexSchema = createZbarSchema<any>()
   .entity("user")
   .entity("system", (e) =>
@@ -124,5 +141,8 @@ describe("Complex Schema Inheritance Flows", () => {
     // Owner should still manage device 1, but not device 2
     expect(await zbar.can(ctx, ownerUser, "manage", device1)).toBe(true);
     expect(await zbar.can(ctx, ownerUser, "manage", device2)).toBe(false);
+
+    // Verify DB state
+    await assertDbState(t, 3, 6);
   });
 });

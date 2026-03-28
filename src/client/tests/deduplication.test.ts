@@ -11,6 +11,23 @@ const setup = () => {
   return t;
 };
 
+async function assertDbState(
+  t: any,
+  expectedRelationships: number,
+  expectedEffectiveRelationships: number,
+) {
+  const relationships = await t.run(
+    async (innerCtx: any) => await innerCtx.db.query("relationships").collect(),
+  );
+  const effectiveRelationships = await t.run(
+    async (innerCtx: any) =>
+      await innerCtx.db.query("effectiveRelationships").collect(),
+  );
+
+  expect(relationships.length).toBe(expectedRelationships);
+  expect(effectiveRelationships.length).toBe(expectedEffectiveRelationships);
+}
+
 // We define a schema that explicitly specifies inheritance both at the org level
 // and at the distant project level to trigger traversal rule optimization deduplication.
 const dedupSchema = createZbarSchema<any>()
@@ -89,5 +106,9 @@ describe("Schema Compiler Deduplication Integration", () => {
       },
     );
     expect(inheritedRels.sort()).toEqual(["admin", "manager", "viewer"]);
+
+    // Verify exactly 2 bases (user -> admin -> org, org -> projects -> project)
+    // and only 1 effective distant materialization (admin)
+    await assertDbState(t, 2, 3);
   });
 });

@@ -11,6 +11,23 @@ const setup = () => {
   return t;
 };
 
+async function assertDbState(
+  t: any,
+  expectedRelationships: number,
+  expectedEffectiveRelationships: number,
+) {
+  const relationships = await t.run(
+    async (innerCtx: any) => await innerCtx.db.query("relationships").collect(),
+  );
+  const effectiveRelationships = await t.run(
+    async (innerCtx: any) =>
+      await innerCtx.db.query("effectiveRelationships").collect(),
+  );
+
+  expect(relationships.length).toBe(expectedRelationships);
+  expect(effectiveRelationships.length).toBe(expectedEffectiveRelationships);
+}
+
 const zbarSchema = createZbarSchema<any>()
   .condition("isBusinessHours", (ctx, policyCtx) => {
     return policyCtx.data?.timezone === "EST";
@@ -68,6 +85,9 @@ describe("Client API & Read-Time Inference", () => {
 
     expect(results.length).toBe(2);
     expect(results.map((r) => r.objectId).sort()).toEqual(["org1", "org2"]);
+
+    // Verify database state: no redundant relationships materialized due to local inheritance inference
+    await assertDbState(t, 3, 3);
   });
 
   test(".can() infers distant inheritance", async () => {
@@ -103,6 +123,22 @@ describe("Client API & Read-Time Inference", () => {
 
     expect(results.length).toBe(1);
     expect(results.map((r) => r.objectId).sort()).toEqual(["proj1"]);
+
+    // Verify database state: no redundant local relationships, but distant cross-entity is materialized
+    const effectiveRelationships = await t.run(
+      async (innerCtx) =>
+        await innerCtx.db.query("effectiveRelationships").collect(),
+    );
+
+    // effectiveRelationships: 4 bases + 1 editor distant inheritance materialized = 5 rows
+    const editorEffs = effectiveRelationships.filter(
+      (eff) => eff.relation === "editor",
+    );
+    expect(editorEffs.length).toBe(1);
+    expect(editorEffs[0].subjectKey).toBe("user:u1");
+    expect(editorEffs[0].objectKey).toBe("project:proj1");
+
+    await assertDbState(t, 4, 5);
   });
 
   test("listUsersWithAccess with local inheritance", async () => {
@@ -130,6 +166,8 @@ describe("Client API & Read-Time Inference", () => {
 
     expect(results.length).toBe(2);
     expect(results.map((r) => r.userId).sort()).toEqual(["u_admin", "u_owner"]);
+
+    await assertDbState(t, 3, 3);
   });
 
   test("bidirectional relationship auto-insertion", async () => {
@@ -160,6 +198,8 @@ describe("Client API & Read-Time Inference", () => {
 
     expect(rels.length).toBe(1);
     expect(rels[0].relation).toBe("owner_of_org");
+
+    await assertDbState(t, 2, 2);
   });
 
   test("deleteEntity removes all associated relationships", async () => {
@@ -205,6 +245,20 @@ describe("Client API & Read-Time Inference", () => {
       object: org,
     });
     expect(relsAfter.length).toBe(0);
+
+    const relationships = await t.run(
+      async (innerCtx) => await innerCtx.db.query("relationships").collect(),
+    );
+    const effectiveRelationships = await t.run(
+      async (innerCtx) =>
+        await innerCtx.db.query("effectiveRelationships").collect(),
+    );
+
+    // Only project -> parent_org -> org should remain
+    expect(relationships.length).toBe(1);
+    expect(relationships[0].relation).toBe("parent_org");
+    expect(effectiveRelationships.length).toBe(1);
+    expect(effectiveRelationships[0].relation).toBe("parent_org");
   });
 
   test("deeply nested conditional read-time inference and deletions", async () => {
@@ -312,6 +366,10 @@ describe("Client API & Read-Time Inference", () => {
       approved: true,
     });
     expect(canReadWithEdgeTrue).toBe(true);
+
+    // 4 explicit edges (folder->proj, proj->org, doc->folder, user->org)
+    // 4 explicit + 3 inherited distant viewers (project viewer, folder viewer, document viewer)
+    await assertDbState(t, 4, 7);
   });
 
   test("conditional relation in schema evaluated at read-time", async () => {
@@ -357,6 +415,9 @@ describe("Client API & Read-Time Inference", () => {
     canView = await zbar.can(ctx, user, "view", document, { active: true });
 
     expect(canView).toBe(true);
+
+    // 2 bases + 1 distant viewer
+    await assertDbState(t, 2, 3);
   });
 
   test("auditLog is disabled when enableAuditLog is false", async () => {
@@ -407,6 +468,9 @@ describe("Client API & Read-Time Inference", () => {
     });
 
     expect(logsAfter.length).toBeGreaterThan(0);
+
+    // 2 owners (no reverse edges in this schema)
+    await assertDbState(t, 2, 2);
   });
 
   test("hasRelationship respects inheritance and conditions", async () => {
@@ -455,6 +519,9 @@ describe("Client API & Read-Time Inference", () => {
       org,
     );
     expect(adminHasOwner).toBe(false);
+
+    // owner + owner_of_org, admin = 3 bases
+    await assertDbState(t, 3, 3);
   });
 
   test("getRelationships returns all relationships for a subject and object", async () => {
@@ -487,6 +554,9 @@ describe("Client API & Read-Time Inference", () => {
 
     expect(rels.length).toBe(3);
     expect(rels.sort()).toEqual(["admin", "owner", "viewer"]);
+
+    // owner + owner_of_org
+    await assertDbState(t, 2, 2);
   });
 
   test("updateRelation swaps relationships via Add-before-Remove", async () => {
@@ -524,6 +594,9 @@ describe("Client API & Read-Time Inference", () => {
       includeInherited: false,
     });
     expect(explicit).toEqual(["admin"]);
+
+    // just admin
+    await assertDbState(t, 1, 1);
   });
 
   test("setRelation replaces all existing relationships with a single new one", async () => {
@@ -565,6 +638,9 @@ describe("Client API & Read-Time Inference", () => {
       includeInherited: true,
     });
     expect(all.sort()).toEqual(["admin", "owner", "viewer"]);
+
+    // owner + owner_of_org
+    await assertDbState(t, 2, 2);
   });
 
   test("manual orchestration of background race condition", async () => {
@@ -654,6 +730,9 @@ describe("Client API & Read-Time Inference", () => {
 
     // Viewer should be completely scrubbed from effectiveRelationships!
     expect(explicit).toEqual([]);
+
+    // Everything was deleted
+    await assertDbState(t, 0, 0);
   });
 
   test("resolvePermissionRelations correctly parses object-based conditional aliases", async () => {
@@ -695,6 +774,9 @@ describe("Client API & Read-Time Inference", () => {
     // Should be able to view WITH isPaid condition
     canView = await zbar.can(ctx, user, "view", org, { paid: true });
     expect(canView).toBe(true);
+
+    // admin only
+    await assertDbState(t, 1, 1);
   });
 
   test("removeRelation deletes reverse edges", async () => {
@@ -770,5 +852,8 @@ describe("Client API & Read-Time Inference", () => {
         .unique();
     });
     expect(baseRelsAfter).toBeNull();
+
+    // Everything deleted
+    await assertDbState(t, 0, 0);
   });
 });
