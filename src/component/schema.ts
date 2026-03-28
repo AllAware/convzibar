@@ -48,7 +48,12 @@ const schema = {
       "relation",
       "objectKey",
     ])
-    .index("by_tenant_object_relation", ["tenantId", "objectKey", "relation"]),
+    .index("by_tenant_object_relation", [
+      "tenantId",
+      "objectKey",
+      "relation",
+      "subjectKey",
+    ]),
 
   auditLog: defineTable({
     tenantId: v.optional(v.string()),

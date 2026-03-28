@@ -51,17 +51,17 @@ export const listAccessibleObjectsFast = query({
     const sKey = buildScopeKey(subject.type, subject.id);
 
     const promises = relations.map(async (rel: string) => {
-      const matches = await ctx.db
+      return await ctx.db
         .query("effectiveRelationships")
         .withIndex("by_tenant_subject_relation_object", (q: any) =>
-          q.eq("tenantId", tenantId).eq("subjectKey", sKey).eq("relation", rel),
+          q
+            .eq("tenantId", tenantId)
+            .eq("subjectKey", sKey)
+            .eq("relation", rel)
+            .gte("objectKey", `${objectType}:`)
+            .lt("objectKey", `${objectType}:\u{10FFFF}`),
         )
         .collect();
-
-      return matches.filter((match: any) => {
-        const [matchObjectType, _matchObjectId] = match.objectKey.split(":");
-        return matchObjectType === objectType;
-      });
     });
 
     const results = await Promise.all(promises);
@@ -81,17 +81,17 @@ export const listUsersWithAccessFast = query({
     const oKey = buildScopeKey(object.type, object.id);
 
     const promises = relations.map(async (rel: string) => {
-      const matches = await ctx.db
+      return await ctx.db
         .query("effectiveRelationships")
         .withIndex("by_tenant_object_relation", (q: any) =>
-          q.eq("tenantId", tenantId).eq("objectKey", oKey).eq("relation", rel),
+          q
+            .eq("tenantId", tenantId)
+            .eq("objectKey", oKey)
+            .eq("relation", rel)
+            .gte("subjectKey", "user:")
+            .lt("subjectKey", "user:\u{10FFFF}"),
         )
         .collect();
-
-      return matches.filter((match: any) => {
-        const [matchSubjectType, _matchSubjectId] = match.subjectKey.split(":");
-        return matchSubjectType === "user";
-      });
     });
 
     const results = await Promise.all(promises);
