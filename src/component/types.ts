@@ -1,9 +1,9 @@
 export interface TraversalRule {
   sourceObjectType: string;
   sourceRelation: string; // "parent_org"
-  targetRelation: string; // "admin"
+  targetRelation?: string; // "admin" (optional for local inheritance)
   derivedRelation: string; // "editor"
-  condition?: string; // name of condition to apply
+  conditions?: string[]; // names of conditions to apply
 }
 
 export interface GraphConfig {

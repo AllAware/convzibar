@@ -93,8 +93,6 @@ async function addRelationInternal(ctx: any, args: any) {
     objectId: object.id,
     condition: condition?.condition,
     conditionContext: condition?.conditionContext,
-    createdBy,
-    createdAt: Date.now(),
   });
 
   if (enableAuditLog !== false) {
@@ -157,8 +155,6 @@ async function addRelationInternal(ctx: any, args: any) {
         relation: reverseRel,
         objectType: subject.type,
         objectId: subject.id,
-        createdBy,
-        createdAt: Date.now(),
       });
 
       // Queue it for effectiveRelationships and traversals
@@ -349,8 +345,8 @@ async function processAddChunkInternal(ctx: any, args: any) {
             const derivedObject = current.subject;
 
             for (const matchPath of match.paths) {
-              const schemaCondition = rule.condition
-                ? [{ condition: rule.condition }]
+              const schemaCondition = rule.conditions
+                ? rule.conditions.map((c: string) => ({ condition: c }))
                 : [];
               const combinedConditions = [
                 ...(matchPath.conditions || []),
@@ -409,8 +405,8 @@ async function processAddChunkInternal(ctx: any, args: any) {
               };
 
               for (const matchPath of match.paths) {
-                const schemaCondition = rule.condition
-                  ? [{ condition: rule.condition }]
+                const schemaCondition = rule.conditions
+                  ? rule.conditions.map((c: string) => ({ condition: c }))
                   : [];
                 const combinedConditions = [
                   ...(current.path.conditions || []),
@@ -509,16 +505,49 @@ async function deleteBaseRelationAndLog(ctx: any, args: any) {
     });
   }
 
+  const queue: Array<{
+    subject: { type: string; id: string };
+    relation: string;
+    object: { type: string; id: string };
+    removedRelationId: string;
+  }> = [
+    {
+      subject,
+      relation,
+      object,
+      removedRelationId: existingRel._id,
+    },
+  ];
+
+  const reverseRel = args.graphConfig.reverseEdges?.[object.type]?.[relation];
+  if (reverseRel) {
+    const existingReverse = await ctx.db
+      .query("relationships")
+      .withIndex("by_tenant_subject_relation_object", (q: any) =>
+        q
+          .eq("tenantId", tenantId)
+          .eq("subjectType", object.type)
+          .eq("subjectId", object.id)
+          .eq("relation", reverseRel)
+          .eq("objectType", subject.type)
+          .eq("objectId", subject.id),
+      )
+      .unique();
+
+    if (existingReverse) {
+      await ctx.db.delete(existingReverse._id);
+      queue.push({
+        subject: object,
+        relation: reverseRel,
+        object: subject,
+        removedRelationId: existingReverse._id,
+      });
+    }
+  }
+
   return {
     tenantId,
-    queue: [
-      {
-        subject,
-        relation,
-        object,
-        removedRelationId: existingRel._id,
-      },
-    ],
+    queue,
     graphConfig: args.graphConfig,
   };
 }
@@ -588,6 +617,32 @@ async function removeRelationInternal(ctx: any, args: any) {
       removedRelationId: existingRel._id,
     },
   ];
+
+  const reverseRel = graphConfig.reverseEdges?.[object.type]?.[relation];
+  if (reverseRel) {
+    const existingReverse = await ctx.db
+      .query("relationships")
+      .withIndex("by_tenant_subject_relation_object", (q: any) =>
+        q
+          .eq("tenantId", tenantId)
+          .eq("subjectType", object.type)
+          .eq("subjectId", object.id)
+          .eq("relation", reverseRel)
+          .eq("objectType", subject.type)
+          .eq("objectId", subject.id),
+      )
+      .unique();
+
+    if (existingReverse) {
+      await ctx.db.delete(existingReverse._id);
+      queue.push({
+        subject: object,
+        relation: reverseRel,
+        object: subject,
+        removedRelationId: existingReverse._id,
+      });
+    }
+  }
 
   let effectiveRelationshipsRemoved = 0;
 

@@ -70,6 +70,41 @@ describe("Client API & Read-Time Inference", () => {
     expect(results.map((r) => r.objectId).sort()).toEqual(["org1", "org2"]);
   });
 
+  test(".can() infers distant inheritance", async () => {
+    const t = setup();
+    // Use an instance of Zbar, but we have to mock `runQuery` and `runMutation` inside `can`
+    // Actually, `convexTest` gives us `t.query` and `t.mutation`. We can wrap them in a pseudo context:
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const zbar = new Zbar(api, {
+      schema: zbarSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const user = { type: "user" as const, id: "u1" };
+    const org1 = { type: "org" as const, id: "org1" };
+    const org2 = { type: "org" as const, id: "org2" };
+    const proj1 = { type: "project" as const, id: "proj1" };
+
+    await zbar.addRelation(ctx, user, "owner", org1); // Should grant view_dashboard via inheritance
+    await zbar.addRelation(ctx, user, "viewer", org1);
+    await zbar.addRelation(ctx, proj1, "parent_org", org1);
+
+    const results = await zbar.listAccessibleObjects(
+      ctx,
+      user,
+      "edit",
+      "project",
+    );
+
+    expect(results.length).toBe(1);
+    expect(results.map((r) => r.objectId).sort()).toEqual(["proj1"]);
+  });
+
   test("listUsersWithAccess with local inheritance", async () => {
     const t = setup();
     const ctx = {
@@ -158,8 +193,8 @@ describe("Client API & Read-Time Inference", () => {
 
     const res = await zbar.deleteEntity(ctx, user);
 
-    // relationshipsRemoved should be 2 (the owner relation, and the reverse owner_of_org relation)
-    expect(res.relationshipsRemoved).toBe(2);
+    // relationshipsRemoved should be 1 (because the single removeRelationInternal call removes both the forward and reverse edge under the hood)
+    expect(res.relationshipsRemoved).toBe(1);
     // effective relationships will also be cleared
     expect(res.effectiveRelationshipsRemoved).toBeGreaterThan(0);
 
@@ -591,7 +626,6 @@ describe("Client API & Read-Time Inference", () => {
         relation: "admin",
         objectType: "org",
         objectId: "org_manual",
-        createdAt: Date.now(),
       });
     });
 
@@ -620,5 +654,121 @@ describe("Client API & Read-Time Inference", () => {
 
     // Viewer should be completely scrubbed from effectiveRelationships!
     expect(explicit).toEqual([]);
+  });
+
+  test("resolvePermissionRelations correctly parses object-based conditional aliases", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const testSchema = createZbarSchema<any>()
+      .condition("isPaid", (ctx, policy) => policy.data?.paid === true)
+      .entity("user")
+      .entity("org", (e) =>
+        e
+          .relation("admin", "user")
+          .relation("viewer", "user", {
+            relation: "admin",
+            condition: "isPaid",
+          })
+          .permission("view", "viewer"),
+      )
+      .build();
+
+    const zbar = new Zbar(api, {
+      schema: testSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const user = { type: "user" as const, id: "u_cond_alias" };
+    const org = { type: "org" as const, id: "org_cond_alias" };
+
+    await zbar.addRelation(ctx, user, "admin", org);
+
+    // Should not be able to view without isPaid condition
+    let canView = await zbar.can(ctx, user, "view", org);
+    expect(canView).toBe(false);
+
+    // Should be able to view WITH isPaid condition
+    canView = await zbar.can(ctx, user, "view", org, { paid: true });
+    expect(canView).toBe(true);
+  });
+
+  test("removeRelation deletes reverse edges", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const zbar = new Zbar(api, {
+      schema: zbarSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const user = { type: "user" as const, id: "u_rev_delete" };
+    const org = { type: "org" as const, id: "org_rev_delete" };
+
+    // 1. Add relation, which creates a reverse edge
+    await zbar.addRelation(ctx, user, "owner", org);
+
+    // Verify reverse edge was added
+    const relsBefore = await t.query(api.queries.checkPermissionFast, {
+      tenantId: "t1",
+      subject: org,
+      relations: ["owner_of_org"],
+      object: user,
+    });
+    expect(relsBefore.length).toBe(1);
+
+    // Check actual relationship table for reverse edge
+    const baseRelsBefore = await t.run(async (innerCtx) => {
+      return await innerCtx.db
+        .query("relationships")
+        .withIndex("by_tenant_subject_relation_object", (q: any) =>
+          q
+            .eq("tenantId", "t1")
+            .eq("subjectType", "org")
+            .eq("subjectId", "org_rev_delete")
+            .eq("relation", "owner_of_org")
+            .eq("objectType", "user")
+            .eq("objectId", "u_rev_delete"),
+        )
+        .unique();
+    });
+    expect(baseRelsBefore).not.toBeNull();
+
+    // 2. Remove relation
+    await zbar.removeRelation(ctx, user, "owner", org);
+
+    // Verify reverse edge was removed from effective relationships
+    const relsAfter = await t.query(api.queries.checkPermissionFast, {
+      tenantId: "t1",
+      subject: org,
+      relations: ["owner_of_org"],
+      object: user,
+    });
+    expect(relsAfter.length).toBe(0);
+
+    // Check actual relationship table to ensure reverse edge is deleted
+    const baseRelsAfter = await t.run(async (innerCtx) => {
+      return await innerCtx.db
+        .query("relationships")
+        .withIndex("by_tenant_subject_relation_object", (q: any) =>
+          q
+            .eq("tenantId", "t1")
+            .eq("subjectType", "org")
+            .eq("subjectId", "org_rev_delete")
+            .eq("relation", "owner_of_org")
+            .eq("objectType", "user")
+            .eq("objectId", "u_rev_delete"),
+        )
+        .unique();
+    });
+    expect(baseRelsAfter).toBeNull();
   });
 });

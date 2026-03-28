@@ -314,6 +314,16 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
         for (const d of defs) {
           if (typeof d === "string" && !d.includes(".")) {
             expand(d, currentCondition);
+          } else if (typeof d === "object" && d !== null && "relation" in d) {
+            if (
+              typeof (d as any).relation === "string" &&
+              !(d as any).relation.includes(".")
+            ) {
+              expand(
+                (d as any).relation,
+                (d as any).condition || currentCondition,
+              );
+            }
           }
         }
       }
@@ -570,6 +580,11 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
         if (!targetDef) continue;
 
         for (const path of eff.paths) {
+          // If includeInherited is false, ONLY consider base relationships (path length 1)
+          if (!includeInherited && path.tokens && path.tokens.length > 1) {
+            continue;
+          }
+
           const isValid = await this.validatePath(
             path,
             targetDef,

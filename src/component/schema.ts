@@ -11,8 +11,6 @@ const schema = {
     objectId: v.string(),
     condition: v.optional(v.string()), // name of a registered condition
     conditionContext: v.optional(v.any()), // static context passed to condition
-    createdBy: v.optional(v.string()),
-    createdAt: v.number(),
   })
     .index("by_tenant_object", ["tenantId", "objectType", "objectId"])
     .index("by_tenant_subject_relation_object", [

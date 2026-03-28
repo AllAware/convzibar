@@ -162,7 +162,6 @@ describe("Asynchronous Race Conditions", () => {
         relation: "admin",
         objectType: "org",
         objectId: "org_manual",
-        createdAt: Date.now(),
       });
     });
 
@@ -256,7 +255,6 @@ describe("Asynchronous Race Conditions", () => {
         relation: "owner",
         objectType: "org",
         objectId: "org_batch",
-        createdAt: Date.now(),
       });
     });
 
@@ -312,7 +310,6 @@ describe("Asynchronous Race Conditions", () => {
         relation: "admin",
         objectType: "org",
         objectId: "org_phantom",
-        createdAt: Date.now(),
       });
     });
 
