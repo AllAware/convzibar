@@ -327,7 +327,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
         ) {
           const matches = await ctx.db
             .query("effectiveRelationships")
-            .withIndex("by_tenant_object_relation", (q: any) =>
+            .withIndex("by_tenant_object_relation_subject", (q: any) =>
               q
                 .eq("tenantId", tenantId)
                 .eq("objectKey", oKey)
@@ -381,7 +381,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
         if (current.relation === rule.targetRelation) {
           const matches = await ctx.db
             .query("effectiveRelationships")
-            .withIndex("by_tenant_object_relation", (q: any) =>
+            .withIndex("by_tenant_object_relation_subject", (q: any) =>
               q
                 .eq("tenantId", tenantId)
                 .eq("objectKey", oKey)
@@ -720,7 +720,7 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
           ) {
             const matches = await ctx.db
               .query("effectiveRelationships")
-              .withIndex("by_tenant_object_relation", (q: any) =>
+              .withIndex("by_tenant_object_relation_subject", (q: any) =>
                 q
                   .eq("tenantId", tenantId)
                   .eq("objectKey", oKey)
@@ -743,7 +743,7 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
           if (current.relation === rule.targetRelation) {
             const matches = await ctx.db
               .query("effectiveRelationships")
-              .withIndex("by_tenant_object_relation", (q: any) =>
+              .withIndex("by_tenant_object_relation_subject", (q: any) =>
                 q
                   .eq("tenantId", tenantId)
                   .eq("objectKey", oKey)

@@ -48,7 +48,7 @@ const schema = {
       "relation",
       "objectKey",
     ])
-    .index("by_tenant_object_relation", [
+    .index("by_tenant_object_relation_subject", [
       "tenantId",
       "objectKey",
       "relation",

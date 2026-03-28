@@ -83,7 +83,7 @@ export const listUsersWithAccessFast = query({
     const promises = relations.map(async (rel: string) => {
       return await ctx.db
         .query("effectiveRelationships")
-        .withIndex("by_tenant_object_relation", (q: any) =>
+        .withIndex("by_tenant_object_relation_subject", (q: any) =>
           q
             .eq("tenantId", tenantId)
             .eq("objectKey", oKey)
