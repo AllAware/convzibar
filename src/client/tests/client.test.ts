@@ -107,7 +107,7 @@ describe("Client API & Read-Time Inference", () => {
 
     const user = { type: "user" as const, id: "u1" };
     const org1 = { type: "org" as const, id: "org1" };
-    const org2 = { type: "org" as const, id: "org2" };
+    const _org2 = { type: "org" as const, id: "org2" };
     const proj1 = { type: "project" as const, id: "proj1" };
 
     await zbar.addRelation(ctx, user, "owner", org1); // Should grant view_dashboard via inheritance

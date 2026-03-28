@@ -327,7 +327,7 @@ describe("Asynchronous Race Conditions", () => {
           subject: user,
           relation: "admin",
           object: org,
-          path: { tokens: [adminRelId] },
+          path: { baseIds: [adminRelId] },
           depth: 1,
         },
       ],

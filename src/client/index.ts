@@ -581,7 +581,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
 
         for (const path of eff.paths) {
           // If includeInherited is false, ONLY consider base relationships (path length 1)
-          if (!includeInherited && path.tokens && path.tokens.length > 1) {
+          if (!includeInherited && path.baseIds && path.baseIds.length > 1) {
             continue;
           }
 

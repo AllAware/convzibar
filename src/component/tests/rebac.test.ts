@@ -478,7 +478,7 @@ describe("ReBAC Core Engine (v3)", () => {
       object: document,
     });
     expect(relsDoc.length).toBe(1);
-    expect(relsDoc[0].paths[0].tokens.length).toBeGreaterThan(3); // Should have accumulated several tokens
+    expect(relsDoc[0].paths[0].baseIds.length).toBeGreaterThan(3); // Should have accumulated several tokens
 
     // Verify user has admin on the folder (2 hops away)
     let relsFolder = await t.query(api.queries.checkPermissionFast, {

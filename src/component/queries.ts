@@ -19,10 +19,8 @@ export const checkPermissionFast = query({
     const sKey = buildScopeKey(subject.type, subject.id);
     const oKey = buildScopeKey(object.type, object.id);
 
-    const results = [];
-
-    for (const rel of relations) {
-      const eff = await ctx.db
+    const promises = relations.map((rel: string) =>
+      ctx.db
         .query("effectiveRelationships")
         .withIndex("by_tenant_subject_relation_object", (q: any) =>
           q
@@ -31,14 +29,12 @@ export const checkPermissionFast = query({
             .eq("relation", rel)
             .eq("objectKey", oKey),
         )
-        .unique();
+        .unique(),
+    );
 
-      if (eff) {
-        results.push(eff);
-      }
-    }
+    const results = await Promise.all(promises);
 
-    return results; // Return all matching effective relationships so conditions can be evaluated client-side
+    return results.filter((eff: any) => eff !== null);
   },
 });
 
@@ -54,9 +50,7 @@ export const listAccessibleObjectsFast = query({
 
     const sKey = buildScopeKey(subject.type, subject.id);
 
-    const results = [];
-
-    for (const rel of relations) {
+    const promises = relations.map(async (rel: string) => {
       const matches = await ctx.db
         .query("effectiveRelationships")
         .withIndex("by_tenant_subject_relation_object", (q: any) =>
@@ -64,15 +58,14 @@ export const listAccessibleObjectsFast = query({
         )
         .collect();
 
-      for (const match of matches) {
+      return matches.filter((match: any) => {
         const [matchObjectType, _matchObjectId] = match.objectKey.split(":");
-        if (matchObjectType === objectType) {
-          results.push(match);
-        }
-      }
-    }
+        return matchObjectType === objectType;
+      });
+    });
 
-    return results;
+    const results = await Promise.all(promises);
+    return results.flat();
   },
 });
 
@@ -87,9 +80,7 @@ export const listUsersWithAccessFast = query({
 
     const oKey = buildScopeKey(object.type, object.id);
 
-    const results = [];
-
-    for (const rel of relations) {
+    const promises = relations.map(async (rel: string) => {
       const matches = await ctx.db
         .query("effectiveRelationships")
         .withIndex("by_tenant_object_relation", (q: any) =>
@@ -97,15 +88,13 @@ export const listUsersWithAccessFast = query({
         )
         .collect();
 
-      for (const match of matches) {
+      return matches.filter((match: any) => {
         const [matchSubjectType, _matchSubjectId] = match.subjectKey.split(":");
-        if (matchSubjectType === "user") {
-          // Hardcode user as subject type, or parameterize it
-          results.push(match);
-        }
-      }
-    }
+        return matchSubjectType === "user";
+      });
+    });
 
-    return results;
+    const results = await Promise.all(promises);
+    return results.flat();
   },
 });

@@ -111,7 +111,7 @@ async function addRelationInternal(ctx: any, args: any) {
   }
 
   const pathItem = {
-    tokens: [relId],
+    baseIds: [relId],
     conditions: condition ? [condition] : undefined,
   };
 
@@ -163,7 +163,7 @@ async function addRelationInternal(ctx: any, args: any) {
         relation: reverseRel,
         object: subject,
         path: {
-          tokens: [revId],
+          baseIds: [revId],
         },
         depth: 1,
       });
@@ -304,11 +304,11 @@ async function processAddChunkInternal(ctx: any, args: any) {
     } else {
       const pathExists = eff.paths.some(
         (p: any) =>
-          p.tokens &&
-          current.path.tokens &&
-          p.tokens.length === current.path.tokens.length &&
-          p.tokens.every(
-            (t: string, i: number) => t === current.path.tokens[i],
+          p.baseIds &&
+          current.path.baseIds &&
+          p.baseIds.length === current.path.baseIds.length &&
+          p.baseIds.every(
+            (t: string, i: number) => t === current.path.baseIds[i],
           ),
       );
 
@@ -354,8 +354,8 @@ async function processAddChunkInternal(ctx: any, args: any) {
                 ...schemaCondition,
               ];
 
-              const hasCycle = current.path.tokens.some((t: string) =>
-                matchPath.tokens.includes(t),
+              const hasCycle = current.path.baseIds.some((t: string) =>
+                matchPath.baseIds.includes(t),
               );
               if (hasCycle) continue;
 
@@ -366,12 +366,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
                 relation: rule.derivedRelation,
                 object: derivedObject,
                 path: {
-                  tokens: [
-                    ...current.path.tokens,
-                    ...matchPath.tokens,
-                    match._id,
-                    eff._id,
-                  ],
+                  baseIds: [...current.path.baseIds, ...matchPath.baseIds],
                   conditions:
                     combinedConditions.length > 0
                       ? combinedConditions
@@ -414,8 +409,8 @@ async function processAddChunkInternal(ctx: any, args: any) {
                   ...schemaCondition,
                 ];
 
-                const hasCycle = current.path.tokens.some((t: string) =>
-                  matchPath.tokens.includes(t),
+                const hasCycle = current.path.baseIds.some((t: string) =>
+                  matchPath.baseIds.includes(t),
                 );
                 if (hasCycle) continue;
 
@@ -426,12 +421,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
                   relation: rule.derivedRelation,
                   object: derivedObject,
                   path: {
-                    tokens: [
-                      ...current.path.tokens,
-                      ...matchPath.tokens,
-                      match._id,
-                      eff._id,
-                    ],
+                    baseIds: [...current.path.baseIds, ...matchPath.baseIds],
                     conditions:
                       combinedConditions.length > 0
                         ? combinedConditions
@@ -705,21 +695,20 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
 
     if (eff) {
       const remainingPaths = eff.paths.filter(
-        (p: any) => !p.tokens || !p.tokens.includes(current.removedRelationId),
+        (p: any) =>
+          !p.baseIds || !p.baseIds.includes(current.removedRelationId),
       );
 
       let shouldCascade = false;
-      let cascadeId = current.removedRelationId;
+      const cascadeId = current.removedRelationId;
 
       if (remainingPaths.length === 0) {
         await ctx.db.delete(eff._id);
         effectiveRelationshipsRemoved++;
         shouldCascade = true;
-        cascadeId = eff._id;
       } else if (remainingPaths.length !== eff.paths.length) {
         await ctx.db.patch(eff._id, { paths: remainingPaths });
         shouldCascade = true;
-        cascadeId = current.removedRelationId;
       }
 
       if (shouldCascade) {

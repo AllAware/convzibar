@@ -30,7 +30,7 @@ const schema = {
 
     paths: v.array(
       v.object({
-        tokens: v.array(v.string()),
+        baseIds: v.array(v.string()),
         conditions: v.optional(
           v.array(
             v.object({
