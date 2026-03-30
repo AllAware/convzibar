@@ -289,6 +289,26 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     });
   }
 
+  private validateRelationParameter(
+    subject: { type: string },
+    relation: string,
+    object: { type: string },
+  ) {
+    const schema = this.options.schema;
+
+    const objectRelations = schema.entities[object.type]?.relations;
+    const subjectRelations = schema.entities[subject.type]?.relations;
+
+    const isValidOnObject = objectRelations && relation in objectRelations;
+    const isValidOnSubject = subjectRelations && relation in subjectRelations;
+
+    if (!isValidOnObject && !isValidOnSubject) {
+      throw new Error(
+        `Zbar Schema Error: Relation '${relation}' is not defined for object type '${object.type}' or subject type '${subject.type}'.`,
+      );
+    }
+  }
+
   private resolvePermissionRelations(objectType: string, permission: string) {
     const cacheKey = `${objectType}:${permission}`;
     if (this.permissionRelationsCache.has(cacheKey)) {
@@ -834,6 +854,8 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       createdBy?: string;
     },
   ): Promise<string> {
+    this.validateRelationParameter(subject, relation, object);
+
     return ctx.runMutation(this.component.mutations.addRelation, {
       tenantId: this.options.tenantId,
       subject,
@@ -876,6 +898,9 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       createdBy?: string;
     },
   ): Promise<string> {
+    this.validateRelationParameter(subject, oldRelation as string, object);
+    this.validateRelationParameter(subject, newRelation as string, object);
+
     return ctx.runMutation(this.component.mutations.updateRelation, {
       tenantId: this.options.tenantId,
       subject,
@@ -915,6 +940,8 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       createdBy?: string;
     },
   ): Promise<string> {
+    this.validateRelationParameter(subject, relation, object);
+
     return ctx.runMutation(this.component.mutations.setRelation, {
       tenantId: this.options.tenantId,
       subject,
@@ -949,6 +976,8 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     object: { type: ObjectType; id: string },
     actorId?: string,
   ): Promise<boolean> {
+    this.validateRelationParameter(subject, relation, object);
+
     return ctx.runMutation(this.component.mutations.removeRelation, {
       tenantId: this.options.tenantId,
       subject,
