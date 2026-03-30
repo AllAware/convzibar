@@ -271,7 +271,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
   const CHUNK_SIZE = graphConfig.maxChunkSize ?? 50;
   let processed = 0;
 
-  while (queue.length > 0 && processed < CHUNK_SIZE) {
+  while (queue.length > 0 && (!asyncWrites || processed < CHUNK_SIZE)) {
     processed++;
     const current = queue.shift()!;
     const sKey = buildScopeKey(current.subject.type, current.subject.id);
@@ -290,6 +290,23 @@ async function processAddChunkInternal(ctx: any, args: any) {
 
     let isNewOrUpdated = false;
 
+    const getPathKey = (p: any) => {
+      const sortedBaseIds = [...new Set(p.baseIds || [])].sort();
+      const sortedConditions = [...(p.conditions || [])]
+        .map((c: any) => JSON.stringify(c))
+        .sort();
+      return JSON.stringify({
+        baseIds: sortedBaseIds,
+        conditions: sortedConditions,
+      });
+    };
+
+    const currentPathKey = getPathKey(current.path);
+    const canonicalCurrentPath = {
+      baseIds: [...new Set(current.path.baseIds || [])].sort(),
+      conditions: current.path.conditions,
+    };
+
     if (!eff) {
       eff = {
         _id: await ctx.db.insert("effectiveRelationships", {
@@ -297,23 +314,17 @@ async function processAddChunkInternal(ctx: any, args: any) {
           subjectKey: sKey,
           relation: current.relation,
           objectKey: oKey,
-          paths: [current.path],
+          paths: [canonicalCurrentPath],
         }),
       };
       isNewOrUpdated = true;
     } else {
       const pathExists = eff.paths.some(
-        (p: any) =>
-          p.baseIds &&
-          current.path.baseIds &&
-          p.baseIds.length === current.path.baseIds.length &&
-          p.baseIds.every(
-            (t: string, i: number) => t === current.path.baseIds[i],
-          ),
+        (p: any) => getPathKey(p) === currentPathKey,
       );
 
       if (!pathExists) {
-        const newPaths = [...eff.paths, current.path];
+        const newPaths = [...eff.paths, canonicalCurrentPath];
         await ctx.db.patch(eff._id, { paths: newPaths });
         isNewOrUpdated = true;
       }
@@ -366,7 +377,9 @@ async function processAddChunkInternal(ctx: any, args: any) {
                 relation: rule.derivedRelation,
                 object: derivedObject,
                 path: {
-                  baseIds: [...current.path.baseIds, ...matchPath.baseIds],
+                  baseIds: [
+                    ...new Set([...current.path.baseIds, ...matchPath.baseIds]),
+                  ].sort(),
                   conditions:
                     combinedConditions.length > 0
                       ? combinedConditions
@@ -421,7 +434,12 @@ async function processAddChunkInternal(ctx: any, args: any) {
                   relation: rule.derivedRelation,
                   object: derivedObject,
                   path: {
-                    baseIds: [...current.path.baseIds, ...matchPath.baseIds],
+                    baseIds: [
+                      ...new Set([
+                        ...current.path.baseIds,
+                        ...matchPath.baseIds,
+                      ]),
+                    ].sort(),
                     conditions:
                       combinedConditions.length > 0
                         ? combinedConditions
@@ -452,15 +470,6 @@ async function processAddChunkInternal(ctx: any, args: any) {
         },
         graphConfig,
       );
-    } else {
-      await processAddChunkInternal(ctx, {
-        tenantId,
-        baseRelId,
-        queue,
-        graphConfig,
-        onComplete,
-        asyncWrites,
-      });
     }
   } else if (onComplete) {
     await executeOnComplete(ctx, onComplete, asyncWrites);
@@ -675,8 +684,15 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
   let effectiveRelationshipsRemoved = 0;
   const CHUNK_SIZE = graphConfig.maxChunkSize ?? 50;
   let processed = 0;
+  const seen = new Set<string>();
 
-  while (queue.length > 0 && processed < CHUNK_SIZE) {
+  for (const item of queue) {
+    seen.add(
+      `${buildScopeKey(item.subject.type, item.subject.id)}:${item.relation}:${buildScopeKey(item.object.type, item.object.id)}:${item.removedRelationId}`,
+    );
+  }
+
+  while (queue.length > 0 && (!asyncWrites || processed < CHUNK_SIZE)) {
     processed++;
     const current = queue.shift()!;
     const sKey = buildScopeKey(current.subject.type, current.subject.id);
@@ -731,12 +747,21 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
             for (const match of matches) {
               const [matchSubjectType, matchSubjectId] =
                 match.subjectKey.split(":");
-              queue.push({
-                subject: { type: matchSubjectType, id: matchSubjectId },
-                relation: rule.derivedRelation,
-                object: current.subject,
-                removedRelationId: cascadeId,
-              });
+              const derivedSubject = {
+                type: matchSubjectType,
+                id: matchSubjectId,
+              };
+              const derivedObject = current.subject;
+              const queueKey = `${buildScopeKey(derivedSubject.type, derivedSubject.id)}:${rule.derivedRelation}:${buildScopeKey(derivedObject.type, derivedObject.id)}:${cascadeId}`;
+              if (!seen.has(queueKey)) {
+                seen.add(queueKey);
+                queue.push({
+                  subject: derivedSubject,
+                  relation: rule.derivedRelation,
+                  object: derivedObject,
+                  removedRelationId: cascadeId,
+                });
+              }
             }
           }
 
@@ -755,12 +780,21 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
               const [matchSubjectType, matchSubjectId] =
                 match.subjectKey.split(":");
               if (matchSubjectType === rule.sourceObjectType) {
-                queue.push({
-                  subject: current.subject,
-                  relation: rule.derivedRelation,
-                  object: { type: matchSubjectType, id: matchSubjectId },
-                  removedRelationId: cascadeId,
-                });
+                const derivedSubject = current.subject;
+                const derivedObject = {
+                  type: matchSubjectType,
+                  id: matchSubjectId,
+                };
+                const queueKey = `${buildScopeKey(derivedSubject.type, derivedSubject.id)}:${rule.derivedRelation}:${buildScopeKey(derivedObject.type, derivedObject.id)}:${cascadeId}`;
+                if (!seen.has(queueKey)) {
+                  seen.add(queueKey);
+                  queue.push({
+                    subject: derivedSubject,
+                    relation: rule.derivedRelation,
+                    object: derivedObject,
+                    removedRelationId: cascadeId,
+                  });
+                }
               }
             }
           }
@@ -782,13 +816,6 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
         },
         graphConfig,
       );
-    } else {
-      effectiveRelationshipsRemoved += await processRemoveChunkInternal(ctx, {
-        tenantId,
-        queue,
-        graphConfig,
-        asyncWrites,
-      });
     }
   }
 
