@@ -69,7 +69,7 @@ describe("Schema Compiler Deduplication Integration", () => {
     const project = { type: "project" as const, id: "proj1" };
 
     // Set up project graph
-    await zbar.addRelation(ctx, project, "parent_org", org);
+    await zbar.addRelation(ctx, org, "parent_org", project);
 
     // Granting admin to user in the org triggers distant rule evaluation
     // Since admin inherits manager and viewer locally on the project, the schema
@@ -107,8 +107,8 @@ describe("Schema Compiler Deduplication Integration", () => {
     );
     expect(inheritedRels.sort()).toEqual(["admin", "manager", "viewer"]);
 
-    // Verify exactly 2 bases (user -> admin -> org, org -> projects -> project)
-    // and only 1 effective distant materialization (admin)
-    await assertDbState(t, 2, 3);
+    // Verify exactly 3 bases (org -> parent_org -> project, project -> projects -> org, user -> admin -> org)
+    // and only 1 effective distant materialization (admin) + local derivations
+    await assertDbState(t, 3, 4);
   });
 });

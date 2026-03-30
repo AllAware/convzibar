@@ -69,14 +69,15 @@ export const listAccessibleObjectsFast = query({
   },
 });
 
-export const listUsersWithAccessFast = query({
+export const listSubjectsWithAccessFast = query({
   args: {
     tenantId: v.optional(v.string()),
+    subjectType: v.string(),
+    relations: v.array(v.string()),
     object: objectValidator,
-    relations: v.array(v.string()), // Acceptable relations based on schema expansion
   },
-  handler: async (ctx: any, args: any) => {
-    const { tenantId, object, relations } = args;
+  handler: async (ctx, args) => {
+    const { tenantId, object, relations, subjectType } = args;
 
     const oKey = buildScopeKey(object.type, object.id);
 
@@ -88,8 +89,8 @@ export const listUsersWithAccessFast = query({
             .eq("tenantId", tenantId)
             .eq("objectKey", oKey)
             .eq("relation", rel)
-            .gte("subjectKey", "user:")
-            .lt("subjectKey", "user:\u{10FFFF}"),
+            .gte("subjectKey", `${subjectType}:`)
+            .lt("subjectKey", `${subjectType}:\u{10FFFF}`),
         )
         .collect();
     });

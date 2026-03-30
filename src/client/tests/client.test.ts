@@ -112,7 +112,7 @@ describe("Client API & Read-Time Inference", () => {
 
     await zbar.addRelation(ctx, user, "owner", org1); // Should grant view_dashboard via inheritance
     await zbar.addRelation(ctx, user, "viewer", org1);
-    await zbar.addRelation(ctx, proj1, "parent_org", org1);
+    await zbar.addRelation(ctx, org1, "parent_org", proj1);
 
     const results = await zbar.listAccessibleObjects(
       ctx,
@@ -141,7 +141,7 @@ describe("Client API & Read-Time Inference", () => {
     await assertDbState(t, 4, 5);
   });
 
-  test("listUsersWithAccess with local inheritance", async () => {
+  test("listSubjectsWithAccess with local inheritance", async () => {
     const t = setup();
     const ctx = {
       runQuery: t.query.bind(t),
@@ -162,10 +162,18 @@ describe("Client API & Read-Time Inference", () => {
     await zbar.addRelation(ctx, adminUser, "admin", org);
 
     // Both should have edit_settings
-    const results = await zbar.listUsersWithAccess(ctx, org, "edit_settings");
+    const results = await zbar.listSubjectsWithAccess(
+      ctx,
+      "user",
+      "edit_settings",
+      org,
+    );
 
     expect(results.length).toBe(2);
-    expect(results.map((r) => r.userId).sort()).toEqual(["u_admin", "u_owner"]);
+    expect(results.map((r) => r.subjectId).sort()).toEqual([
+      "u_admin",
+      "u_owner",
+    ]);
 
     await assertDbState(t, 3, 3);
   });
@@ -221,7 +229,7 @@ describe("Client API & Read-Time Inference", () => {
 
     // user is owner of org (which gives viewer access to org, and editor access to proj if proj in org)
     await zbar.addRelation(ctx, user, "owner", org);
-    await zbar.addRelation(ctx, project, "parent_org", org);
+    await zbar.addRelation(ctx, org, "parent_org", project);
 
     const relsBefore = await t.query(api.queries.checkPermissionFast, {
       tenantId: "t1",
@@ -304,9 +312,9 @@ describe("Client API & Read-Time Inference", () => {
     const document = { type: "document", id: "d1" } as const;
 
     // Link graph: Document -> Folder -> Project -> Org
-    await zbar.addRelation(ctx, document, "parent_folder", folder);
-    await zbar.addRelation(ctx, folder, "parent_project", project);
-    await zbar.addRelation(ctx, project, "parent_org", org);
+    await zbar.addRelation(ctx, folder, "parent_folder", document);
+    await zbar.addRelation(ctx, project, "parent_project", folder);
+    await zbar.addRelation(ctx, org, "parent_org", project);
 
     // Give user viewer on Org
     await zbar.addRelation(ctx, user, "viewer", org);
@@ -333,7 +341,7 @@ describe("Client API & Read-Time Inference", () => {
     expect(accessibleDocs[0].objectId).toBe("d1");
 
     // 4. Sever the graph by removing folder -> project
-    await zbar.removeRelation(ctx, folder, "parent_project", project);
+    await zbar.removeRelation(ctx, project, "parent_project", folder);
 
     // Should NO LONGER be able to read even with context
     const canReadAfterDelete = await zbar.can(ctx, user, "read", document, {
@@ -342,7 +350,7 @@ describe("Client API & Read-Time Inference", () => {
     expect(canReadAfterDelete).toBe(false);
 
     // 5. Re-link folder -> project, but this time with a hardcoded failing edge condition
-    await zbar.addRelation(ctx, folder, "parent_project", project, {
+    await zbar.addRelation(ctx, project, "parent_project", folder, {
       condition: "isActive",
       conditionContext: { active: false },
     });
@@ -355,8 +363,8 @@ describe("Client API & Read-Time Inference", () => {
     expect(canReadWithEdgeFalse).toBe(false);
 
     // 6. Fix the edge condition to be true
-    await zbar.removeRelation(ctx, folder, "parent_project", project);
-    await zbar.addRelation(ctx, folder, "parent_project", project, {
+    await zbar.removeRelation(ctx, project, "parent_project", folder);
+    await zbar.addRelation(ctx, project, "parent_project", folder, {
       condition: "isActive",
       conditionContext: { active: true },
     });
@@ -404,7 +412,7 @@ describe("Client API & Read-Time Inference", () => {
     const document = { type: "document", id: "d1" } as const;
     const folder = { type: "folder", id: "f1" } as const;
 
-    await zbar.addRelation(ctx, document, "parent_folder", folder);
+    await zbar.addRelation(ctx, folder, "parent_folder", document);
     await zbar.addRelation(ctx, user, "viewer", folder);
 
     // Context without active: true -> fails

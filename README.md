@@ -330,7 +330,7 @@ const projects = await zbar.listAccessibleObjects(
 **Find all users who have access to an object:**
 
 ```typescript
-const users = await zbar.listUsersWithAccess(
+const users = await zbar.listSubjectsWithAccess(
   ctx,
   { type: "project", id: projId },
   "edit",

@@ -298,7 +298,7 @@ describe("Asynchronous Race Conditions", () => {
     const proj = { type: "project", id: "proj_phantom" } as const;
 
     // Link the project to the org fully
-    await zbar.addRelation(ctx, proj, "parent_org", org);
+    await zbar.addRelation(ctx, org, "parent_org", proj);
 
     // Add user as admin of org in the foreground
     const graphConfig = (zbar as any).graphConfig;
@@ -431,10 +431,10 @@ describe("Asynchronous Race Conditions", () => {
     const l5 = { type: "level5", id: "5" } as const;
 
     // Link the graph backwards so the paths are ready to catch the expansion
-    await zbar.addRelation(ctx, l5, "parent", l4);
-    await zbar.addRelation(ctx, l4, "parent", l3);
-    await zbar.addRelation(ctx, l3, "parent", l2);
-    await zbar.addRelation(ctx, l2, "parent", l1);
+    await zbar.addRelation(ctx, l4, "parent", l5);
+    await zbar.addRelation(ctx, l3, "parent", l4);
+    await zbar.addRelation(ctx, l2, "parent", l3);
+    await zbar.addRelation(ctx, l1, "parent", l2);
 
     // Trigger the deep expansion.
     // This generates >2 nodes of expansion, forcing `processAddChunkInternal` to recurse synchronously.
@@ -489,9 +489,9 @@ describe("Asynchronous Race Conditions", () => {
     const proj = { type: "project", id: "proj_bloat" } as const;
     const doc = { type: "document", id: "doc_bloat" } as const;
 
-    await zbar.addRelation(ctx, doc, "parent", proj);
-    await zbar.addRelation(ctx, proj, "parent", org1);
-    await zbar.addRelation(ctx, proj, "parent", org2);
+    await zbar.addRelation(ctx, proj, "parent", doc);
+    await zbar.addRelation(ctx, org1, "parent", proj);
+    await zbar.addRelation(ctx, org2, "parent", proj);
 
     // Constant relation that keeps the effective nodes alive
     await zbar.addRelation(ctx, user, "admin", org2);
@@ -534,7 +534,7 @@ describe("Asynchronous Race Conditions", () => {
     const proj = { type: "project", id: "proj_orphan" } as const;
 
     // 1. Proj is a child of Org.
-    await zbar.addRelation(ctx, proj, "parent_org", org);
+    await zbar.addRelation(ctx, org, "parent_org", proj);
 
     // 2. User is BOTH owner AND admin of Org explicitly.
     // owner grants admin and viewer. admin grants viewer.

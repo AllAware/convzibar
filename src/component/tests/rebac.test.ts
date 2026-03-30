@@ -71,9 +71,9 @@ describe("ReBAC Core Engine (v3)", () => {
     // 1. Link Project to Org
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: project,
+      subject: org,
       relation: "parent_org",
-      object: org,
+      object: project,
       graphConfig,
     });
 
@@ -120,9 +120,9 @@ describe("ReBAC Core Engine (v3)", () => {
     // Link Project to Org
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: project,
+      subject: org,
       relation: "parent_org",
-      object: org,
+      object: project,
       graphConfig,
     });
 
@@ -176,9 +176,9 @@ describe("ReBAC Core Engine (v3)", () => {
     // Setup initial state
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: project,
+      subject: org,
       relation: "parent_org",
-      object: org,
+      object: project,
       graphConfig,
     });
 
@@ -243,39 +243,39 @@ describe("ReBAC Core Engine (v3)", () => {
     // Link doc1 to all 3 projects
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: doc1,
+      subject: proj1,
       relation: "parent_project",
-      object: proj1,
+      object: doc1,
       graphConfig,
     });
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: doc1,
+      subject: proj2,
       relation: "parent_project",
-      object: proj2,
+      object: doc1,
       graphConfig,
     });
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: doc1,
+      subject: proj3,
       relation: "parent_project",
-      object: proj3,
+      object: doc1,
       graphConfig,
     });
 
     // Link doc2 to proj1 and proj2
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: doc2,
+      subject: proj1,
       relation: "parent_project",
-      object: proj1,
+      object: doc2,
       graphConfig,
     });
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: doc2,
+      subject: proj2,
       relation: "parent_project",
-      object: proj2,
+      object: doc2,
       graphConfig,
     });
 
@@ -365,9 +365,9 @@ describe("ReBAC Core Engine (v3)", () => {
     // 2. Delete doc1 parent_project proj3
     await t.mutation(api.mutations.removeRelation, {
       tenantId: "t1",
-      subject: doc1,
+      subject: proj3,
       relation: "parent_project",
-      object: proj3,
+      object: doc1,
       graphConfig,
     });
 
@@ -441,23 +441,23 @@ describe("ReBAC Core Engine (v3)", () => {
     // 1. Build the chain from bottom up
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: document,
-      relation: "parent_folder",
-      object: folder,
-      graphConfig,
-    });
-    await t.mutation(api.mutations.addRelation, {
-      tenantId: "t1",
       subject: folder,
-      relation: "parent_project",
-      object: project,
+      relation: "parent_folder",
+      object: document,
       graphConfig,
     });
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
       subject: project,
+      relation: "parent_project",
+      object: folder,
+      graphConfig,
+    });
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: org,
       relation: "parent_org",
-      object: org,
+      object: project,
       graphConfig,
     });
 
@@ -501,9 +501,9 @@ describe("ReBAC Core Engine (v3)", () => {
     // 4. Break the chain in the middle (remove folder from project)
     await t.mutation(api.mutations.removeRelation, {
       tenantId: "t1",
-      subject: folder,
+      subject: project,
       relation: "parent_project",
-      object: project,
+      object: folder,
       graphConfig,
     });
 
@@ -537,9 +537,9 @@ describe("ReBAC Core Engine (v3)", () => {
     // 5. Re-link folder to project to restore the chain
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: folder,
+      subject: project,
       relation: "parent_project",
-      object: project,
+      object: folder,
       graphConfig,
     });
 
@@ -650,29 +650,6 @@ describe("ReBAC Core Engine (v3)", () => {
     const n3 = { type: "node", id: "3" };
     const n4 = { type: "node", id: "4" };
 
-    // Base connections
-    await t.mutation(api.mutations.addRelation, {
-      tenantId: "t1",
-      subject: n1,
-      relation: "reachable",
-      object: n2,
-      graphConfig,
-    });
-    await t.mutation(api.mutations.addRelation, {
-      tenantId: "t1",
-      subject: n2,
-      relation: "reachable",
-      object: n3,
-      graphConfig,
-    });
-    await t.mutation(api.mutations.addRelation, {
-      tenantId: "t1",
-      subject: n3,
-      relation: "reachable",
-      object: n4,
-      graphConfig,
-    });
-
     // Link them together with next
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
@@ -693,6 +670,15 @@ describe("ReBAC Core Engine (v3)", () => {
       subject: n3,
       relation: "next",
       object: n4,
+      graphConfig,
+    });
+
+    // Now trigger the cascade with a single write!
+    await t.mutation(api.mutations.addRelation, {
+      tenantId: "t1",
+      subject: n1,
+      relation: "reachable",
+      object: n2,
       graphConfig,
     });
 
@@ -728,9 +714,9 @@ describe("ReBAC Core Engine (v3)", () => {
     // Add relation with asyncWrites: true
     await t.mutation(api.mutations.addRelation, {
       tenantId: "t1",
-      subject: project,
+      subject: org,
       relation: "parent_org",
-      object: org,
+      object: project,
       graphConfig,
       asyncWrites: true,
     });

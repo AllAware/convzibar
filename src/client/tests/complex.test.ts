@@ -79,8 +79,8 @@ describe("Complex Schema Inheritance Flows", () => {
     await zbar.addRelation(ctx, viewerUser, "viewer", sys);
 
     // Link devices to system (Note: Subject=Device, Relation=owned_by, Object=System)
-    await zbar.addRelation(ctx, device1, "owned_by", sys);
-    await zbar.addRelation(ctx, device2, "owned_by", sys);
+    await zbar.addRelation(ctx, sys, "owned_by", device1);
+    await zbar.addRelation(ctx, sys, "owned_by", device2);
 
     // 2. Verify System-level permissions via local inheritance
 
@@ -136,7 +136,7 @@ describe("Complex Schema Inheritance Flows", () => {
     expect(await zbar.can(ctx, adminUser, "manage", device1)).toBe(false);
 
     // Disconnect device 2
-    await zbar.removeRelation(ctx, device2, "owned_by", sys);
+    await zbar.removeRelation(ctx, sys, "owned_by", device2);
 
     // Owner should still manage device 1, but not device 2
     expect(await zbar.can(ctx, ownerUser, "manage", device1)).toBe(true);

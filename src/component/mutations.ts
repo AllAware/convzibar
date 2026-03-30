@@ -333,7 +333,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
     if (isNewOrUpdated) {
       for (const rule of graphConfig.traversalRules) {
         if (
-          current.subject.type === rule.sourceObjectType &&
+          current.object.type === rule.sourceObjectType &&
           current.relation === rule.sourceRelation
         ) {
           const matches = await ctx.db
@@ -341,7 +341,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
             .withIndex("by_tenant_object_relation_subject", (q: any) =>
               q
                 .eq("tenantId", tenantId)
-                .eq("objectKey", oKey)
+                .eq("objectKey", sKey)
                 .eq("relation", rule.targetRelation),
             )
             .collect();
@@ -353,7 +353,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
               type: matchSubjectType,
               id: matchSubjectId,
             };
-            const derivedObject = current.subject;
+            const derivedObject = current.object;
 
             for (const matchPath of match.paths) {
               const schemaCondition = rule.conditions
@@ -394,22 +394,21 @@ async function processAddChunkInternal(ctx: any, args: any) {
         if (current.relation === rule.targetRelation) {
           const matches = await ctx.db
             .query("effectiveRelationships")
-            .withIndex("by_tenant_object_relation_subject", (q: any) =>
+            .withIndex("by_tenant_subject_relation_object", (q: any) =>
               q
                 .eq("tenantId", tenantId)
-                .eq("objectKey", oKey)
+                .eq("subjectKey", oKey)
                 .eq("relation", rule.sourceRelation),
             )
             .collect();
 
           for (const match of matches) {
-            const [matchSubjectType, matchSubjectId] =
-              match.subjectKey.split(":");
-            if (matchSubjectType === rule.sourceObjectType) {
+            const [matchObjectType, matchObjectId] = match.objectKey.split(":");
+            if (matchObjectType === rule.sourceObjectType) {
               const derivedSubject = current.subject;
               const derivedObject = {
-                type: matchSubjectType,
-                id: matchSubjectId,
+                type: matchObjectType,
+                id: matchObjectId,
               };
 
               for (const matchPath of match.paths) {
@@ -731,7 +730,7 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
         // If this effective relationship was modified or deleted, cascade the token downstream
         for (const rule of graphConfig.traversalRules) {
           if (
-            current.subject.type === rule.sourceObjectType &&
+            current.object.type === rule.sourceObjectType &&
             current.relation === rule.sourceRelation
           ) {
             const matches = await ctx.db
@@ -739,7 +738,7 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
               .withIndex("by_tenant_object_relation_subject", (q: any) =>
                 q
                   .eq("tenantId", tenantId)
-                  .eq("objectKey", oKey)
+                  .eq("objectKey", sKey)
                   .eq("relation", rule.targetRelation),
               )
               .collect();
@@ -751,7 +750,7 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
                 type: matchSubjectType,
                 id: matchSubjectId,
               };
-              const derivedObject = current.subject;
+              const derivedObject = current.object;
               const queueKey = `${buildScopeKey(derivedSubject.type, derivedSubject.id)}:${rule.derivedRelation}:${buildScopeKey(derivedObject.type, derivedObject.id)}:${cascadeId}`;
               if (!seen.has(queueKey)) {
                 seen.add(queueKey);
@@ -768,22 +767,22 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
           if (current.relation === rule.targetRelation) {
             const matches = await ctx.db
               .query("effectiveRelationships")
-              .withIndex("by_tenant_object_relation_subject", (q: any) =>
+              .withIndex("by_tenant_subject_relation_object", (q: any) =>
                 q
                   .eq("tenantId", tenantId)
-                  .eq("objectKey", oKey)
+                  .eq("subjectKey", oKey)
                   .eq("relation", rule.sourceRelation),
               )
               .collect();
 
             for (const match of matches) {
-              const [matchSubjectType, matchSubjectId] =
-                match.subjectKey.split(":");
-              if (matchSubjectType === rule.sourceObjectType) {
+              const [matchObjectType, matchObjectId] =
+                match.objectKey.split(":");
+              if (matchObjectType === rule.sourceObjectType) {
                 const derivedSubject = current.subject;
                 const derivedObject = {
-                  type: matchSubjectType,
-                  id: matchSubjectId,
+                  type: matchObjectType,
+                  id: matchObjectId,
                 };
                 const queueKey = `${buildScopeKey(derivedSubject.type, derivedSubject.id)}:${rule.derivedRelation}:${buildScopeKey(derivedObject.type, derivedObject.id)}:${cascadeId}`;
                 if (!seen.has(queueKey)) {

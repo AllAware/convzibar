@@ -297,14 +297,12 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     const schema = this.options.schema;
 
     const objectRelations = schema.entities[object.type]?.relations;
-    const subjectRelations = schema.entities[subject.type]?.relations;
 
     const isValidOnObject = objectRelations && relation in objectRelations;
-    const isValidOnSubject = subjectRelations && relation in subjectRelations;
 
-    if (!isValidOnObject && !isValidOnSubject) {
+    if (!isValidOnObject) {
       throw new Error(
-        `Zbar Schema Error: Relation '${relation}' is not defined for object type '${object.type}' or subject type '${subject.type}'.`,
+        `Zbar Schema Error: Relation '${relation}' is not defined for object type '${object.type}'.`,
       );
     }
   }
@@ -792,28 +790,123 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
   }
 
   /**
+   * Retrieve a list of objects a subject has a specific relationship with.
+   */
+  async listObjectsWithRelation<
+    SubjectType extends keyof Schema["entities"] & string,
+    ObjectType extends keyof Schema["entities"] & string,
+    Relation extends EntityRelations<Schema, ObjectType>,
+  >(
+    ctx: QueryCtx | ActionCtx,
+    subject: { type: SubjectType; id: string },
+    relation: Relation,
+    objectType: ObjectType,
+    requestContext?: Data,
+  ): Promise<Array<{ objectId: string }>> {
+    const targets = this.resolveRelationInheritance(objectType, relation);
+    if (targets.length === 0) return [];
+
+    const acceptableRelations = targets.map((t) => t.relation);
+
+    const effectiveRels = await ctx.runQuery(
+      this.component.queries.listAccessibleObjectsFast,
+      {
+        tenantId: this.options.tenantId,
+        subject,
+        relations: acceptableRelations,
+        objectType,
+      },
+    );
+
+    const results = await this.listWithValidation<{
+      id: string;
+      objectId: string;
+    }>(
+      ctx,
+      effectiveRels,
+      targets,
+      (eff) => eff.objectKey.split(":")[1],
+      () => subject,
+      (_, id) => ({ type: objectType, id }),
+      relation,
+      requestContext,
+    );
+
+    return results.map((r) => ({ objectId: r.id }));
+  }
+
+  /**
+   * Retrieve a list of subjects that have a specific relationship with an object.
+   */
+  async listSubjectsWithRelation<
+    SubjectType extends keyof Schema["entities"] & string,
+    ObjectType extends keyof Schema["entities"] & string,
+    Relation extends EntityRelations<Schema, ObjectType>,
+  >(
+    ctx: QueryCtx | ActionCtx,
+    subjectType: SubjectType,
+    relation: Relation,
+    object: { type: ObjectType; id: string },
+    requestContext?: Data,
+  ): Promise<Array<{ subjectId: string }>> {
+    const targets = this.resolveRelationInheritance(object.type, relation);
+    if (targets.length === 0) return [];
+
+    const acceptableRelations = targets.map((t) => t.relation);
+
+    const effectiveRels = await ctx.runQuery(
+      this.component.queries.listSubjectsWithAccessFast,
+      {
+        tenantId: this.options.tenantId,
+        object,
+        relations: acceptableRelations,
+        subjectType,
+      },
+    );
+
+    const results = await this.listWithValidation<{
+      id: string;
+      userId: string;
+    }>(
+      ctx,
+      effectiveRels,
+      targets,
+      (eff) => eff.subjectKey.split(":")[1],
+      (eff, id) => ({ type: eff.subjectKey.split(":")[0], id }),
+      () => object,
+      relation,
+      requestContext,
+    );
+
+    return results.map((r) => ({ subjectId: r.id }));
+  }
+
+  /**
    * Retrieve a list of subjects that have a specific permission on an object.
    */
-  async listUsersWithAccess<
+  async listSubjectsWithAccess<
+    SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
     Permission extends EntityPermissions<Schema, ObjectType>,
   >(
     ctx: QueryCtx | ActionCtx,
-    object: { type: ObjectType; id: string },
+    subjectType: SubjectType,
     permission: Permission,
+    object: { type: ObjectType; id: string },
     requestContext?: Data,
-  ): Promise<Array<{ userId: string }>> {
+  ): Promise<Array<{ subjectId: string }>> {
     const targets = this.resolvePermissionRelations(object.type, permission);
     if (targets.length === 0) return [];
 
     const acceptableRelations = targets.map((t) => t.relation);
 
     const effectiveRels = await ctx.runQuery(
-      this.component.queries.listUsersWithAccessFast,
+      this.component.queries.listSubjectsWithAccessFast,
       {
         tenantId: this.options.tenantId,
         object,
         relations: acceptableRelations,
+        subjectType,
       },
     );
 
@@ -831,7 +924,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       requestContext,
     );
 
-    return results.map((r) => ({ userId: r.id }));
+    return results.map((r) => ({ subjectId: r.id }));
   }
 
   /**

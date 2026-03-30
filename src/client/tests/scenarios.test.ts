@@ -66,13 +66,13 @@ describe("Scenario: Google Drive-style sharing", () => {
 
     // Relations setup
     // file -> folder (parent)
-    await zbar.addRelation(ctx, file, "parent_folder", folder);
+    await zbar.addRelation(ctx, folder, "parent_folder", file);
 
     // folder -> account (parent)
-    await zbar.addRelation(ctx, folder, "parent", account);
+    await zbar.addRelation(ctx, account, "parent", folder);
 
     // file -> account (account_global) for everyone in account
-    await zbar.addRelation(ctx, file, "parent_account", account);
+    await zbar.addRelation(ctx, account, "parent_account", file);
 
     // Direct access and roles
     // John: direct viewer on file

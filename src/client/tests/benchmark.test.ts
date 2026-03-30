@@ -93,12 +93,10 @@ describe("Benchmarks & High Contention Stress Tests", () => {
     // 1. Create a wide graph: 20 files linked to root
     const NUM_FILES = 20;
     for (let i = 0; i < NUM_FILES; i++) {
-      await zbar.addRelation(
-        ctx,
-        { type: "file", id: `f${i}` },
-        "parent",
-        rootFolder,
-      );
+      await zbar.addRelation(ctx, rootFolder, "parent", {
+        type: "file",
+        id: `f${i}`,
+      });
     }
     await drainMockWorkpool(t);
 
@@ -167,7 +165,7 @@ describe("Benchmarks & High Contention Stress Tests", () => {
     for (let i = DEPTH; i > 0; i--) {
       const child = { type: "folder" as const, id: `folder_${i}` };
       const parent = { type: "folder" as const, id: `folder_${i - 1}` };
-      await zbar.addRelation(ctx, child, "parent", parent);
+      await zbar.addRelation(ctx, parent, "parent", child);
     }
     await drainMockWorkpool(t);
 

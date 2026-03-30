@@ -146,7 +146,7 @@ describe("Cross-tenant ReBAC isolation", () => {
     expect(accessibleB[0].objectId).toBe("org2");
   });
 
-  test("listUsersWithAccess is isolated by tenant", async () => {
+  test("listSubjectsWithAccess is isolated by tenant", async () => {
     const t = convexTest(schema, modules);
     const ctx = {
       runQuery: t.query.bind(t),
@@ -176,13 +176,23 @@ describe("Cross-tenant ReBAC isolation", () => {
     await zbarB.addRelation(ctx, user2, "admin", org);
 
     // Verify users with access in Tenant A
-    const usersA = await zbarA.listUsersWithAccess(ctx, org, "edit_settings");
+    const usersA = await zbarA.listSubjectsWithAccess(
+      ctx,
+      "user",
+      "edit_settings",
+      org,
+    );
     expect(usersA.length).toBe(1);
-    expect(usersA[0].userId).toBe("u1");
+    expect(usersA[0].subjectId).toBe("u1");
 
     // Verify users with access in Tenant B
-    const usersB = await zbarB.listUsersWithAccess(ctx, org, "edit_settings");
+    const usersB = await zbarB.listSubjectsWithAccess(
+      ctx,
+      "user",
+      "edit_settings",
+      org,
+    );
     expect(usersB.length).toBe(1);
-    expect(usersB[0].userId).toBe("u2");
+    expect(usersB[0].subjectId).toBe("u2");
   });
 });
