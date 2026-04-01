@@ -18,8 +18,8 @@ const groupSchema = createZbarSchema<any>()
   .entity("user")
   .entity("group", (e) =>
     e
-      .relation("admin", "user", "group.admin")
-      .relation("member", "user", "admin", "group.member")
+      .relation("admin", "user", "group#admin")
+      .relation("member", "user", "admin", "group#member")
       .permission("manage", "admin")
       .permission("view", "member"),
   )
@@ -29,11 +29,11 @@ const groupSchema = createZbarSchema<any>()
 const folderSchema = createZbarSchema<any>()
   .entity("user")
   .entity("group", (e) =>
-    e.relation("member", "user").relation("admin", "user", "member"),
+    e.relation("admin", "user").relation("member", "user", "admin"),
   )
   .entity("folder", (e) =>
     e
-      .relation("editor", "user", "group.member")
+      .relation("editor", "user", "group#member")
       .relation("viewer", "user", "editor")
       .permission("write", "editor")
       .permission("read", "viewer"),

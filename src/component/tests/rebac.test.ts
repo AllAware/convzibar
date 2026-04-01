@@ -18,7 +18,6 @@ describe("ReBAC Core Engine (v3)", () => {
     // Simplest possible graph with no traversals
     const graphConfig: GraphConfig = {
       traversalRules: [],
-      reverseEdges: {},
     };
 
     const user = { type: "user", id: "user1" };
@@ -61,7 +60,6 @@ describe("ReBAC Core Engine (v3)", () => {
           derivedRelation: "editor",
         },
       ],
-      reverseEdges: {},
     };
 
     const user = { type: "user", id: "user1" };
@@ -110,7 +108,6 @@ describe("ReBAC Core Engine (v3)", () => {
           derivedRelation: "editor",
         },
       ],
-      reverseEdges: {},
     };
 
     const user = { type: "user", id: "user1" };
@@ -166,7 +163,6 @@ describe("ReBAC Core Engine (v3)", () => {
           derivedRelation: "editor",
         },
       ],
-      reverseEdges: {},
     };
 
     const user = { type: "user", id: "user1" };
@@ -229,7 +225,6 @@ describe("ReBAC Core Engine (v3)", () => {
           derivedRelation: "viewer",
         },
       ],
-      reverseEdges: {},
     };
 
     const user = { type: "user", id: "u1" };
@@ -429,7 +424,6 @@ describe("ReBAC Core Engine (v3)", () => {
           derivedRelation: "admin",
         },
       ],
-      reverseEdges: {},
     };
 
     const user = { type: "user", id: "u_deep" };
@@ -590,7 +584,6 @@ describe("ReBAC Core Engine (v3)", () => {
           derivedRelation: "link",
         },
       ],
-      reverseEdges: {},
     };
 
     const n1 = { type: "node", id: "1" };
@@ -641,7 +634,6 @@ describe("ReBAC Core Engine (v3)", () => {
           derivedRelation: "reachable",
         },
       ],
-      reverseEdges: {},
       maxWriteDepth: 2, // Severely limit depth
     };
 
@@ -704,7 +696,6 @@ describe("ReBAC Core Engine (v3)", () => {
           derivedRelation: "editor",
         },
       ],
-      reverseEdges: {},
     };
 
     const user = { type: "user", id: "u_async" };

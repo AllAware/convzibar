@@ -27,13 +27,9 @@ export type ConditionFunction<Data = any> = (
 
 export type SchemaRelation =
   | string
-  | { type: string; reverse?: string }
+  | { type: string }
   | { relation: string; condition: string }
-  | Array<
-      | string
-      | { type: string; reverse?: string }
-      | { relation: string; condition: string }
-    >;
+  | Array<string | { type: string } | { relation: string; condition: string }>;
 
 export interface EntityDefinition {
   relations?: Record<string, SchemaRelation>;
@@ -89,9 +85,10 @@ type TargetRelationKeys<
     ? keyof Entities[Target]["relations"] & string
     : never;
 
-// Userset dot-path: "entityType.relationName". For self-referential entities
-// we include RelName (the relation currently being defined) alongside the
-// already-defined Relations, giving full type safety without falling back to string.
+// Userset path: "entityType#relationName" (e.g. "group#admin").
+// Uses # to distinguish from traversal dot-paths ("relation.targetRelation").
+// For self-referential entities, we include RelName (the relation currently
+// being defined) alongside the already-defined Relations.
 type EntityUsersetPath<
   EntName extends string,
   RelName extends string,
@@ -99,8 +96,8 @@ type EntityUsersetPath<
   Entities extends Record<string, { relations: Record<string, string>; permissions: string }>,
 > = {
   [E in (keyof Entities | EntName) & string]: E extends EntName
-    ? `${E}.${(keyof Relations | RelName) & string}`
-    : `${E}.${keyof Entities[E]["relations"] & string}`;
+    ? `${E}#${(keyof Relations | RelName) & string}`
+    : `${E}#${keyof Entities[E]["relations"] & string}`;
 }[(keyof Entities | EntName) & string];
 
 export class EntityBuilder<
@@ -131,7 +128,7 @@ export class EntityBuilder<
             string]: `${K}.${TargetRelationKeys<Relations[K], EntName, Relations, Entities>}`;
         }[keyof Relations & string]
       | EntityUsersetPath<EntName, RelName, Relations, Entities>
-      | { type: Target; reverse?: string }
+      | { type: Target }
       | {
           relation:
             | keyof Relations
@@ -328,14 +325,37 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     object: { type: string },
   ) {
     const schema = this.options.schema;
+    const objectEntity = schema.entities[object.type];
 
-    const objectRelations = schema.entities[object.type]?.relations;
-
-    const isValidOnObject = objectRelations && relation in objectRelations;
-
-    if (!isValidOnObject) {
+    if (!objectEntity?.relations || !(relation in objectEntity.relations)) {
       throw new Error(
         `Zbar Schema Error: Relation '${relation}' is not defined for object type '${object.type}'.`,
+      );
+    }
+
+    const relDef = objectEntity.relations[relation];
+    const defs = Array.isArray(relDef) ? relDef : [relDef];
+    const localRelations = objectEntity.relations;
+    const validSubjectTypes = new Set<string>();
+
+    for (const d of defs) {
+      if (typeof d === "string") {
+        if (d.includes("#")) {
+          validSubjectTypes.add(d.split("#")[0]);
+        } else if (d.includes(".")) {
+          // traversal dot-path — not a subject type
+        } else if (schema.entities[d] && !localRelations[d]) {
+          // entity type name (not a local relation reference)
+          validSubjectTypes.add(d);
+        }
+      } else if (typeof d === "object" && d !== null && "type" in d) {
+        validSubjectTypes.add((d as { type: string }).type);
+      }
+    }
+
+    if (validSubjectTypes.size > 0 && !validSubjectTypes.has(subject.type)) {
+      throw new Error(
+        `Zbar Schema Error: Subject type '${subject.type}' is not a valid subject for relation '${relation}' on object type '${object.type}'. Valid subject types: ${[...validSubjectTypes].join(", ")}.`,
       );
     }
   }

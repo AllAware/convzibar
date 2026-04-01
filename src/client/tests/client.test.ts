@@ -38,7 +38,7 @@ const zbarSchema = createZbarSchema<any>()
   .entity("user")
   .entity("org", (e) =>
     e
-      .relation("owner", { type: "user", reverse: "owner_of_org" })
+      .relation("owner", "user")
       .relation("admin", "user", "owner")
       .relation("viewer", "user", "admin")
       .permission("edit_settings", "admin")
@@ -87,7 +87,7 @@ describe("Client API & Read-Time Inference", () => {
     expect(results.map((r) => r.objectId).sort()).toEqual(["org1", "org2"]);
 
     // Verify database state: no redundant relationships materialized due to local inheritance inference
-    await assertDbState(t, 3, 3);
+    await assertDbState(t, 2, 2);
   });
 
   test(".can() infers distant inheritance", async () => {
@@ -138,7 +138,7 @@ describe("Client API & Read-Time Inference", () => {
     expect(editorEffs[0].subjectKey).toBe("user:u1");
     expect(editorEffs[0].objectKey).toBe("project:proj1");
 
-    await assertDbState(t, 4, 5);
+    await assertDbState(t, 3, 4);
   });
 
   test("listSubjectsWithAccess with local inheritance", async () => {
@@ -175,38 +175,6 @@ describe("Client API & Read-Time Inference", () => {
       "u_owner",
     ]);
 
-    await assertDbState(t, 3, 3);
-  });
-
-  test("bidirectional relationship auto-insertion", async () => {
-    const t = setup();
-    const ctx = {
-      runQuery: t.query.bind(t),
-      runMutation: t.mutation.bind(t),
-    } as any;
-
-    const zbar = new Zbar(api, {
-      schema: zbarSchema,
-      tenantId: "t1",
-      asyncWrites: false,
-    });
-
-    const user = { type: "user", id: "u_owner" } as const;
-    const org = { type: "org", id: "org1" } as const;
-
-    await zbar.addRelation(ctx, user, "owner", org);
-
-    // Verify reverse edge was added: (org, "owner_of_org", user)
-    const rels = await t.query(api.queries.checkPermissionFast, {
-      tenantId: "t1",
-      subject: org,
-      relations: ["owner_of_org"],
-      object: user,
-    });
-
-    expect(rels.length).toBe(1);
-    expect(rels[0].relation).toBe("owner_of_org");
-
     await assertDbState(t, 2, 2);
   });
 
@@ -241,7 +209,7 @@ describe("Client API & Read-Time Inference", () => {
 
     const res = await zbar.deleteEntity(ctx, user);
 
-    // relationshipsRemoved should be 1 (because the single removeRelationInternal call removes both the forward and reverse edge under the hood)
+    // relationshipsRemoved should be 1 (the owner relation)
     expect(res.relationshipsRemoved).toBe(1);
     // effective relationships will also be cleared
     expect(res.effectiveRelationshipsRemoved).toBeGreaterThan(0);
@@ -477,7 +445,7 @@ describe("Client API & Read-Time Inference", () => {
 
     expect(logsAfter.length).toBeGreaterThan(0);
 
-    // 2 owners (no reverse edges in this schema)
+    // 2 owners
     await assertDbState(t, 2, 2);
   });
 
@@ -528,8 +496,8 @@ describe("Client API & Read-Time Inference", () => {
     );
     expect(adminHasOwner).toBe(false);
 
-    // owner + owner_of_org, admin = 3 bases
-    await assertDbState(t, 3, 3);
+    // owner + admin = 2 bases
+    await assertDbState(t, 2, 2);
   });
 
   test("getRelationships returns all relationships for a subject and object", async () => {
@@ -563,8 +531,8 @@ describe("Client API & Read-Time Inference", () => {
     expect(rels.length).toBe(3);
     expect(rels.sort()).toEqual(["admin", "owner", "viewer"]);
 
-    // owner + owner_of_org
-    await assertDbState(t, 2, 2);
+    // owner
+    await assertDbState(t, 1, 1);
   });
 
   test("updateRelation swaps relationships via Add-before-Remove", async () => {
@@ -647,8 +615,8 @@ describe("Client API & Read-Time Inference", () => {
     });
     expect(all.sort()).toEqual(["admin", "owner", "viewer"]);
 
-    // owner + owner_of_org
-    await assertDbState(t, 2, 2);
+    // owner
+    await assertDbState(t, 1, 1);
   });
 
   test("manual orchestration of background race condition", async () => {
@@ -787,7 +755,7 @@ describe("Client API & Read-Time Inference", () => {
     await assertDbState(t, 1, 1);
   });
 
-  test("removeRelation deletes reverse edges", async () => {
+  test("validateRelationParameter rejects invalid relation name", async () => {
     const t = setup();
     const ctx = {
       runQuery: t.query.bind(t),
@@ -800,68 +768,33 @@ describe("Client API & Read-Time Inference", () => {
       asyncWrites: false,
     });
 
-    const user = { type: "user" as const, id: "u_rev_delete" };
-    const org = { type: "org" as const, id: "org_rev_delete" };
+    const user = { type: "user" as const, id: "u1" };
+    const org = { type: "org" as const, id: "org1" };
 
-    // 1. Add relation, which creates a reverse edge
-    await zbar.addRelation(ctx, user, "owner", org);
+    await expect(
+      zbar.addRelation(ctx, user, "nonexistent" as any, org),
+    ).rejects.toThrow("Relation 'nonexistent' is not defined for object type 'org'");
+  });
 
-    // Verify reverse edge was added
-    const relsBefore = await t.query(api.queries.checkPermissionFast, {
+  test("validateRelationParameter rejects invalid subject type", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const zbar = new Zbar(api, {
+      schema: zbarSchema,
       tenantId: "t1",
-      subject: org,
-      relations: ["owner_of_org"],
-      object: user,
+      asyncWrites: false,
     });
-    expect(relsBefore.length).toBe(1);
 
-    // Check actual relationship table for reverse edge
-    const baseRelsBefore = await t.run(async (innerCtx) => {
-      return await innerCtx.db
-        .query("relationships")
-        .withIndex("by_tenant_subject_relation_object", (q: any) =>
-          q
-            .eq("tenantId", "t1")
-            .eq("subjectType", "org")
-            .eq("subjectId", "org_rev_delete")
-            .eq("relation", "owner_of_org")
-            .eq("objectType", "user")
-            .eq("objectId", "u_rev_delete"),
-        )
-        .unique();
-    });
-    expect(baseRelsBefore).not.toBeNull();
+    const project = { type: "project" as const, id: "proj1" };
+    const org = { type: "org" as const, id: "org1" };
 
-    // 2. Remove relation
-    await zbar.removeRelation(ctx, user, "owner", org);
-
-    // Verify reverse edge was removed from effective relationships
-    const relsAfter = await t.query(api.queries.checkPermissionFast, {
-      tenantId: "t1",
-      subject: org,
-      relations: ["owner_of_org"],
-      object: user,
-    });
-    expect(relsAfter.length).toBe(0);
-
-    // Check actual relationship table to ensure reverse edge is deleted
-    const baseRelsAfter = await t.run(async (innerCtx) => {
-      return await innerCtx.db
-        .query("relationships")
-        .withIndex("by_tenant_subject_relation_object", (q: any) =>
-          q
-            .eq("tenantId", "t1")
-            .eq("subjectType", "org")
-            .eq("subjectId", "org_rev_delete")
-            .eq("relation", "owner_of_org")
-            .eq("objectType", "user")
-            .eq("objectId", "u_rev_delete"),
-        )
-        .unique();
-    });
-    expect(baseRelsAfter).toBeNull();
-
-    // Everything deleted
-    await assertDbState(t, 0, 0);
+    // project is not a valid subject for "owner" on org (only user is)
+    await expect(
+      zbar.addRelation(ctx, project, "owner" as any, org),
+    ).rejects.toThrow("Subject type 'project' is not a valid subject");
   });
 });

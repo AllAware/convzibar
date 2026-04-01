@@ -40,7 +40,7 @@ const dedupSchema = createZbarSchema<any>()
   )
   .entity("project", (e) =>
     e
-      .relation("parent_org", { type: "org", reverse: "projects" })
+      .relation("parent_org", "org")
       .relation("admin", "user", "parent_org.admin")
       .relation("manager", "user", "parent_org.manager", "admin")
       .relation("viewer", "user", "parent_org.viewer", "manager")
@@ -107,8 +107,8 @@ describe("Schema Compiler Deduplication Integration", () => {
     );
     expect(inheritedRels.sort()).toEqual(["admin", "manager", "viewer"]);
 
-    // Verify exactly 3 bases (org -> parent_org -> project, project -> projects -> org, user -> admin -> org)
-    // and only 1 effective distant materialization (admin) + local derivations
-    await assertDbState(t, 3, 4);
+    // Verify exactly 2 bases (org -> parent_org -> project, user -> admin -> org)
+    // and 2 base effective + 1 distant materialization (admin) = 3
+    await assertDbState(t, 2, 3);
   });
 });

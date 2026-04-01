@@ -15,7 +15,7 @@ const zbarSchema = createZbarSchema<any>()
   .entity("user")
   .entity("org", (e) =>
     e
-      .relation("owner", { type: "user", reverse: "owner_of_org" })
+      .relation("owner", "user")
       .relation("admin", "user", "owner")
       .relation("viewer", "user", "admin"),
   )
@@ -338,53 +338,6 @@ describe("Asynchronous Race Conditions", () => {
     // Verify the project editor path was never created because the root AddChunk aborted
     const isEditor = await zbar.hasRelationship(ctx, user, "editor", proj);
     expect(isEditor).toBe(false);
-  });
-
-  test("reverse-edge race under async", async () => {
-    const t = setup();
-    const graphConfig = {
-      reverseEdges: { org: { owner: "owner_of_org" } },
-      traversalRules: [],
-    };
-
-    const user = { type: "user", id: "u_reverse" };
-    const org = { type: "org", id: "org_reverse" };
-
-    // Fire both directions simultaneously with asyncWrites: true
-    const p1 = t.mutation(api.mutations.addRelation, {
-      tenantId: "t1",
-      subject: user,
-      relation: "owner",
-      object: org,
-      asyncWrites: false, // The test uses convex-test mock DB, async concurrent inserts throw "Write outside of transaction"
-      graphConfig,
-    });
-
-    const p2 = t.mutation(api.mutations.addRelation, {
-      tenantId: "t1",
-      subject: org,
-      relation: "owner_of_org",
-      object: user,
-      asyncWrites: false,
-      graphConfig,
-    });
-
-    await Promise.all([p1, p2]);
-
-    // Check base relationships table to ensure no duplicates
-    const rels = await t.run(async (innerCtx) => {
-      return await innerCtx.db.query("relationships").collect();
-    });
-
-    // There should be exactly two records: one for the forward edge, one for the reverse edge.
-    // If the race condition failed, there would be duplicates or four records!
-    expect(rels.length).toBe(2);
-
-    const forward = rels.filter((r) => r.relation === "owner");
-    const reverse = rels.filter((r) => r.relation === "owner_of_org");
-
-    expect(forward.length).toBe(1);
-    expect(reverse.length).toBe(1);
   });
 
   test("deep synchronous write cleanly chains synchronous chunks without failing", async () => {
