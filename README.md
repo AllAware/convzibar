@@ -22,8 +22,12 @@ write amplification.
 - **Unified ABAC + ReBAC:** Attach dynamic conditions to both relationships
   (write-time edges) and permissions (read-time requirements). Conditions are
   evaluated with injected runtime context.
-- **Bidirectional Relationships:** Automatically insert and maintain reverse
-  edges (e.g., `org -> owner_of_org -> user`) to allow reverse queries.
+- **Userset Expansion:** Use `#` syntax (e.g., `group#admin`) to allow
+  non-user entities as subjects. When a group is made admin of a resource, all
+  admins of that group automatically inherit access via write-time expansion.
+- **Runtime Validation:** Subject types are validated against the schema at
+  runtime, preventing invalid entity combinations from being written to the
+  graph.
 - **Perfect TypeScript Inference:** The `createZbarSchema` definition provides
   100% strict type-checking and autocomplete for all subjects, objects,
   relations, and permissions without any codegen steps.
@@ -86,8 +90,7 @@ export const zbarSchema = createZbarSchema<MyContext>()
   .entity("user")
   .entity("org", (e) =>
     e
-      // Reverse edges are automatically created!
-      .relation("owner", { type: "user", reverse: "owner_of_org" })
+      .relation("owner", "user")
 
       // Local Inheritance: Admins include Owners
       .relation("admin", "user", "owner")
@@ -98,11 +101,23 @@ export const zbarSchema = createZbarSchema<MyContext>()
       .permission("edit_settings", "admin")
       .permission("view_dashboard", "viewer"),
   )
+  .entity("group", (e) =>
+    e
+      // Userset: groups and orgs can be admins of a group.
+      // When an org is made admin, all admins of that org inherit access.
+      .relation("admin", "user", "org#admin", "group#admin")
+
+      // Local + Userset: viewers include admins, plus org/group viewer usersets
+      .relation("viewer", "user", "admin", "org#viewer", "group#viewer")
+
+      .permission("manage", "admin")
+      .permission("view", "viewer"),
+  )
   .entity("project", (e) =>
     e
       .relation("parent_org", "org")
 
-      // Cross-Object Traversal:
+      // Cross-Object Traversal (dot syntax):
       // A project editor includes direct users AND any admin of the parent org
       .relation("editor", "user", "parent_org.admin")
 
@@ -120,6 +135,17 @@ export const zbar = new Zbar(components.convzibar, {
   tenantId: "default", // Useful for multi-tenant isolation
 });
 ```
+
+#### Schema Syntax Reference
+
+Relations support three kinds of targets:
+
+| Syntax | Name | Meaning |
+|---|---|---|
+| `"user"` | Entity type | Direct subject type (e.g., a user can hold this relation) |
+| `"admin"` | Local inheritance | This relation includes all holders of `admin` on the same object |
+| `"parent_org.admin"` | Traversal (dot) | Follow the `parent_org` relation, inherit `admin` from the target |
+| `"group#admin"` | Userset (hash) | When a group is the subject, expand through that group's `admin` relation |
 
 ### 2. Mutating the Graph (Write-Time)
 
@@ -145,6 +171,12 @@ export const createProject = mutation({
     await zbar.addRelation(ctx, { type: "user", id: userId }, "admin", {
       type: "org",
       id: orgId,
+    });
+
+    // Add a group as admin of another group (userset expansion)
+    await zbar.addRelation(ctx, { type: "group", id: teamId }, "admin", {
+      type: "group",
+      id: groupId,
     });
   },
 });
@@ -332,11 +364,12 @@ const projects = await zbar.listAccessibleObjects(
 ```typescript
 const users = await zbar.listSubjectsWithAccess(
   ctx,
-  { type: "project", id: projId },
+  "user", // The subject type to search for
   "edit",
+  { type: "project", id: projId },
   { timezone: "EST" },
 );
-// Returns: [{ userId: "user_456" }, ...]
+// Returns: [{ subjectId: "user_456" }, ...]
 ```
 
 **Check if a subject has a specific relationship on an object:**
