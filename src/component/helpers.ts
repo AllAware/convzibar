@@ -39,6 +39,31 @@ function expandRelation(
   return results;
 }
 
+// Reverse of expandRelation: find all relations on entityType that
+// include targetRelation through local inheritance. For example, if
+// admin includes member, reverseExpandRelation('group', 'member')
+// returns ['member', 'admin'].
+function reverseExpandRelation(
+  schema: any,
+  entityType: string,
+  targetRelation: string,
+): Array<{ relation: string; condition?: string }> {
+  const results: Array<{ relation: string; condition?: string }> = [];
+  const relations = schema.entities[entityType]?.relations || {};
+
+  for (const relName of Object.keys(relations)) {
+    const expanded = expandRelation(schema, entityType, relName);
+    for (const exp of expanded) {
+      if (exp.relation === targetRelation) {
+        results.push({ relation: relName, condition: exp.condition });
+        break;
+      }
+    }
+  }
+
+  return results;
+}
+
 function getTargetEntityTypes(
   schema: any,
   objectType: string,
@@ -119,49 +144,107 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
         if (distantRel) {
           const [sourceRelBase, targetRelBase] = distantRel.split(".");
 
-          // Expand the source relation
-          const expandedSources = expandRelation(
-            schema,
-            entityType,
-            sourceRelBase,
-          );
+          // Check if this is a userset reference (entityType.relation)
+          // vs a relation-based traversal (localRelation.targetRelation).
+          // A userset reference means: "when a subject of this entity type
+          // is added to this relation, expand through that subject's relation."
+          const isLocalRelation = relations[sourceRelBase] !== undefined;
+          const isEntityType =
+            schema.entities[sourceRelBase] !== undefined;
 
-          for (const source of expandedSources) {
-            // Determine the target entity types for this source relation
-            const targetEntityTypes = getTargetEntityTypes(
+          if (!isLocalRelation && isEntityType) {
+            // Userset expansion: e.g. 'group.member' on folder's editor relation
+            // means "when a group is added as editor, expand through that group's
+            // member relation to find transitive subjects."
+            //
+            // We use reverseExpandRelation to also find relations that IMPLY
+            // the target through local inheritance. E.g., if admin includes member,
+            // we generate rules for both admin and member so that admins of the
+            // group also get the derived relation.
+            const usersetType = sourceRelBase;
+            const expandedTargets = expandRelation(
               schema,
-              entityType,
-              source.relation,
+              usersetType,
+              targetRelBase,
             );
 
-            for (const targetType of targetEntityTypes) {
-              // Expand the target relation on the target entity type
-              const expandedTargets = expandRelation(
+            for (const target of expandedTargets) {
+              const impliedBy = reverseExpandRelation(
                 schema,
-                targetType,
-                targetRelBase,
+                usersetType,
+                target.relation,
               );
 
-              for (const target of expandedTargets) {
-                // Combine conditions
+              for (const implied of impliedBy) {
                 const combinedConditions: string[] = [];
                 if (distantCondition) combinedConditions.push(distantCondition);
-                if (source.condition) combinedConditions.push(source.condition);
                 if (target.condition) combinedConditions.push(target.condition);
-
-                // Deduplicate conditions
+                if (implied.condition) combinedConditions.push(implied.condition);
                 const uniqueConditions = Array.from(
                   new Set(combinedConditions),
                 );
 
                 rules.push({
                   sourceObjectType: entityType,
-                  sourceRelation: source.relation,
-                  targetRelation: target.relation,
+                  sourceRelation: derivedRelName,
+                  targetRelation: implied.relation,
                   derivedRelation: derivedRelName,
                   conditions:
                     uniqueConditions.length > 0 ? uniqueConditions : undefined,
                 });
+              }
+            }
+          } else {
+            // Existing: relation-based distant traversal
+            // Expand the source relation
+            const expandedSources = expandRelation(
+              schema,
+              entityType,
+              sourceRelBase,
+            );
+
+            for (const source of expandedSources) {
+              // Determine the target entity types for this source relation
+              const targetEntityTypes = getTargetEntityTypes(
+                schema,
+                entityType,
+                source.relation,
+              );
+
+              for (const targetType of targetEntityTypes) {
+                // Expand the target relation on the target entity type
+                const expandedTargets = expandRelation(
+                  schema,
+                  targetType,
+                  targetRelBase,
+                );
+
+                for (const target of expandedTargets) {
+                  // Combine conditions
+                  const combinedConditions: string[] = [];
+                  if (distantCondition)
+                    combinedConditions.push(distantCondition);
+                  if (source.condition)
+                    combinedConditions.push(source.condition);
+                  if (target.condition)
+                    combinedConditions.push(target.condition);
+
+                  // Deduplicate conditions
+                  const uniqueConditions = Array.from(
+                    new Set(combinedConditions),
+                  );
+
+                  rules.push({
+                    sourceObjectType: entityType,
+                    sourceRelation: source.relation,
+                    targetRelation: target.relation,
+                    derivedRelation: derivedRelName,
+                    conditions:
+                      uniqueConditions.length > 0
+                        ? uniqueConditions
+                        : undefined,
+                  });
+                }
               }
             }
           }

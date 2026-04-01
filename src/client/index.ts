@@ -75,6 +75,34 @@ export type BuiltZbarSchema<
 // Fluent Schema Builder
 // ============================================================================
 
+// Distributive helper: resolves relation keys for a target type, handling
+// self-referential entities (where Target = EntName) by looking up the
+// in-progress Relations instead of the not-yet-complete Entities record.
+type TargetRelationKeys<
+  Target,
+  EntName extends string,
+  Relations,
+  Entities extends Record<string, { relations: Record<string, string>; permissions: string }>,
+> = Target extends EntName
+  ? keyof Relations & string
+  : Target extends keyof Entities
+    ? keyof Entities[Target]["relations"] & string
+    : never;
+
+// Userset dot-path: "entityType.relationName". For self-referential entities
+// we include RelName (the relation currently being defined) alongside the
+// already-defined Relations, giving full type safety without falling back to string.
+type EntityUsersetPath<
+  EntName extends string,
+  RelName extends string,
+  Relations,
+  Entities extends Record<string, { relations: Record<string, string>; permissions: string }>,
+> = {
+  [E in (keyof Entities | EntName) & string]: E extends EntName
+    ? `${E}.${(keyof Relations | RelName) & string}`
+    : `${E}.${keyof Entities[E]["relations"] & string}`;
+}[(keyof Entities | EntName) & string];
+
 export class EntityBuilder<
   EntName extends string,
   Conditions extends Record<string, any>,
@@ -90,23 +118,28 @@ export class EntityBuilder<
 
   public def: any = { relations: {}, permissions: {} };
 
-  relation<RelName extends string, Target extends keyof Entities & string>(
+  relation<
+    RelName extends string,
+    Target extends (keyof Entities | EntName) & string,
+  >(
     name: RelName,
     ...targets: Array<
       | Target
       | keyof Relations
       | {
           [K in keyof Relations &
-            string]: `${K}.${keyof Entities[Relations[K]]["relations"] & string}`;
+            string]: `${K}.${TargetRelationKeys<Relations[K], EntName, Relations, Entities>}`;
         }[keyof Relations & string]
+      | EntityUsersetPath<EntName, RelName, Relations, Entities>
       | { type: Target; reverse?: string }
       | {
           relation:
             | keyof Relations
             | {
                 [K in keyof Relations &
-                  string]: `${K}.${keyof Entities[Relations[K]]["relations"] & string}`;
-              }[keyof Relations & string];
+                  string]: `${K}.${TargetRelationKeys<Relations[K], EntName, Relations, Entities>}`;
+              }[keyof Relations & string]
+            | EntityUsersetPath<EntName, RelName, Relations, Entities>;
           condition: keyof Conditions & string;
         }
     >
