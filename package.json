@@ -49,6 +49,10 @@
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
     },
+    "./unsafe": {
+      "types": "./dist/client/unsafe.d.ts",
+      "default": "./dist/client/unsafe.js"
+    },
     "./test": "./src/test.ts",
     "./_generated/component.js": {
       "types": "./dist/component/_generated/component.d.ts"

@@ -12,6 +12,7 @@ import type * as helpers from "../helpers.js";
 import type * as mutations from "../mutations.js";
 import type * as queries from "../queries.js";
 import type * as types from "../types.js";
+import type * as unsafe from "../unsafe.js";
 import type * as validators from "../validators.js";
 import type * as workpool from "../workpool.js";
 
@@ -26,6 +27,7 @@ declare const fullApi: ApiFromModules<{
   mutations: typeof mutations;
   queries: typeof queries;
   types: typeof types;
+  unsafe: typeof unsafe;
   validators: typeof validators;
   workpool: typeof workpool;
 }>;
