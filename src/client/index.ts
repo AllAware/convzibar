@@ -1088,11 +1088,16 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
   ): Promise<string> {
     this.validateRelationParameter(subject, relation, object);
 
+    const objectRelations = Object.keys(
+      this.options.schema.entities[object.type]?.relations || {},
+    );
+
     return ctx.runMutation(this.component.mutations.setRelation, {
       tenantId: this.options.tenantId,
       subject,
       relation,
       object,
+      objectRelations,
       condition: options?.condition
         ? {
             condition: options.condition,

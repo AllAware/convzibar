@@ -939,6 +939,7 @@ export const setRelation = mutation({
     subject: subjectValidator,
     relation: v.string(),
     object: objectValidator,
+    objectRelations: v.array(v.string()),
     condition: conditionValidator,
     createdBy: v.optional(v.string()),
     graphConfig: v.any(), // GraphConfig
@@ -958,24 +959,30 @@ export const setRelation = mutation({
       asyncWrites,
     } = args;
 
-    // Find all existing relations for this subject and object
-    const existingRels = await ctx.db
-      .query("relationships")
-      .withIndex("by_tenant_subject_relation_object", (q: any) =>
-        q
-          .eq("tenantId", tenantId)
-          .eq("subjectType", subject.type)
-          .eq("subjectId", subject.id),
-      )
-      .collect();
+    // Query each known relation for this object type using the fully-qualified index.
+    // The client passes objectRelations (all relation names for this object type),
+    // so we can issue precise index lookups instead of a broad subject-only scan.
+    const { objectRelations } = args;
 
-    // Filter to exactly this object
-    const relationsToDrop = existingRels.filter(
-      (r: any) =>
-        r.objectType === object.type &&
-        r.objectId === object.id &&
-        r.relation !== relation,
-    );
+    const queries = objectRelations
+      .filter((r: string) => r !== relation)
+      .map((candidateRel: string) =>
+        ctx.db
+          .query("relationships")
+          .withIndex("by_tenant_subject_relation_object", (q: any) =>
+            q
+              .eq("tenantId", tenantId)
+              .eq("subjectType", subject.type)
+              .eq("subjectId", subject.id)
+              .eq("relation", candidateRel)
+              .eq("objectType", object.type)
+              .eq("objectId", object.id),
+          )
+          .unique(),
+      );
+
+    const results = await Promise.all(queries);
+    const relationsToDrop = results.filter((r: any) => r !== null);
 
     const onCompleteArgs = [];
     for (const r of relationsToDrop) {
