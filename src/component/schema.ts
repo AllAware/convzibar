@@ -82,7 +82,6 @@ const schema = {
 
 // The mockWorkpool table is strictly used for testing async worker logic locally.
 // It is intentionally stripped from production schemas to avoid database pollution.
-//@ts-expect-error - No "process" type exists in testing framework.
 if (process.env.NODE_ENV === "test") {
   (schema as any).mockWorkpool = defineTable({
     mutationName: v.string(),

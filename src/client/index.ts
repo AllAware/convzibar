@@ -767,9 +767,10 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     requestContext?: Data,
   ): Promise<T[]> {
     const results: T[] = [];
+    const seen = new Set<string>();
     for (const eff of effectiveRels) {
       const id = getId(eff);
-      if (results.some((r: any) => r.id === id)) continue;
+      if (seen.has(id)) continue;
 
       const targetDef = targets.find((t) => t.relation === eff.relation);
       let valid = false;
@@ -791,7 +792,10 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
           break;
         }
       }
-      if (valid) results.push({ id } as T);
+      if (valid) {
+        seen.add(id);
+        results.push({ id } as T);
+      }
     }
     return results;
   }
@@ -978,6 +982,298 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     );
 
     return results.map((r) => ({ subjectId: r.id }));
+  }
+
+  // ============================================================================
+  // Via (Intermediary Filtering) Methods
+  // ============================================================================
+
+  /**
+   * Get all relation names defined for an entity type in the schema.
+   */
+  private getEntityRelations(entityType: string): string[] {
+    return Object.keys(
+      this.options.schema.entities[entityType]?.relations || {},
+    );
+  }
+
+  /**
+   * Query effective relationships where the given entity is the subject,
+   * returning the set of object IDs of the specified object type.
+   * This bypasses client-side schema validation since intermediate entities
+   * (e.g., a system entity as subject of a device relation) are valid in
+   * the effective relationships table even if not a direct type target.
+   */
+  private async getObjectIdsReachableFrom(
+    ctx: QueryCtx | ActionCtx,
+    entity: { type: string; id: string },
+    objectType: string,
+  ): Promise<Set<string>> {
+    const relations = this.getEntityRelations(objectType);
+    if (relations.length === 0) return new Set();
+
+    const effectiveRels = await ctx.runQuery(
+      this.component.queries.listAccessibleObjectsFast,
+      {
+        tenantId: this.options.tenantId,
+        subject: entity,
+        relations,
+        objectType,
+      },
+    );
+
+    const ids = new Set<string>();
+    for (const eff of effectiveRels) {
+      ids.add(eff.objectKey.split(":")[1]);
+    }
+    return ids;
+  }
+
+  /**
+   * Query effective relationships where the given entity is the object,
+   * returning the set of subject IDs of the specified subject type.
+   */
+  private async getSubjectIdsReachableFrom(
+    ctx: QueryCtx | ActionCtx,
+    entity: { type: string; id: string },
+    subjectType: string,
+  ): Promise<Set<string>> {
+    const relations = this.getEntityRelations(entity.type);
+    if (relations.length === 0) return new Set();
+
+    const effectiveRels = await ctx.runQuery(
+      this.component.queries.listSubjectsWithAccessFast,
+      {
+        tenantId: this.options.tenantId,
+        object: entity,
+        relations,
+        subjectType,
+      },
+    );
+
+    const ids = new Set<string>();
+    for (const eff of effectiveRels) {
+      ids.add(eff.subjectKey.split(":")[1]);
+    }
+    return ids;
+  }
+
+  /**
+   * List objects a subject has a specific permission on, filtered to only
+   * those accessible through ALL of the specified intermediate entities.
+   *
+   * Example: "List all devices user X can view that are accessible through system Y"
+   * ```ts
+   * const devices = await zbar.listAccessibleObjectsVia(ctx,
+   *   { type: 'user', id: 'user1' },
+   *   'view',
+   *   'device',
+   *   [{ type: 'system', id: 'system1' }],
+   * );
+   * ```
+   */
+  async listAccessibleObjectsVia<
+    SubjectType extends keyof Schema["entities"] & string,
+    ObjectType extends keyof Schema["entities"] & string,
+    ViaType extends keyof Schema["entities"] & string,
+    Permission extends EntityPermissions<Schema, ObjectType>,
+  >(
+    ctx: QueryCtx | ActionCtx,
+    subject: { type: SubjectType; id: string },
+    permission: Permission,
+    objectType: ObjectType,
+    via: Array<{ type: ViaType; id: string }>,
+    requestContext?: Data,
+  ): Promise<Array<{ objectId: string }>> {
+    if (via.length === 0) {
+      return this.listAccessibleObjects(
+        ctx,
+        subject,
+        permission,
+        objectType,
+        requestContext,
+      );
+    }
+
+    // Step 1: Get all objects the subject has the permission on
+    const [candidates, ...viaSets] = await Promise.all([
+      this.listAccessibleObjects(
+        ctx,
+        subject,
+        permission,
+        objectType,
+        requestContext,
+      ),
+      ...via.map((v) => this.getObjectIdsReachableFrom(ctx, v, objectType)),
+    ]);
+
+    // Step 2: Intersect — keep only objects reachable through ALL via entities
+    return candidates.filter((c) =>
+      viaSets.every((viaSet) => viaSet.has(c.objectId)),
+    );
+  }
+
+  /**
+   * List objects a subject has a specific relation with, filtered to only
+   * those accessible through ALL of the specified intermediate entities.
+   *
+   * Example: "List all devices user X is admin of through system Y"
+   * ```ts
+   * const devices = await zbar.listObjectsWithRelationVia(ctx,
+   *   { type: 'user', id: 'user1' },
+   *   'admin',
+   *   'device',
+   *   [{ type: 'system', id: 'system1' }],
+   * );
+   * ```
+   */
+  async listObjectsWithRelationVia<
+    SubjectType extends keyof Schema["entities"] & string,
+    ObjectType extends keyof Schema["entities"] & string,
+    ViaType extends keyof Schema["entities"] & string,
+    Relation extends EntityRelations<Schema, ObjectType>,
+  >(
+    ctx: QueryCtx | ActionCtx,
+    subject: { type: SubjectType; id: string },
+    relation: Relation,
+    objectType: ObjectType,
+    via: Array<{ type: ViaType; id: string }>,
+    requestContext?: Data,
+  ): Promise<Array<{ objectId: string }>> {
+    if (via.length === 0) {
+      return this.listObjectsWithRelation(
+        ctx,
+        subject,
+        relation,
+        objectType,
+        requestContext,
+      );
+    }
+
+    const [candidates, ...viaSets] = await Promise.all([
+      this.listObjectsWithRelation(
+        ctx,
+        subject,
+        relation,
+        objectType,
+        requestContext,
+      ),
+      ...via.map((v) => this.getObjectIdsReachableFrom(ctx, v, objectType)),
+    ]);
+
+    return candidates.filter((c) =>
+      viaSets.every((viaSet) => viaSet.has(c.objectId)),
+    );
+  }
+
+  /**
+   * List subjects that have a specific permission on an object, filtered to only
+   * those whose access goes through ALL of the specified intermediate entities.
+   *
+   * Example: "List all users who can view device D through system Y"
+   * ```ts
+   * const users = await zbar.listSubjectsWithAccessVia(ctx,
+   *   'user',
+   *   'view',
+   *   { type: 'device', id: 'device1' },
+   *   [{ type: 'system', id: 'system1' }],
+   * );
+   * ```
+   */
+  async listSubjectsWithAccessVia<
+    SubjectType extends keyof Schema["entities"] & string,
+    ObjectType extends keyof Schema["entities"] & string,
+    ViaType extends keyof Schema["entities"] & string,
+    Permission extends EntityPermissions<Schema, ObjectType>,
+  >(
+    ctx: QueryCtx | ActionCtx,
+    subjectType: SubjectType,
+    permission: Permission,
+    object: { type: ObjectType; id: string },
+    via: Array<{ type: ViaType; id: string }>,
+    requestContext?: Data,
+  ): Promise<Array<{ subjectId: string }>> {
+    if (via.length === 0) {
+      return this.listSubjectsWithAccess(
+        ctx,
+        subjectType,
+        permission,
+        object,
+        requestContext,
+      );
+    }
+
+    const [candidates, ...viaSets] = await Promise.all([
+      this.listSubjectsWithAccess(
+        ctx,
+        subjectType,
+        permission,
+        object,
+        requestContext,
+      ),
+      ...via.map((v) =>
+        this.getSubjectIdsReachableFrom(ctx, v, subjectType),
+      ),
+    ]);
+
+    return candidates.filter((c) =>
+      viaSets.every((viaSet) => viaSet.has(c.subjectId)),
+    );
+  }
+
+  /**
+   * List subjects that have a specific relation with an object, filtered to only
+   * those whose access goes through ALL of the specified intermediate entities.
+   *
+   * Example: "List all users who are admins of device D through system Y"
+   * ```ts
+   * const users = await zbar.listSubjectsWithRelationVia(ctx,
+   *   'user',
+   *   'admin',
+   *   { type: 'device', id: 'device1' },
+   *   [{ type: 'system', id: 'system1' }],
+   * );
+   * ```
+   */
+  async listSubjectsWithRelationVia<
+    SubjectType extends keyof Schema["entities"] & string,
+    ObjectType extends keyof Schema["entities"] & string,
+    ViaType extends keyof Schema["entities"] & string,
+    Relation extends EntityRelations<Schema, ObjectType>,
+  >(
+    ctx: QueryCtx | ActionCtx,
+    subjectType: SubjectType,
+    relation: Relation,
+    object: { type: ObjectType; id: string },
+    via: Array<{ type: ViaType; id: string }>,
+    requestContext?: Data,
+  ): Promise<Array<{ subjectId: string }>> {
+    if (via.length === 0) {
+      return this.listSubjectsWithRelation(
+        ctx,
+        subjectType,
+        relation,
+        object,
+        requestContext,
+      );
+    }
+
+    const [candidates, ...viaSets] = await Promise.all([
+      this.listSubjectsWithRelation(
+        ctx,
+        subjectType,
+        relation,
+        object,
+        requestContext,
+      ),
+      ...via.map((v) =>
+        this.getSubjectIdsReachableFrom(ctx, v, subjectType),
+      ),
+    ]);
+
+    return candidates.filter((c) =>
+      viaSets.every((viaSet) => viaSet.has(c.subjectId)),
+    );
   }
 
   /**
