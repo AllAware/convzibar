@@ -263,6 +263,259 @@ export class PermissionError extends Error {
 }
 
 // ============================================================================
+// Fluent List Query Builder
+// ============================================================================
+
+/**
+ * Entry point returned by `zbar.list()`. Call `.object()` to begin building
+ * a list query.
+ *
+ * - `.object("device")` — list **objects** of that type (subject will need `{type, id}`)
+ * - `.object({ type: "device", id })` — list **subjects** that relate to that object (subject will need just a type string)
+ */
+export interface ListInitial<
+  Schema extends ZbarSchema<Data>,
+  Data,
+> {
+  object<OT extends keyof Schema["entities"] & string>(
+    objectType: OT,
+  ): ListWithObjectType<Schema, Data, OT>;
+  object<OT extends keyof Schema["entities"] & string>(
+    object: { type: OT; id: string },
+  ): ListWithObjectInstance<Schema, Data, OT>;
+}
+
+/** After `.object(type)` — listing objects. Pick a relation or permission. */
+export interface ListWithObjectType<
+  Schema extends ZbarSchema<Data>,
+  Data,
+  OT extends keyof Schema["entities"] & string,
+> {
+  relation<R extends EntityRelations<Schema, OT>>(
+    relation: R,
+  ): ListObjectsNeedSubject<Schema, Data>;
+  permission<P extends EntityPermissions<Schema, OT>>(
+    permission: P,
+  ): ListObjectsNeedSubject<Schema, Data>;
+}
+
+/** After `.object({type, id})` — listing subjects. Pick a relation or permission. */
+export interface ListWithObjectInstance<
+  Schema extends ZbarSchema<Data>,
+  Data,
+  OT extends keyof Schema["entities"] & string,
+> {
+  relation<R extends EntityRelations<Schema, OT>>(
+    relation: R,
+  ): ListSubjectsNeedSubject<Schema, Data>;
+  permission<P extends EntityPermissions<Schema, OT>>(
+    permission: P,
+  ): ListSubjectsNeedSubject<Schema, Data>;
+}
+
+/** Listing objects — subject must be a full `{type, id}` pair. */
+export interface ListObjectsNeedSubject<
+  Schema extends ZbarSchema<Data>,
+  Data,
+> {
+  subject<ST extends keyof Schema["entities"] & string>(
+    subject: { type: ST; id: string },
+  ): ListCollectable<Schema, Data, { objectId: string }>;
+}
+
+/** Listing subjects — subject is just a type string. */
+export interface ListSubjectsNeedSubject<
+  Schema extends ZbarSchema<Data>,
+  Data,
+> {
+  subject<ST extends keyof Schema["entities"] & string>(
+    subjectType: ST,
+  ): ListCollectable<Schema, Data, { subjectId: string }>;
+}
+
+/** Ready to collect, with optional `.via()` filtering. */
+export interface ListCollectable<
+  Schema extends ZbarSchema<Data>,
+  Data,
+  Result,
+> {
+  via<VT extends keyof Schema["entities"] & string>(
+    ...entities: Array<{ type: VT; id: string }>
+  ): ListFinal<Data, Result>;
+  collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<Result[]>;
+}
+
+/** Terminal — can only `.collect()`. */
+export interface ListFinal<Data, Result> {
+  collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<Result[]>;
+}
+
+/**
+ * Internal implementation of the fluent list query builder.
+ * A single class implements all builder interfaces; the TypeScript interfaces
+ * above restrict which methods are visible at each step.
+ */
+class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
+  private _objectType!: string;
+  private _objectId?: string;
+  private _subjectType?: string;
+  private _subjectId?: string;
+  private _relation?: string;
+  private _permission?: string;
+  private _via: Array<{ type: string; id: string }> = [];
+  private _mode!: "listObjects" | "listSubjects";
+
+  constructor(private zbar: Zbar<Schema, Data>) {}
+
+  object(objectOrType: string | { type: string; id: string }): this {
+    if (typeof objectOrType === "string") {
+      this._objectType = objectOrType;
+      this._mode = "listObjects";
+    } else {
+      this._objectType = objectOrType.type;
+      this._objectId = objectOrType.id;
+      this._mode = "listSubjects";
+    }
+    return this;
+  }
+
+  relation(relation: string): this {
+    this._relation = relation;
+    return this;
+  }
+
+  permission(permission: string): this {
+    this._permission = permission;
+    return this;
+  }
+
+  subject(subjectOrType: string | { type: string; id: string }): this {
+    if (typeof subjectOrType === "string") {
+      this._subjectType = subjectOrType;
+    } else {
+      this._subjectType = subjectOrType.type;
+      this._subjectId = subjectOrType.id;
+    }
+    return this;
+  }
+
+  via(...entities: Array<{ type: string; id: string }>): this {
+    this._via = entities;
+    return this;
+  }
+
+  async collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<Array<{ objectId: string } | { subjectId: string }>> {
+    const hasVia = this._via.length > 0;
+    const isPermission = this._permission != null;
+    const relationOrPermission = (this._relation ?? this._permission)!;
+
+    if (this._mode === "listObjects") {
+      const subject = {
+        type: this._subjectType!,
+        id: this._subjectId!,
+      };
+      const objectType = this._objectType;
+
+      if (hasVia) {
+        if (isPermission) {
+          return this.zbar.listAccessibleObjectsVia(
+            ctx,
+            subject as any,
+            relationOrPermission as any,
+            objectType as any,
+            this._via as any,
+            requestContext,
+          );
+        } else {
+          return this.zbar.listObjectsWithRelationVia(
+            ctx,
+            subject as any,
+            relationOrPermission as any,
+            objectType as any,
+            this._via as any,
+            requestContext,
+          );
+        }
+      } else {
+        if (isPermission) {
+          return this.zbar.listAccessibleObjects(
+            ctx,
+            subject as any,
+            relationOrPermission as any,
+            objectType as any,
+            requestContext,
+          );
+        } else {
+          return this.zbar.listObjectsWithRelation(
+            ctx,
+            subject as any,
+            relationOrPermission as any,
+            objectType as any,
+            requestContext,
+          );
+        }
+      }
+    } else {
+      // listSubjects
+      const object = {
+        type: this._objectType,
+        id: this._objectId!,
+      };
+      const subjectType = this._subjectType!;
+
+      if (hasVia) {
+        if (isPermission) {
+          return this.zbar.listSubjectsWithAccessVia(
+            ctx,
+            subjectType as any,
+            relationOrPermission as any,
+            object as any,
+            this._via as any,
+            requestContext,
+          );
+        } else {
+          return this.zbar.listSubjectsWithRelationVia(
+            ctx,
+            subjectType as any,
+            relationOrPermission as any,
+            object as any,
+            this._via as any,
+            requestContext,
+          );
+        }
+      } else {
+        if (isPermission) {
+          return this.zbar.listSubjectsWithAccess(
+            ctx,
+            subjectType as any,
+            relationOrPermission as any,
+            object as any,
+            requestContext,
+          );
+        } else {
+          return this.zbar.listSubjectsWithRelation(
+            ctx,
+            subjectType as any,
+            relationOrPermission as any,
+            object as any,
+            requestContext,
+          );
+        }
+      }
+    }
+  }
+}
+
+// ============================================================================
 // Factory Function
 // ============================================================================
 
@@ -798,6 +1051,43 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       }
     }
     return results;
+  }
+
+  /**
+   * Fluent query builder for listing objects or subjects.
+   *
+   * **Listing objects** (pass object type as string, subject as `{type, id}`):
+   * ```ts
+   * const devices = await zbar.list()
+   *   .object("device")
+   *   .permission("view")
+   *   .subject({ type: "user", id: userId })
+   *   .collect(ctx);
+   * // devices: Array<{ objectId: string }>
+   * ```
+   *
+   * **Listing subjects** (pass object as `{type, id}`, subject type as string):
+   * ```ts
+   * const users = await zbar.list()
+   *   .object({ type: "device", id: deviceId })
+   *   .relation("admin")
+   *   .subject("user")
+   *   .collect(ctx);
+   * // users: Array<{ subjectId: string }>
+   * ```
+   *
+   * **With intermediary filtering** (`.via()` is optional):
+   * ```ts
+   * const devices = await zbar.list()
+   *   .object("device")
+   *   .relation("admin")
+   *   .subject({ type: "user", id: userId })
+   *   .via({ type: "system", id: sysId }, { type: "group", id: groupId })
+   *   .collect(ctx, requestContext);
+   * ```
+   */
+  list(): ListInitial<Schema, Data> {
+    return new ListQueryBuilder<Schema, Data>(this) as any;
   }
 
   /**
