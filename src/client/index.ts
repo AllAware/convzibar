@@ -340,7 +340,7 @@ export interface ListCollectable<
   Result,
 > {
   via<VT extends keyof Schema["entities"] & string>(
-    ...entities: Array<{ type: VT; id: string }>
+    ...entities: Array<{ type: VT; id: string } | null | undefined>
   ): ListFinal<Data, Result>;
   collect(
     ctx: QueryCtx | ActionCtx,
@@ -405,8 +405,11 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
     return this;
   }
 
-  via(...entities: Array<{ type: string; id: string }>): this {
-    this._via = entities;
+  via(...entities: Array<{ type: string; id: string } | null | undefined>): this {
+    this._via = entities.filter(
+      (e): e is { type: string; id: string } =>
+        e != null && typeof e.type === "string" && typeof e.id === "string",
+    );
     return this;
   }
 
@@ -414,103 +417,306 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
     ctx: QueryCtx | ActionCtx,
     requestContext?: Data,
   ): Promise<Array<{ objectId: string } | { subjectId: string }>> {
-    const hasVia = this._via.length > 0;
+    // Access Zbar internals — the builder is a tightly-coupled implementation
+    // detail defined in the same file, so this cast is intentional.
+    const z = this.zbar as any;
     const isPermission = this._permission != null;
-    const relationOrPermission = (this._relation ?? this._permission)!;
+    const relOrPerm = (this._relation ?? this._permission)!;
+
+    // 1. Resolve which effective relations to query for
+    const targets: Array<{ relation: string; condition?: string }> = isPermission
+      ? z.resolvePermissionRelations(this._objectType, relOrPerm)
+      : z.resolveRelationInheritance(this._objectType, relOrPerm);
+
+    if (targets.length === 0) return [];
+    const acceptableRelations = targets.map((t: any) => t.relation);
+    const hasVia = this._via.length > 0;
+
+    // Detect whether any conditions exist in the schema.  When there
+    // are none we can skip the per-candidate permission verification
+    // entirely in the via path because write-time materialisation
+    // guarantees transitivity (subject→via + via→object ⇒ subject→object).
+    const schemaHasConditions =
+      Object.keys(z.options.schema.conditions || {}).length > 0;
 
     if (this._mode === "listObjects") {
-      const subject = {
-        type: this._subjectType!,
-        id: this._subjectId!,
-      };
+      const subject = { type: this._subjectType!, id: this._subjectId! };
       const objectType = this._objectType;
 
       if (hasVia) {
-        if (isPermission) {
-          return this.zbar.listAccessibleObjectsVia(
-            ctx,
-            subject as any,
-            relationOrPermission as any,
-            objectType as any,
-            this._via as any,
-            requestContext,
-          );
-        } else {
-          return this.zbar.listObjectsWithRelationVia(
-            ctx,
-            subject as any,
-            relationOrPermission as any,
-            objectType as any,
-            this._via as any,
-            requestContext,
+        // ── Chained gate-check + expand ───────────────────────────
+        // Chain: subject → via[0] → via[1] → … → via[N-1] → objects
+        //
+        // 1. Gate: subject → via[0] using permission-relevant
+        //    relations (derived from userset rewrites).
+        // 2. Chain links: via[i] → via[i+1] connectivity checks.
+        // 3. Expand: via[N-1] → objects (the only range scan).
+        //
+        // All queries fire in parallel; any failure → return [].
+
+        const viaChain = this._via;
+        const firstVia = viaChain[0];
+        const lastVia = viaChain[viaChain.length - 1];
+
+        // Tight gate relations: only the relations on firstVia's type
+        // that are referenced by userset rewrites in the acceptable
+        // relations (e.g. device.admin ← system#admin → "admin" on system).
+        const tightGateRelations = z.getViaRelevantRelations(
+          objectType,
+          acceptableRelations,
+          firstVia.type,
+        );
+        const gateRelations =
+          tightGateRelations.length > 0
+            ? tightGateRelations
+            : z.getEntityRelations(firstVia.type);
+        const isTightGate = tightGateRelations.length > 0;
+
+        // — Fire all queries in parallel —
+        const promises: Promise<any>[] = [];
+
+        // [0] Gate: subject → via[0]
+        promises.push(
+          ctx.runQuery(z.component.queries.checkPermissionFast, {
+            tenantId: z.options.tenantId,
+            subject,
+            relations: gateRelations,
+            object: firstVia,
+          }),
+        );
+
+        // [1 .. N-1] Chain links: via[i] → via[i+1]
+        for (let i = 0; i < viaChain.length - 1; i++) {
+          const next = viaChain[i + 1];
+          promises.push(
+            ctx.runQuery(z.component.queries.checkPermissionFast, {
+              tenantId: z.options.tenantId,
+              subject: viaChain[i],
+              relations: z.getEntityRelations(next.type),
+              object: next,
+            }),
           );
         }
-      } else {
-        if (isPermission) {
-          return this.zbar.listAccessibleObjects(
-            ctx,
-            subject as any,
-            relationOrPermission as any,
-            objectType as any,
-            requestContext,
-          );
-        } else {
-          return this.zbar.listObjectsWithRelation(
-            ctx,
-            subject as any,
-            relationOrPermission as any,
-            objectType as any,
-            requestContext,
-          );
+
+        // [N] Expand: via[N-1] → objects (using acceptable relations
+        //     so we only get objects reachable via the right path).
+        promises.push(
+          ctx.runQuery(z.component.queries.listAccessibleObjectsFast, {
+            tenantId: z.options.tenantId,
+            subject: lastVia,
+            relations: acceptableRelations,
+            objectType,
+          }),
+        );
+
+        const results = await Promise.all(promises);
+
+        // Verify gate + every chain link passed
+        const numChecks = viaChain.length; // 1 gate + (N-1) links
+        for (let i = 0; i < numChecks; i++) {
+          if ((results[i] as any[]).length === 0) return [];
         }
+
+        // Collect expand results
+        const expandRows = results[results.length - 1] as any[];
+        const candidateIds = new Set<string>();
+        for (const eff of expandRows) {
+          candidateIds.add(eff.objectKey.split(":")[1]);
+        }
+        if (candidateIds.size === 0) return [];
+
+        // Fast path: tight gate + no conditions → materialisation
+        // guarantees subject→object, return IDs directly.
+        if (!schemaHasConditions && isTightGate) {
+          return [...candidateIds].map((id) => ({ objectId: id }));
+        }
+
+        // Slow path: batch-verify + validate conditions
+        const effectiveRels = await ctx.runQuery(
+          z.component.queries.checkPermissionBatchObjects,
+          {
+            tenantId: z.options.tenantId,
+            subject,
+            relations: acceptableRelations,
+            objectType,
+            candidateObjectIds: [...candidateIds],
+          },
+        );
+
+        const validated = await z.listWithValidation(
+          ctx,
+          effectiveRels,
+          targets,
+          (eff: any) => eff.objectKey.split(":")[1],
+          () => subject,
+          (_: any, id: string) => ({ type: objectType, id }),
+          relOrPerm,
+          requestContext,
+        );
+
+        return validated.map((r: any) => ({ objectId: r.id }));
       }
+
+      // ── No via: standard full-scan path ───────────────────────────
+      const effectiveRels = await ctx.runQuery(
+        z.component.queries.listAccessibleObjectsFast,
+        {
+          tenantId: z.options.tenantId,
+          subject,
+          relations: acceptableRelations,
+          objectType,
+        },
+      );
+
+      const validated = await z.listWithValidation(
+        ctx,
+        effectiveRels,
+        targets,
+        (eff: any) => eff.objectKey.split(":")[1],
+        () => subject,
+        (_: any, id: string) => ({ type: objectType, id }),
+        relOrPerm,
+        requestContext,
+      );
+
+      return validated.map((r: any) => ({ objectId: r.id }));
     } else {
-      // listSubjects
-      const object = {
-        type: this._objectType,
-        id: this._objectId!,
-      };
+      // listSubjects mode
+      const object = { type: this._objectType, id: this._objectId! };
       const subjectType = this._subjectType!;
 
       if (hasVia) {
-        if (isPermission) {
-          return this.zbar.listSubjectsWithAccessVia(
-            ctx,
-            subjectType as any,
-            relationOrPermission as any,
-            object as any,
-            this._via as any,
-            requestContext,
-          );
-        } else {
-          return this.zbar.listSubjectsWithRelationVia(
-            ctx,
-            subjectType as any,
-            relationOrPermission as any,
-            object as any,
-            this._via as any,
-            requestContext,
+        // ── Chained gate-check + expand (subjects) ───────────────
+        // Chain: subjects → via[0] → … → via[N-1] → object
+        //
+        // 1. Gate: via[N-1] → object using acceptable relations.
+        // 2. Chain links: via[i] → via[i+1] connectivity checks.
+        // 3. Expand: via[0] ← subjects (range scan for subject type).
+
+        const viaChain = this._via;
+        const firstVia = viaChain[0];
+        const lastVia = viaChain[viaChain.length - 1];
+
+        // Tight expand: only relations on firstVia's type that are
+        // referenced by the object type's userset rewrites.
+        const tightExpandRelations = z.getViaRelevantRelations(
+          this._objectType,
+          acceptableRelations,
+          firstVia.type,
+        );
+        const expandRelations =
+          tightExpandRelations.length > 0
+            ? tightExpandRelations
+            : z.getEntityRelations(firstVia.type);
+        const isTightExpand = tightExpandRelations.length > 0;
+
+        const promises: Promise<any>[] = [];
+
+        // [0] Gate: via[N-1] → object (using acceptable relations)
+        promises.push(
+          ctx.runQuery(z.component.queries.checkPermissionFast, {
+            tenantId: z.options.tenantId,
+            subject: lastVia,
+            relations: acceptableRelations,
+            object,
+          }),
+        );
+
+        // [1 .. N-1] Chain links: via[i] → via[i+1]
+        for (let i = 0; i < viaChain.length - 1; i++) {
+          const next = viaChain[i + 1];
+          promises.push(
+            ctx.runQuery(z.component.queries.checkPermissionFast, {
+              tenantId: z.options.tenantId,
+              subject: viaChain[i],
+              relations: z.getEntityRelations(next.type),
+              object: next,
+            }),
           );
         }
-      } else {
-        if (isPermission) {
-          return this.zbar.listSubjectsWithAccess(
-            ctx,
-            subjectType as any,
-            relationOrPermission as any,
-            object as any,
-            requestContext,
-          );
-        } else {
-          return this.zbar.listSubjectsWithRelation(
-            ctx,
-            subjectType as any,
-            relationOrPermission as any,
-            object as any,
-            requestContext,
-          );
+
+        // [N] Expand: via[0] ← subjects (using tight relations)
+        promises.push(
+          ctx.runQuery(z.component.queries.listSubjectsWithAccessFast, {
+            tenantId: z.options.tenantId,
+            object: firstVia,
+            relations: expandRelations,
+            subjectType,
+          }),
+        );
+
+        const results = await Promise.all(promises);
+
+        // Verify gate + chain links
+        const numChecks = viaChain.length;
+        for (let i = 0; i < numChecks; i++) {
+          if ((results[i] as any[]).length === 0) return [];
         }
+
+        const expandRows = results[results.length - 1] as any[];
+        const candidateIds = new Set<string>();
+        for (const eff of expandRows) {
+          candidateIds.add(eff.subjectKey.split(":")[1]);
+        }
+        if (candidateIds.size === 0) return [];
+
+        // Fast path: tight expand + no conditions
+        if (!schemaHasConditions && isTightExpand) {
+          return [...candidateIds].map((id) => ({ subjectId: id }));
+        }
+
+        // Slow path
+        const effectiveRels = await ctx.runQuery(
+          z.component.queries.checkPermissionBatchSubjects,
+          {
+            tenantId: z.options.tenantId,
+            object,
+            relations: acceptableRelations,
+            subjectType,
+            candidateSubjectIds: [...candidateIds],
+          },
+        );
+
+        const validated = await z.listWithValidation(
+          ctx,
+          effectiveRels,
+          targets,
+          (eff: any) => eff.subjectKey.split(":")[1],
+          (eff: any, id: string) => ({
+            type: eff.subjectKey.split(":")[0],
+            id,
+          }),
+          () => object,
+          relOrPerm,
+          requestContext,
+        );
+
+        return validated.map((r: any) => ({ subjectId: r.id }));
       }
+
+      // ── No via: standard full-scan path ───────────────────────────
+      const effectiveRels = await ctx.runQuery(
+        z.component.queries.listSubjectsWithAccessFast,
+        {
+          tenantId: z.options.tenantId,
+          object,
+          relations: acceptableRelations,
+          subjectType,
+        },
+      );
+
+      const validated = await z.listWithValidation(
+        ctx,
+        effectiveRels,
+        targets,
+        (eff: any) => eff.subjectKey.split(":")[1],
+        (eff: any, id: string) => ({ type: eff.subjectKey.split(":")[0], id }),
+        () => object,
+        relOrPerm,
+        requestContext,
+      );
+
+      return validated.map((r: any) => ({ subjectId: r.id }));
     }
   }
 }
@@ -1090,197 +1296,10 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     return new ListQueryBuilder<Schema, Data>(this) as any;
   }
 
-  /**
-   * Retrieve a list of objects a subject has a specific permission on.
-   */
-  async listAccessibleObjects<
-    SubjectType extends keyof Schema["entities"] & string,
-    ObjectType extends keyof Schema["entities"] & string,
-    Permission extends EntityPermissions<Schema, ObjectType>,
-  >(
-    ctx: QueryCtx | ActionCtx,
-    subject: { type: SubjectType; id: string },
-    permission: Permission,
-    objectType: ObjectType,
-    requestContext?: Data,
-  ): Promise<Array<{ objectId: string }>> {
-    const targets = this.resolvePermissionRelations(objectType, permission);
-    if (targets.length === 0) return [];
-
-    const acceptableRelations = targets.map((t) => t.relation);
-
-    const effectiveRels = await ctx.runQuery(
-      this.component.queries.listAccessibleObjectsFast,
-      {
-        tenantId: this.options.tenantId,
-        subject,
-        relations: acceptableRelations,
-        objectType,
-      },
-    );
-
-    const results = await this.listWithValidation<{
-      id: string;
-      objectId: string;
-    }>(
-      ctx,
-      effectiveRels,
-      targets,
-      (eff) => eff.objectKey.split(":")[1],
-      () => subject,
-      (_, id) => ({ type: objectType, id }),
-      permission,
-      requestContext,
-    );
-
-    return results.map((r) => ({ objectId: r.id }));
-  }
-
-  /**
-   * Retrieve a list of objects a subject has a specific relationship with.
-   */
-  async listObjectsWithRelation<
-    SubjectType extends keyof Schema["entities"] & string,
-    ObjectType extends keyof Schema["entities"] & string,
-    Relation extends EntityRelations<Schema, ObjectType>,
-  >(
-    ctx: QueryCtx | ActionCtx,
-    subject: { type: SubjectType; id: string },
-    relation: Relation,
-    objectType: ObjectType,
-    requestContext?: Data,
-  ): Promise<Array<{ objectId: string }>> {
-    const targets = this.resolveRelationInheritance(objectType, relation);
-    if (targets.length === 0) return [];
-
-    const acceptableRelations = targets.map((t) => t.relation);
-
-    const effectiveRels = await ctx.runQuery(
-      this.component.queries.listAccessibleObjectsFast,
-      {
-        tenantId: this.options.tenantId,
-        subject,
-        relations: acceptableRelations,
-        objectType,
-      },
-    );
-
-    const results = await this.listWithValidation<{
-      id: string;
-      objectId: string;
-    }>(
-      ctx,
-      effectiveRels,
-      targets,
-      (eff) => eff.objectKey.split(":")[1],
-      () => subject,
-      (_, id) => ({ type: objectType, id }),
-      relation,
-      requestContext,
-    );
-
-    return results.map((r) => ({ objectId: r.id }));
-  }
-
-  /**
-   * Retrieve a list of subjects that have a specific relationship with an object.
-   */
-  async listSubjectsWithRelation<
-    SubjectType extends keyof Schema["entities"] & string,
-    ObjectType extends keyof Schema["entities"] & string,
-    Relation extends EntityRelations<Schema, ObjectType>,
-  >(
-    ctx: QueryCtx | ActionCtx,
-    subjectType: SubjectType,
-    relation: Relation,
-    object: { type: ObjectType; id: string },
-    requestContext?: Data,
-  ): Promise<Array<{ subjectId: string }>> {
-    const targets = this.resolveRelationInheritance(object.type, relation);
-    if (targets.length === 0) return [];
-
-    const acceptableRelations = targets.map((t) => t.relation);
-
-    const effectiveRels = await ctx.runQuery(
-      this.component.queries.listSubjectsWithAccessFast,
-      {
-        tenantId: this.options.tenantId,
-        object,
-        relations: acceptableRelations,
-        subjectType,
-      },
-    );
-
-    const results = await this.listWithValidation<{
-      id: string;
-      userId: string;
-    }>(
-      ctx,
-      effectiveRels,
-      targets,
-      (eff) => eff.subjectKey.split(":")[1],
-      (eff, id) => ({ type: eff.subjectKey.split(":")[0], id }),
-      () => object,
-      relation,
-      requestContext,
-    );
-
-    return results.map((r) => ({ subjectId: r.id }));
-  }
-
-  /**
-   * Retrieve a list of subjects that have a specific permission on an object.
-   */
-  async listSubjectsWithAccess<
-    SubjectType extends keyof Schema["entities"] & string,
-    ObjectType extends keyof Schema["entities"] & string,
-    Permission extends EntityPermissions<Schema, ObjectType>,
-  >(
-    ctx: QueryCtx | ActionCtx,
-    subjectType: SubjectType,
-    permission: Permission,
-    object: { type: ObjectType; id: string },
-    requestContext?: Data,
-  ): Promise<Array<{ subjectId: string }>> {
-    const targets = this.resolvePermissionRelations(object.type, permission);
-    if (targets.length === 0) return [];
-
-    const acceptableRelations = targets.map((t) => t.relation);
-
-    const effectiveRels = await ctx.runQuery(
-      this.component.queries.listSubjectsWithAccessFast,
-      {
-        tenantId: this.options.tenantId,
-        object,
-        relations: acceptableRelations,
-        subjectType,
-      },
-    );
-
-    const results = await this.listWithValidation<{
-      id: string;
-      userId: string;
-    }>(
-      ctx,
-      effectiveRels,
-      targets,
-      (eff) => eff.subjectKey.split(":")[1],
-      (eff, id) => ({ type: eff.subjectKey.split(":")[0], id }),
-      () => object,
-      permission,
-      requestContext,
-    );
-
-    return results.map((r) => ({ subjectId: r.id }));
-  }
-
   // ============================================================================
-  // Via (Intermediary Filtering) Methods
+  // Private helpers for ListQueryBuilder
   // ============================================================================
 
-  /**
-   * Get all relation names defined for an entity type in the schema.
-   */
   private getEntityRelations(entityType: string): string[] {
     return Object.keys(
       this.options.schema.entities[entityType]?.relations || {},
@@ -1288,282 +1307,54 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
   }
 
   /**
-   * Query effective relationships where the given entity is the subject,
-   * returning the set of object IDs of the specified object type.
-   * This bypasses client-side schema validation since intermediate entities
-   * (e.g., a system entity as subject of a device relation) are valid in
-   * the effective relationships table even if not a direct type target.
+   * For a given object type and set of acceptable relations, extract
+   * the relations on a via entity type that are referenced by userset
+   * rewrites (e.g. `system#admin`), expanded with local inheritance.
+   *
+   * Example: `device.admin` includes `system#admin`.
+   * For objectType="device", acceptableRelations=["admin"], viaType="system"
+   * → returns ["admin", "owner"] (admin + owner which inherits admin).
+   *
+   * Returns [] if the via type is not referenced by any userset rewrite
+   * in the acceptable relations, signalling a loose gate should be used.
    */
-  private async getObjectIdsReachableFrom(
-    ctx: QueryCtx | ActionCtx,
-    entity: { type: string; id: string },
+  private getViaRelevantRelations(
     objectType: string,
-  ): Promise<Set<string>> {
-    const relations = this.getEntityRelations(objectType);
-    if (relations.length === 0) return new Set();
+    acceptableRelations: string[],
+    viaType: string,
+  ): string[] {
+    const schema = this.options.schema;
+    const objectDef = schema.entities[objectType];
+    if (!objectDef?.relations) return [];
 
-    const effectiveRels = await ctx.runQuery(
-      this.component.queries.listAccessibleObjectsFast,
-      {
-        tenantId: this.options.tenantId,
-        subject: entity,
-        relations,
-        objectType,
-      },
-    );
+    const baseRelations = new Set<string>();
 
-    const ids = new Set<string>();
-    for (const eff of effectiveRels) {
-      ids.add(eff.objectKey.split(":")[1]);
-    }
-    return ids;
-  }
-
-  /**
-   * Query effective relationships where the given entity is the object,
-   * returning the set of subject IDs of the specified subject type.
-   */
-  private async getSubjectIdsReachableFrom(
-    ctx: QueryCtx | ActionCtx,
-    entity: { type: string; id: string },
-    subjectType: string,
-  ): Promise<Set<string>> {
-    const relations = this.getEntityRelations(entity.type);
-    if (relations.length === 0) return new Set();
-
-    const effectiveRels = await ctx.runQuery(
-      this.component.queries.listSubjectsWithAccessFast,
-      {
-        tenantId: this.options.tenantId,
-        object: entity,
-        relations,
-        subjectType,
-      },
-    );
-
-    const ids = new Set<string>();
-    for (const eff of effectiveRels) {
-      ids.add(eff.subjectKey.split(":")[1]);
-    }
-    return ids;
-  }
-
-  /**
-   * List objects a subject has a specific permission on, filtered to only
-   * those accessible through ALL of the specified intermediate entities.
-   *
-   * Example: "List all devices user X can view that are accessible through system Y"
-   * ```ts
-   * const devices = await zbar.listAccessibleObjectsVia(ctx,
-   *   { type: 'user', id: 'user1' },
-   *   'view',
-   *   'device',
-   *   [{ type: 'system', id: 'system1' }],
-   * );
-   * ```
-   */
-  async listAccessibleObjectsVia<
-    SubjectType extends keyof Schema["entities"] & string,
-    ObjectType extends keyof Schema["entities"] & string,
-    ViaType extends keyof Schema["entities"] & string,
-    Permission extends EntityPermissions<Schema, ObjectType>,
-  >(
-    ctx: QueryCtx | ActionCtx,
-    subject: { type: SubjectType; id: string },
-    permission: Permission,
-    objectType: ObjectType,
-    via: Array<{ type: ViaType; id: string }>,
-    requestContext?: Data,
-  ): Promise<Array<{ objectId: string }>> {
-    if (via.length === 0) {
-      return this.listAccessibleObjects(
-        ctx,
-        subject,
-        permission,
-        objectType,
-        requestContext,
-      );
+    for (const rel of acceptableRelations) {
+      const relDef = objectDef.relations[rel];
+      if (!relDef) continue;
+      const defs = Array.isArray(relDef) ? relDef : [relDef];
+      for (const d of defs) {
+        if (typeof d === "string" && d.includes("#")) {
+          const [type, viaRel] = d.split("#");
+          if (type === viaType) {
+            baseRelations.add(viaRel);
+          }
+        }
+      }
     }
 
-    // Step 1: Get all objects the subject has the permission on
-    const [candidates, ...viaSets] = await Promise.all([
-      this.listAccessibleObjects(
-        ctx,
-        subject,
-        permission,
-        objectType,
-        requestContext,
-      ),
-      ...via.map((v) => this.getObjectIdsReachableFrom(ctx, v, objectType)),
-    ]);
+    if (baseRelations.size === 0) return [];
 
-    // Step 2: Intersect — keep only objects reachable through ALL via entities
-    return candidates.filter((c) =>
-      viaSets.every((viaSet) => viaSet.has(c.objectId)),
-    );
-  }
-
-  /**
-   * List objects a subject has a specific relation with, filtered to only
-   * those accessible through ALL of the specified intermediate entities.
-   *
-   * Example: "List all devices user X is admin of through system Y"
-   * ```ts
-   * const devices = await zbar.listObjectsWithRelationVia(ctx,
-   *   { type: 'user', id: 'user1' },
-   *   'admin',
-   *   'device',
-   *   [{ type: 'system', id: 'system1' }],
-   * );
-   * ```
-   */
-  async listObjectsWithRelationVia<
-    SubjectType extends keyof Schema["entities"] & string,
-    ObjectType extends keyof Schema["entities"] & string,
-    ViaType extends keyof Schema["entities"] & string,
-    Relation extends EntityRelations<Schema, ObjectType>,
-  >(
-    ctx: QueryCtx | ActionCtx,
-    subject: { type: SubjectType; id: string },
-    relation: Relation,
-    objectType: ObjectType,
-    via: Array<{ type: ViaType; id: string }>,
-    requestContext?: Data,
-  ): Promise<Array<{ objectId: string }>> {
-    if (via.length === 0) {
-      return this.listObjectsWithRelation(
-        ctx,
-        subject,
-        relation,
-        objectType,
-        requestContext,
-      );
+    // Expand with inheritance on the via entity type
+    const expanded = new Set<string>();
+    for (const rel of baseRelations) {
+      const inherited = this.resolveRelationInheritance(viaType, rel);
+      for (const t of inherited) {
+        expanded.add(t.relation);
+      }
     }
 
-    const [candidates, ...viaSets] = await Promise.all([
-      this.listObjectsWithRelation(
-        ctx,
-        subject,
-        relation,
-        objectType,
-        requestContext,
-      ),
-      ...via.map((v) => this.getObjectIdsReachableFrom(ctx, v, objectType)),
-    ]);
-
-    return candidates.filter((c) =>
-      viaSets.every((viaSet) => viaSet.has(c.objectId)),
-    );
-  }
-
-  /**
-   * List subjects that have a specific permission on an object, filtered to only
-   * those whose access goes through ALL of the specified intermediate entities.
-   *
-   * Example: "List all users who can view device D through system Y"
-   * ```ts
-   * const users = await zbar.listSubjectsWithAccessVia(ctx,
-   *   'user',
-   *   'view',
-   *   { type: 'device', id: 'device1' },
-   *   [{ type: 'system', id: 'system1' }],
-   * );
-   * ```
-   */
-  async listSubjectsWithAccessVia<
-    SubjectType extends keyof Schema["entities"] & string,
-    ObjectType extends keyof Schema["entities"] & string,
-    ViaType extends keyof Schema["entities"] & string,
-    Permission extends EntityPermissions<Schema, ObjectType>,
-  >(
-    ctx: QueryCtx | ActionCtx,
-    subjectType: SubjectType,
-    permission: Permission,
-    object: { type: ObjectType; id: string },
-    via: Array<{ type: ViaType; id: string }>,
-    requestContext?: Data,
-  ): Promise<Array<{ subjectId: string }>> {
-    if (via.length === 0) {
-      return this.listSubjectsWithAccess(
-        ctx,
-        subjectType,
-        permission,
-        object,
-        requestContext,
-      );
-    }
-
-    const [candidates, ...viaSets] = await Promise.all([
-      this.listSubjectsWithAccess(
-        ctx,
-        subjectType,
-        permission,
-        object,
-        requestContext,
-      ),
-      ...via.map((v) =>
-        this.getSubjectIdsReachableFrom(ctx, v, subjectType),
-      ),
-    ]);
-
-    return candidates.filter((c) =>
-      viaSets.every((viaSet) => viaSet.has(c.subjectId)),
-    );
-  }
-
-  /**
-   * List subjects that have a specific relation with an object, filtered to only
-   * those whose access goes through ALL of the specified intermediate entities.
-   *
-   * Example: "List all users who are admins of device D through system Y"
-   * ```ts
-   * const users = await zbar.listSubjectsWithRelationVia(ctx,
-   *   'user',
-   *   'admin',
-   *   { type: 'device', id: 'device1' },
-   *   [{ type: 'system', id: 'system1' }],
-   * );
-   * ```
-   */
-  async listSubjectsWithRelationVia<
-    SubjectType extends keyof Schema["entities"] & string,
-    ObjectType extends keyof Schema["entities"] & string,
-    ViaType extends keyof Schema["entities"] & string,
-    Relation extends EntityRelations<Schema, ObjectType>,
-  >(
-    ctx: QueryCtx | ActionCtx,
-    subjectType: SubjectType,
-    relation: Relation,
-    object: { type: ObjectType; id: string },
-    via: Array<{ type: ViaType; id: string }>,
-    requestContext?: Data,
-  ): Promise<Array<{ subjectId: string }>> {
-    if (via.length === 0) {
-      return this.listSubjectsWithRelation(
-        ctx,
-        subjectType,
-        relation,
-        object,
-        requestContext,
-      );
-    }
-
-    const [candidates, ...viaSets] = await Promise.all([
-      this.listSubjectsWithRelation(
-        ctx,
-        subjectType,
-        relation,
-        object,
-        requestContext,
-      ),
-      ...via.map((v) =>
-        this.getSubjectIdsReachableFrom(ctx, v, subjectType),
-      ),
-    ]);
-
-    return candidates.filter((c) =>
-      viaSets.every((viaSet) => viaSet.has(c.subjectId)),
-    );
+    return [...expanded];
   }
 
   /**

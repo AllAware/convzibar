@@ -118,12 +118,12 @@ describe("Complex Schema Inheritance Flows", () => {
     expect(await zbar.can(ctx, noAccessUser, "manage", device1)).toBe(false);
 
     // 4. Test Listing Accessible Objects
-    const devicesToManage = await zbar.listAccessibleObjects(
-      ctx,
-      adminUser,
-      "manage",
-      "device",
-    );
+    const devicesToManage = await zbar
+      .list()
+      .object("device")
+      .permission("manage")
+      .subject(adminUser)
+      .collect(ctx);
     expect(devicesToManage.length).toBe(2);
     expect(devicesToManage.map((d) => d.objectId).sort()).toEqual(["d1", "d2"]);
 

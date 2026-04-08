@@ -96,7 +96,7 @@ describe("Cross-tenant ReBAC isolation", () => {
     expect(canEditInB).toBe(false);
   });
 
-  test("listAccessibleObjects is isolated by tenant", async () => {
+  test("list().object().permission().subject().collect() is isolated by tenant", async () => {
     const t = convexTest(schema, modules);
     const ctx = {
       runQuery: t.query.bind(t),
@@ -126,27 +126,27 @@ describe("Cross-tenant ReBAC isolation", () => {
     await zbarB.addRelation(ctx, user, "viewer", org2);
 
     // Verify accessible objects in Tenant A
-    const accessibleA = await zbarA.listAccessibleObjects(
-      ctx,
-      user,
-      "view_dashboard",
-      "org",
-    );
+    const accessibleA = await zbarA
+      .list()
+      .object("org")
+      .permission("view_dashboard")
+      .subject(user)
+      .collect(ctx);
     expect(accessibleA.length).toBe(1);
     expect(accessibleA[0].objectId).toBe("org1");
 
     // Verify accessible objects in Tenant B
-    const accessibleB = await zbarB.listAccessibleObjects(
-      ctx,
-      user,
-      "view_dashboard",
-      "org",
-    );
+    const accessibleB = await zbarB
+      .list()
+      .object("org")
+      .permission("view_dashboard")
+      .subject(user)
+      .collect(ctx);
     expect(accessibleB.length).toBe(1);
     expect(accessibleB[0].objectId).toBe("org2");
   });
 
-  test("listSubjectsWithAccess is isolated by tenant", async () => {
+  test("list().object().permission().subject().collect() subjects isolated by tenant", async () => {
     const t = convexTest(schema, modules);
     const ctx = {
       runQuery: t.query.bind(t),
@@ -176,22 +176,22 @@ describe("Cross-tenant ReBAC isolation", () => {
     await zbarB.addRelation(ctx, user2, "admin", org);
 
     // Verify users with access in Tenant A
-    const usersA = await zbarA.listSubjectsWithAccess(
-      ctx,
-      "user",
-      "edit_settings",
-      org,
-    );
+    const usersA = await zbarA
+      .list()
+      .object(org)
+      .permission("edit_settings")
+      .subject("user")
+      .collect(ctx);
     expect(usersA.length).toBe(1);
     expect(usersA[0].subjectId).toBe("u1");
 
     // Verify users with access in Tenant B
-    const usersB = await zbarB.listSubjectsWithAccess(
-      ctx,
-      "user",
-      "edit_settings",
-      org,
-    );
+    const usersB = await zbarB
+      .list()
+      .object(org)
+      .permission("edit_settings")
+      .subject("user")
+      .collect(ctx);
     expect(usersB.length).toBe(1);
     expect(usersB[0].subjectId).toBe("u2");
   });

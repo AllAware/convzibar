@@ -69,6 +69,86 @@ export const listAccessibleObjectsFast = query({
   },
 });
 
+/**
+ * Batch-check whether a subject has any of the given relations with
+ * each of several candidate objects.  Returns only the matches.
+ * Used by the funnel-via optimisation so that a single Convex query
+ * replaces N individual `checkPermissionFast` round-trips.
+ */
+export const checkPermissionBatchObjects = query({
+  args: {
+    tenantId: v.optional(v.string()),
+    subject: subjectValidator,
+    relations: v.array(v.string()),
+    objectType: v.string(),
+    candidateObjectIds: v.array(v.string()),
+  },
+  handler: async (ctx: any, args: any) => {
+    const { tenantId, subject, relations, objectType, candidateObjectIds } =
+      args;
+    const sKey = buildScopeKey(subject.type, subject.id);
+
+    // For every (candidateId, relation) pair, do a point lookup.
+    // All lookups run in parallel inside one query transaction.
+    const promises = candidateObjectIds.flatMap((id: string) => {
+      const oKey = buildScopeKey(objectType, id);
+      return relations.map((rel: string) =>
+        ctx.db
+          .query("effectiveRelationships")
+          .withIndex("by_tenant_subject_relation_object", (q: any) =>
+            q
+              .eq("tenantId", tenantId)
+              .eq("subjectKey", sKey)
+              .eq("relation", rel)
+              .eq("objectKey", oKey),
+          )
+          .unique(),
+      );
+    });
+
+    const results = await Promise.all(promises);
+    return results.filter((eff: any) => eff !== null);
+  },
+});
+
+/**
+ * Batch-check whether each of several candidate subjects has any of the
+ * given relations with a specific object.  Returns only the matches.
+ */
+export const checkPermissionBatchSubjects = query({
+  args: {
+    tenantId: v.optional(v.string()),
+    object: objectValidator,
+    relations: v.array(v.string()),
+    subjectType: v.string(),
+    candidateSubjectIds: v.array(v.string()),
+  },
+  handler: async (ctx: any, args: any) => {
+    const { tenantId, object, relations, subjectType, candidateSubjectIds } =
+      args;
+    const oKey = buildScopeKey(object.type, object.id);
+
+    const promises = candidateSubjectIds.flatMap((id: string) => {
+      const sKey = buildScopeKey(subjectType, id);
+      return relations.map((rel: string) =>
+        ctx.db
+          .query("effectiveRelationships")
+          .withIndex("by_tenant_subject_relation_object", (q: any) =>
+            q
+              .eq("tenantId", tenantId)
+              .eq("subjectKey", sKey)
+              .eq("relation", rel)
+              .eq("objectKey", oKey),
+          )
+          .unique(),
+      );
+    });
+
+    const results = await Promise.all(promises);
+    return results.filter((eff: any) => eff !== null);
+  },
+});
+
 export const listSubjectsWithAccessFast = query({
   args: {
     tenantId: v.optional(v.string()),

@@ -113,12 +113,12 @@ describe("Benchmarks & High Contention Stress Tests", () => {
     await assertDbState(t, 21, 41);
 
     // 3. Verify user gained access to all files
-    const accessibleFiles = await zbar.listAccessibleObjects(
-      ctx,
-      user,
-      "view",
-      "file",
-    );
+    const accessibleFiles = await zbar
+      .list()
+      .object("file")
+      .permission("view")
+      .subject(user)
+      .collect(ctx);
     expect(accessibleFiles.length).toBe(NUM_FILES);
 
     // 4. High Contention Remove: Sequentially attempt to remove the same relationship
@@ -133,12 +133,12 @@ describe("Benchmarks & High Contention Stress Tests", () => {
     await assertDbState(t, 20, 20);
 
     // Verify user lost access
-    const accessibleFilesAfter = await zbar.listAccessibleObjects(
-      ctx,
-      user,
-      "view",
-      "file",
-    );
+    const accessibleFilesAfter = await zbar
+      .list()
+      .object("file")
+      .permission("view")
+      .subject(user)
+      .collect(ctx);
     expect(accessibleFilesAfter.length).toBe(0);
   });
 

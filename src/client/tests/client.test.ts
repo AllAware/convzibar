@@ -76,12 +76,12 @@ describe("Client API & Read-Time Inference", () => {
     await zbar.addRelation(ctx, user, "owner", org1); // Should grant view_dashboard via inheritance
     await zbar.addRelation(ctx, user, "viewer", org2); // Direct viewer
 
-    const results = await zbar.listAccessibleObjects(
-      ctx,
-      user,
-      "view_dashboard",
-      "org",
-    );
+    const results = await zbar
+      .list()
+      .object("org")
+      .permission("view_dashboard")
+      .subject(user)
+      .collect(ctx);
 
     expect(results.length).toBe(2);
     expect(results.map((r) => r.objectId).sort()).toEqual(["org1", "org2"]);
@@ -114,12 +114,12 @@ describe("Client API & Read-Time Inference", () => {
     await zbar.addRelation(ctx, user, "viewer", org1);
     await zbar.addRelation(ctx, org1, "parent_org", proj1);
 
-    const results = await zbar.listAccessibleObjects(
-      ctx,
-      user,
-      "edit",
-      "project",
-    );
+    const results = await zbar
+      .list()
+      .object("project")
+      .permission("edit")
+      .subject(user)
+      .collect(ctx);
 
     expect(results.length).toBe(1);
     expect(results.map((r) => r.objectId).sort()).toEqual(["proj1"]);
@@ -141,7 +141,7 @@ describe("Client API & Read-Time Inference", () => {
     await assertDbState(t, 3, 4);
   });
 
-  test("listSubjectsWithAccess with local inheritance", async () => {
+  test("list subjects with local inheritance", async () => {
     const t = setup();
     const ctx = {
       runQuery: t.query.bind(t),
@@ -162,12 +162,12 @@ describe("Client API & Read-Time Inference", () => {
     await zbar.addRelation(ctx, adminUser, "admin", org);
 
     // Both should have edit_settings
-    const results = await zbar.listSubjectsWithAccess(
-      ctx,
-      "user",
-      "edit_settings",
-      org,
-    );
+    const results = await zbar
+      .list()
+      .object(org)
+      .permission("edit_settings")
+      .subject("user")
+      .collect(ctx);
 
     expect(results.length).toBe(2);
     expect(results.map((r) => r.subjectId).sort()).toEqual([
@@ -298,13 +298,12 @@ describe("Client API & Read-Time Inference", () => {
     expect(canReadWithCtx).toBe(true);
 
     // 3. List accessible objects (should return d1 when context matches)
-    const accessibleDocs = await zbar.listAccessibleObjects(
-      ctx,
-      user,
-      "read",
-      "document",
-      { approved: true },
-    );
+    const accessibleDocs = await zbar
+      .list()
+      .object("document")
+      .permission("read")
+      .subject(user)
+      .collect(ctx, { approved: true });
     expect(accessibleDocs.length).toBe(1);
     expect(accessibleDocs[0].objectId).toBe("d1");
 

@@ -144,7 +144,7 @@ describe("Fluent List Query Builder", () => {
   });
 
   // ---- With .via() ----
-  test("list().object(type).permission().subject().via().collect() — listAccessibleObjectsVia", async () => {
+  test("single via: lists objects reachable from via entity", async () => {
     const t = setup();
     const ctx = mkCtx(t);
     const zbar = mkZbar();
@@ -163,7 +163,7 @@ describe("Fluent List Query Builder", () => {
     await zbar.addRelation(ctx, sys2, "admin", dev2);
     await zbar.addRelation(ctx, sys2, "admin", dev3);
 
-    // Via sys1 only
+    // Via sys1: alice → sys1 → {dev1, dev2}
     const viaSys1 = await zbar
       .list()
       .object("device")
@@ -171,19 +171,117 @@ describe("Fluent List Query Builder", () => {
       .subject({ type: "user", id: "alice" })
       .via({ type: "system", id: "sys1" })
       .collect(ctx);
-
     expect(viaSys1.map((d) => d.objectId).sort()).toEqual(["dev1", "dev2"]);
 
-    // Via both sys1 AND sys2 — intersection
-    const viaBoth = await zbar
+    // Via sys2: alice → sys2 → {dev2, dev3}
+    const viaSys2 = await zbar
       .list()
       .object("device")
       .permission("view")
       .subject({ type: "user", id: "alice" })
-      .via({ type: "system", id: "sys1" }, { type: "system", id: "sys2" })
+      .via({ type: "system", id: "sys2" })
       .collect(ctx);
+    expect(viaSys2.map((d) => d.objectId).sort()).toEqual(["dev2", "dev3"]);
+  });
 
-    expect(viaBoth.map((d) => d.objectId).sort()).toEqual(["dev2"]);
+  test("chained via: alice → group → system → devices", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+
+    // Schema that supports user → group → system → device chain
+    const chainSchema = createZbarSchema<any>()
+      .entity("user")
+      .entity("group", (e) =>
+        e.relation("member", "user"),
+      )
+      .entity("system", (e) =>
+        e
+          .relation("admin", "user", "group#member")
+          .relation("viewer", "user", "admin"),
+      )
+      .entity("device", (e) =>
+        e
+          .relation("admin", "user", "system#admin")
+          .relation("viewer", "user", "admin", "system#viewer")
+          .permission("view", "viewer")
+          .permission("manage", "admin"),
+      )
+      .build();
+
+    const zbar = new Zbar(api, {
+      schema: chainSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const alice = { type: "user" as const, id: "alice" };
+    const grp1 = { type: "group" as const, id: "grp1" };
+    const sys1 = { type: "system" as const, id: "sys1" };
+    const dev1 = { type: "device" as const, id: "dev1" };
+
+    // Chain: alice → grp1 (member) → sys1 (admin via group#member) → dev1
+    await zbar.addRelation(ctx, alice, "member", grp1);
+    await zbar.addRelation(ctx, grp1, "admin", sys1);
+    await zbar.addRelation(ctx, sys1, "admin", dev1);
+
+    // Via chain [grp1, sys1]: alice → grp1 → sys1 → dev1
+    const result = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .via(grp1, sys1)
+      .collect(ctx);
+    expect(result.map((d) => d.objectId)).toEqual(["dev1"]);
+  });
+
+  test("chained via: broken link returns empty", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+
+    const chainSchema = createZbarSchema<any>()
+      .entity("user")
+      .entity("group", (e) =>
+        e.relation("member", "user"),
+      )
+      .entity("system", (e) =>
+        e
+          .relation("admin", "user", "group#member")
+          .relation("viewer", "user", "admin"),
+      )
+      .entity("device", (e) =>
+        e
+          .relation("admin", "user", "system#admin")
+          .relation("viewer", "user", "admin", "system#viewer")
+          .permission("view", "viewer")
+          .permission("manage", "admin"),
+      )
+      .build();
+
+    const zbar = new Zbar(api, {
+      schema: chainSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const alice = { type: "user" as const, id: "alice" };
+    const grp1 = { type: "group" as const, id: "grp1" };
+    const sys1 = { type: "system" as const, id: "sys1" };
+    const dev1 = { type: "device" as const, id: "dev1" };
+
+    // alice → grp1 (member), but grp1 has NO link to sys1
+    await zbar.addRelation(ctx, alice, "member", grp1);
+    await zbar.addRelation(ctx, sys1, "admin", dev1);
+
+    // Chain is broken at grp1 → sys1 → return []
+    const result = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .via(grp1, sys1)
+      .collect(ctx);
+    expect(result).toEqual([]);
   });
 
   test("list().object({type,id}).permission().subject(type).via().collect() — listSubjectsWithAccessVia", async () => {
@@ -265,8 +363,107 @@ describe("Fluent List Query Builder", () => {
     expect(viaSys1.map((u) => u.subjectId)).toEqual(["alice"]);
   });
 
-  // ---- Equivalence with direct methods ----
-  test("fluent builder matches direct method results exactly", async () => {
+  // ---- Edge cases ----
+  test("via with non-matching intermediate returns empty", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const alice = { type: "user" as const, id: "alice" };
+    const sys1 = { type: "system" as const, id: "sys1" };
+    const sys2 = { type: "system" as const, id: "sys2" };
+    const dev1 = { type: "device" as const, id: "dev1" };
+
+    // Alice → sys1 → dev1
+    await zbar.addRelation(ctx, alice, "admin", sys1);
+    await zbar.addRelation(ctx, sys1, "admin", dev1);
+
+    // Filter through sys2 (which has no link to dev1)
+    const viaSys2 = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .via(sys2)
+      .collect(ctx);
+
+    expect(viaSys2).toEqual([]);
+  });
+
+  test("tight gate: viewer of system does not get manage permission on devices", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const alice = { type: "user" as const, id: "alice" };
+    const sys1 = { type: "system" as const, id: "sys1" };
+    const dev1 = { type: "device" as const, id: "dev1" };
+
+    // Alice is only viewer of sys1 (not admin or owner)
+    await zbar.addRelation(ctx, alice, "viewer", sys1);
+    // sys1 is admin of dev1
+    await zbar.addRelation(ctx, sys1, "admin", dev1);
+
+    // Alice CAN view devices via sys1 (device.viewer includes system#viewer,
+    // and viewer inherits from admin on system, so alice as viewer of sys1
+    // gets device viewer through system#viewer userset)
+    const viewResult = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .via(sys1)
+      .collect(ctx);
+    expect(viewResult.map((d) => d.objectId)).toEqual(["dev1"]);
+
+    // Alice CANNOT manage devices via sys1 (device.admin includes
+    // system#admin, but alice is only viewer — not admin — of sys1)
+    const manageResult = await zbar
+      .list()
+      .object("device")
+      .permission("manage")
+      .subject(alice)
+      .via(sys1)
+      .collect(ctx);
+    expect(manageResult).toEqual([]);
+  });
+
+  test("via gate-check: subject with no relationship to via entity returns empty", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const alice = { type: "user" as const, id: "alice" };
+    const sys1 = { type: "system" as const, id: "sys1" };
+    const dev1 = { type: "device" as const, id: "dev1" };
+
+    // Alice is DIRECTLY admin of dev1 (not through sys1)
+    await zbar.addRelation(ctx, alice, "admin", dev1);
+    // sys1 is also admin of dev1 — but Alice has NO relationship to sys1
+    await zbar.addRelation(ctx, sys1, "admin", dev1);
+
+    // Without via: Alice can view dev1 (direct access)
+    const withoutVia = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .collect(ctx);
+    expect(withoutVia.map((d) => d.objectId)).toEqual(["dev1"]);
+
+    // With via sys1: Alice has no relationship to sys1, so no access
+    // flows THROUGH sys1 — gate check should short-circuit to empty.
+    const viaSys1 = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .via(sys1)
+      .collect(ctx);
+    expect(viaSys1).toEqual([]);
+  });
+
+  test("collect without via returns all results", async () => {
     const t = setup();
     const ctx = mkCtx(t);
     const zbar = mkZbar();
@@ -278,44 +475,14 @@ describe("Fluent List Query Builder", () => {
     await zbar.addRelation(ctx, alice, "admin", sys1);
     await zbar.addRelation(ctx, sys1, "admin", dev1);
 
-    // listAccessibleObjects
-    const direct1 = await zbar.listAccessibleObjects(ctx, alice, "view", "device");
-    const fluent1 = await zbar
+    const result = await zbar
       .list()
       .object("device")
       .permission("view")
       .subject(alice)
       .collect(ctx);
-    expect(fluent1).toEqual(direct1);
 
-    // listObjectsWithRelation
-    const direct2 = await zbar.listObjectsWithRelation(ctx, alice, "admin", "device");
-    const fluent2 = await zbar
-      .list()
-      .object("device")
-      .relation("admin")
-      .subject(alice)
-      .collect(ctx);
-    expect(fluent2).toEqual(direct2);
-
-    // listSubjectsWithAccess
-    const direct3 = await zbar.listSubjectsWithAccess(ctx, "user", "view", dev1);
-    const fluent3 = await zbar
-      .list()
-      .object(dev1)
-      .permission("view")
-      .subject("user")
-      .collect(ctx);
-    expect(fluent3).toEqual(direct3);
-
-    // listSubjectsWithRelation
-    const direct4 = await zbar.listSubjectsWithRelation(ctx, "user", "admin", dev1);
-    const fluent4 = await zbar
-      .list()
-      .object(dev1)
-      .relation("admin")
-      .subject("user")
-      .collect(ctx);
-    expect(fluent4).toEqual(direct4);
+    expect(result.length).toBe(1);
+    expect(result[0].objectId).toBe("dev1");
   });
 });
