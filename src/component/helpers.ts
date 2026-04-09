@@ -77,6 +77,24 @@ function getTargetEntityTypes(
 
 export function parseSchemaToGraphConfig(schema: any): GraphConfig {
   const rules: TraversalRule[] = [];
+  const reverseEdges: Record<string, Record<string, string>> = {};
+
+  // First pass: collect all reverse edges declared via { type, reverse } syntax
+  for (const [entityType, def] of Object.entries(schema.entities || {})) {
+    const relations = (def as any).relations || {};
+    for (const [relName, relDef] of Object.entries(relations)) {
+      const defs = Array.isArray(relDef) ? relDef : [relDef];
+      for (const item of defs) {
+        if (typeof item === "object" && item !== null && "reverse" in item) {
+          const objItem = item as { type: string; reverse?: string };
+          if (objItem.reverse) {
+            reverseEdges[entityType] = reverseEdges[entityType] || {};
+            reverseEdges[entityType][relName] = objItem.reverse;
+          }
+        }
+      }
+    }
+  }
 
   // Generate distant traversal rules with fully expanded local aliases
   // Note: we NO LONGER emit rules for local inheritance to avoid materialization!
@@ -257,5 +275,8 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
     return !isDominated;
   });
 
-  return { traversalRules: optimizedRules };
+  return {
+    traversalRules: optimizedRules,
+    reverseEdges: Object.keys(reverseEdges).length > 0 ? reverseEdges : undefined,
+  };
 }

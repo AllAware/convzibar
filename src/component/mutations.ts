@@ -131,6 +131,44 @@ async function addRelationInternal(ctx: any, args: any) {
     },
   ];
 
+  // Auto-insert reverse edge if declared in the schema.
+  // e.g. device.container has { type: 'group', reverse: 'device_member' }
+  // → when (group → container → device) is added, also insert (device → device_member → group)
+  const reverseRel = graphConfig.reverseEdges?.[object.type]?.[relation];
+  if (reverseRel) {
+    const existingReverse = await ctx.db
+      .query("relationships")
+      .withIndex("by_tenant_subject_relation_object", (q: any) =>
+        q
+          .eq("tenantId", tenantId)
+          .eq("subjectType", object.type)
+          .eq("subjectId", object.id)
+          .eq("relation", reverseRel)
+          .eq("objectType", subject.type)
+          .eq("objectId", subject.id),
+      )
+      .unique();
+
+    if (!existingReverse) {
+      const revId = await ctx.db.insert("relationships", {
+        tenantId,
+        subjectType: object.type,
+        subjectId: object.id,
+        relation: reverseRel,
+        objectType: subject.type,
+        objectId: subject.id,
+      });
+
+      queue.push({
+        subject: object,
+        relation: reverseRel,
+        object: subject,
+        path: { baseIds: [revId] },
+        depth: 1,
+      });
+    }
+  }
+
   if (args.asyncWrites) {
     await enqueueToWorkpool(
       ctx,
@@ -478,6 +516,34 @@ async function deleteBaseRelationAndLog(ctx: any, args: any) {
     },
   ];
 
+  // Auto-remove reverse edge if declared in the schema.
+  const graphConfig = args.graphConfig as GraphConfig;
+  const reverseRel = graphConfig.reverseEdges?.[object.type]?.[relation];
+  if (reverseRel) {
+    const existingReverse = await ctx.db
+      .query("relationships")
+      .withIndex("by_tenant_subject_relation_object", (q: any) =>
+        q
+          .eq("tenantId", tenantId)
+          .eq("subjectType", object.type)
+          .eq("subjectId", object.id)
+          .eq("relation", reverseRel)
+          .eq("objectType", subject.type)
+          .eq("objectId", subject.id),
+      )
+      .unique();
+
+    if (existingReverse) {
+      await ctx.db.delete(existingReverse._id);
+      queue.push({
+        subject: object,
+        relation: reverseRel,
+        object: subject,
+        removedRelationId: existingReverse._id,
+      });
+    }
+  }
+
   return {
     tenantId,
     queue,
@@ -550,6 +616,33 @@ async function removeRelationInternal(ctx: any, args: any) {
       removedRelationId: existingRel._id,
     },
   ];
+
+  // Auto-remove reverse edge if declared in the schema.
+  const reverseRel = graphConfig.reverseEdges?.[object.type]?.[relation];
+  if (reverseRel) {
+    const existingReverse = await ctx.db
+      .query("relationships")
+      .withIndex("by_tenant_subject_relation_object", (q: any) =>
+        q
+          .eq("tenantId", tenantId)
+          .eq("subjectType", object.type)
+          .eq("subjectId", object.id)
+          .eq("relation", reverseRel)
+          .eq("objectType", subject.type)
+          .eq("objectId", subject.id),
+      )
+      .unique();
+
+    if (existingReverse) {
+      await ctx.db.delete(existingReverse._id);
+      queue.push({
+        subject: object,
+        relation: reverseRel,
+        object: subject,
+        removedRelationId: existingReverse._id,
+      });
+    }
+  }
 
   let effectiveRelationshipsRemoved = 0;
 

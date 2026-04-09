@@ -27,9 +27,9 @@ export type ConditionFunction<Data = any> = (
 
 export type SchemaRelation =
   | string
-  | { type: string }
+  | { type: string; reverse?: string }
   | { relation: string; condition: string }
-  | Array<string | { type: string } | { relation: string; condition: string }>;
+  | Array<string | { type: string; reverse?: string } | { relation: string; condition: string }>;
 
 export interface EntityDefinition {
   relations?: Record<string, SchemaRelation>;
@@ -117,7 +117,7 @@ export class EntityBuilder<
 
   relation<
     RelName extends string,
-    Target extends (keyof Entities | EntName) & string,
+    Target extends string = (keyof Entities | EntName) & string,
   >(
     name: RelName,
     ...targets: Array<
@@ -128,7 +128,7 @@ export class EntityBuilder<
             string]: `${K}.${TargetRelationKeys<Relations[K], EntName, Relations, Entities>}`;
         }[keyof Relations & string]
       | EntityUsersetPath<EntName, RelName, Relations, Entities>
-      | { type: Target }
+      | { type: string; reverse?: string }
       | {
           relation:
             | keyof Relations
@@ -139,6 +139,9 @@ export class EntityBuilder<
             | EntityUsersetPath<EntName, RelName, Relations, Entities>;
           condition: keyof Conditions & string;
         }
+      // Allow forward-referencing traversals to relations that will be
+      // auto-injected by reverse edges from entities defined later.
+      | `${string}.${string}`
     >
   ): EntityBuilder<
     EntName,
@@ -211,6 +214,46 @@ export class SchemaBuilder<
   }
 
   build(): BuiltZbarSchema<Data, Conditions, Entities> {
+    // Post-process: auto-inject reverse relation targets.
+    // When entity A declares relation('foo', { type: 'B', reverse: 'bar' }),
+    // the reverse relation 'bar' is automatically added to entity B's relations
+    // with entity A as the subject type (if not already declared).
+    // This eliminates the need to pre-declare reverse targets manually.
+    for (const [entityType, entityDef] of Object.entries(
+      this._schema.entities as Record<string, EntityDefinition>,
+    )) {
+      const relations = entityDef.relations || {};
+      for (const [, relDef] of Object.entries(relations)) {
+        const defs = Array.isArray(relDef) ? relDef : [relDef];
+        for (const d of defs) {
+          if (
+            typeof d === "object" &&
+            d !== null &&
+            "type" in d &&
+            "reverse" in d &&
+            (d as any).reverse
+          ) {
+            const targetEntityName = (d as any).type as string;
+            const reverseRelName = (d as any).reverse as string;
+            const reverseSubjectType = entityType;
+
+            const targetEntity = (this._schema.entities as any)[
+              targetEntityName
+            ];
+            if (!targetEntity) continue;
+            if (!targetEntity.relations) targetEntity.relations = {};
+
+            // Only inject if the relation doesn't already exist.
+            // If the user explicitly declared it (e.g., to add traversals),
+            // we leave their definition intact.
+            if (!(reverseRelName in targetEntity.relations)) {
+              targetEntity.relations[reverseRelName] = reverseSubjectType;
+            }
+          }
+        }
+      }
+    }
+
     return this._schema;
   }
 }

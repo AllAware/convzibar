@@ -25,6 +25,13 @@ write amplification.
 - **Userset Expansion:** Use `#` syntax (e.g., `group#admin`) to allow
   non-user entities as subjects. When a group is made admin of a resource, all
   admins of that group automatically inherit access via write-time expansion.
+- **Reverse Edges:** Declare `{ type: "group", reverse: "device_member" }` on
+  a relation to automatically insert a mirrored edge in the opposite direction
+  at write-time. Combined with traversals and usersets, this enables powerful
+  V-pattern lookups that resolve in a single indexed query.
+- **Fluent List Queries:** `.list()` for effective (materialized) relationship
+  queries with optional `.via()` intermediary filtering, and `.listDirect()` for
+  raw base-relationship queries. Both support `.map()` and `.collect()`.
 - **Runtime Validation:** Subject types are validated against the schema at
   runtime, preventing invalid entity combinations from being written to the
   graph.
@@ -138,7 +145,7 @@ export const zbar = new Zbar(components.convzibar, {
 
 #### Schema Syntax Reference
 
-Relations support three kinds of targets:
+Relations support four kinds of targets:
 
 | Syntax | Name | Meaning |
 |---|---|---|
@@ -146,6 +153,7 @@ Relations support three kinds of targets:
 | `"admin"` | Local inheritance | This relation includes all holders of `admin` on the same object |
 | `"parent_org.admin"` | Traversal (dot) | Follow the `parent_org` relation, inherit `admin` from the target |
 | `"group#admin"` | Userset (hash) | When a group is the subject, expand through that group's `admin` relation |
+| `{ type: "group", reverse: "device_member" }` | Reverse edge | Auto-insert a mirrored edge in the opposite direction at write-time |
 
 ### 2. Mutating the Graph (Write-Time)
 
@@ -264,7 +272,234 @@ export const getProjectData = query({
 });
 ```
 
-### 4. React Hooks
+### 4. Fluent List Queries
+
+#### Effective Relationships (`.list()`)
+
+Query the materialized effective-relationship graph with full write-time
+expansion. Supports listing objects or subjects, optional `.via()`
+intermediary filtering, and `.map()` transformation.
+
+**List all objects a subject can access:**
+
+```typescript
+const projects = await zbar.list()
+  .object("project")
+  .permission("edit")
+  .subject({ type: "user", id: userId })
+  .collect(ctx, { timezone: "EST" });
+// Returns: [{ objectId: "proj_123" }, ...]
+```
+
+**List all subjects who have access to an object:**
+
+```typescript
+const users = await zbar.list()
+  .object({ type: "project", id: projId })
+  .permission("edit")
+  .subject("user")
+  .collect(ctx, { timezone: "EST" });
+// Returns: [{ subjectId: "user_456" }, ...]
+```
+
+**Filter through intermediary nodes with `.via()`:**
+
+```typescript
+// Only devices accessible through a specific system
+const devices = await zbar.list()
+  .object("device")
+  .permission("view")
+  .subject({ type: "user", id: userId })
+  .via({ type: "system", id: systemId })
+  .collect(ctx);
+
+// Chained via: user → group → system → devices
+const devices = await zbar.list()
+  .object("device")
+  .permission("view")
+  .subject({ type: "user", id: userId })
+  .via({ type: "group", id: groupId }, { type: "system", id: systemId })
+  .collect(ctx);
+```
+
+**Transform results with `.map()`:**
+
+```typescript
+const deviceNames = await zbar.list()
+  .object("device")
+  .permission("view")
+  .subject({ type: "user", id: userId })
+  .map(async (d) => {
+    const device = await ctx.db.get(d.objectId as Id<"devices">);
+    return device?.name;
+  })
+  .collect(ctx);
+```
+
+#### Direct Relationships (`.listDirect()`)
+
+Query the raw `relationships` table — only explicitly-written edges, no
+transitive or inherited expansions. Useful for management UIs.
+
+```typescript
+// All direct relationships where org1 is the object
+const rels = await zbar.listDirect()
+  .object({ type: "org", id: "org1" })
+  .collect(ctx);
+// Returns: [{ subject: { type, id }, relation, object: { type, id } }, ...]
+
+// Filter by relation (with inheritance: owner → admin → viewer)
+const viewers = await zbar.listDirect()
+  .object({ type: "org", id: "org1" })
+  .relation("viewer")
+  .collect(ctx);
+
+// Filter by permission (expands to all contributing relations)
+const editors = await zbar.listDirect()
+  .object({ type: "org", id: "org1" })
+  .permission("edit_settings")
+  .collect(ctx);
+
+// Combine object + subject
+const rels = await zbar.listDirect()
+  .object({ type: "org", id: "org1" })
+  .subject({ type: "user", id: "u1" })
+  .collect(ctx);
+```
+
+### 5. Reverse Edges
+
+Reverse edges solve the **V-pattern problem**: when you need to query a
+relationship graph in both directions from a single write.
+
+Declare `reverse` on a relation's type target to automatically insert a
+mirrored edge in the opposite direction whenever the forward edge is written
+(and remove it when the forward edge is removed):
+
+```typescript
+.entity("device", (e) =>
+    e.relation("container", { type: "group", reverse: "device_member" })
+)
+```
+
+When `group → container → device` is written, the engine automatically inserts
+`device → device_member → group`. The reverse edge is a real relationship that
+participates in all graph expansion — traversals, usersets, and cascading
+deletes work exactly as if you had written both edges manually.
+
+#### Example: Notification Source Expansion
+
+A common use case is expanding a group or system into its individual members.
+By combining reverse edges with traversals and usersets, you can build multi-hop
+materialization chains that resolve in a single indexed query at read-time.
+
+```typescript
+const schema = createZbarSchema()
+  .entity("user")
+  .entity("system", (e) =>
+    e
+      .relation("owner", "user")
+      .relation("admin", "user", "owner")
+      .relation("viewer", "user", "admin")
+      // Populated by reverse on group.parent
+      .relation("has_group", "group")
+      // 2-hop traversal: device_member propagates from groups to system
+      .relation("device_member", "device", "has_group.device_member")
+      .relation("contact_member", "contact", "has_group.contact_member")
+      // ...permissions
+  )
+  .entity("group", (e) =>
+    e
+      // Reverse: system → parent → group auto-creates group → has_group → system
+      .relation("parent", { type: "system", reverse: "has_group" })
+      // Populated by reverse on device.container
+      .relation("device_member", "device")
+      // Populated by reverse on contact.container
+      .relation("contact_member", "contact")
+      // ...permissions
+  )
+  .entity("device", (e) =>
+    e
+      // Reverse: group → container → device auto-creates device → device_member → group
+      // Then has_group.device_member on system propagates: device → device_member → system
+      .relation("container", { type: "group", reverse: "device_member" })
+      // ...permissions
+  )
+  .entity("contact", (e) =>
+    e
+      .relation("container", { type: "group", reverse: "contact_member" })
+      // ...permissions
+  )
+  .entity("notification_rule", (e) =>
+    e
+      // group#device_member: when group is source, expand to all devices in the group
+      // system#device_member: when system is source, expand to all devices in the system
+      .relation("source", "device", "group#device_member", "system#device_member")
+      .relation("recipient", "contact", "group#contact_member", "system#contact_member")
+  )
+  .build();
+```
+
+**What you write:**
+
+```typescript
+// Build the hierarchy (2 writes)
+await zbar.addRelation(ctx, system, "parent", group);
+await zbar.addRelation(ctx, group, "container", device);
+
+// Configure notification sources
+await zbar.addRelation(ctx, device, "source", rule);  // direct
+await zbar.addRelation(ctx, group, "source", rule);   // expands to all group devices
+await zbar.addRelation(ctx, system, "source", rule);  // expands to all system devices
+```
+
+**What the engine materializes:**
+
+```
+system → parent → group             ──► group → has_group → system        (reverse)
+group  → container → device          ──► device → device_member → group    (reverse)
+                                     ──► device → device_member → system   (traversal)
+```
+
+**Event-time query (single indexed read):**
+
+```typescript
+// "What notification rules is this device a source of?"
+const rules = await zbar.list()
+  .object("notification_rule")
+  .relation("source")
+  .subject({ type: "device", id: deviceId })
+  .collect(ctx);
+
+// "What contacts should receive this notification?"
+const contacts = await zbar.list()
+  .object(rule)
+  .relation("recipient")
+  .subject("contact")
+  .collect(ctx);
+
+// Management UI: show the raw configured sources (not expanded)
+const configuredSources = await zbar.listDirect()
+  .object(rule)
+  .relation("source")
+  .collect(ctx);
+```
+
+### 6. Other Queries
+
+**Check if a subject has a specific relationship:**
+
+```typescript
+const isEditor = await zbar.hasRelationship(
+  ctx,
+  { type: "user", id: userId },
+  "editor",
+  { type: "project", id: projId },
+  { timezone: "EST" },
+);
+```
+
+### 7. React Hooks
 
 We provide a specialized hook to check permissions on the client, caching them
 using `useQuery` under the hood. To use `useCan`, you must expose a query
@@ -342,70 +577,7 @@ export function MyComponent({ projectId }: { projectId: string }) {
 }
 ```
 
-### 5. Fetching Lists
-
-You can query the graph bi-directionally in O(1) time.
-
-**Find all objects a user can access:**
-
-```typescript
-const projects = await zbar.listAccessibleObjects(
-  ctx,
-  { type: "user", id: userId },
-  "edit",
-  "project", // The target object type
-  { timezone: "EST" },
-);
-// Returns: [{ objectId: "proj_123" }, ...]
-```
-
-**Find all users who have access to an object:**
-
-```typescript
-const users = await zbar.listSubjectsWithAccess(
-  ctx,
-  "user", // The subject type to search for
-  "edit",
-  { type: "project", id: projId },
-  { timezone: "EST" },
-);
-// Returns: [{ subjectId: "user_456" }, ...]
-```
-
-**Check if a subject has a specific relationship on an object:**
-
-```typescript
-const isEditor = await zbar.hasRelationship(
-  ctx,
-  { type: "user", id: userId },
-  "editor",
-  { type: "project", id: projId },
-  { timezone: "EST" }, // Optional context
-);
-```
-
-**Get all valid relationships a subject has on an object:**
-
-```typescript
-// To get only explicit relations and exclude inherited ones (default):
-const explicitRels = await zbar.getRelationships(
-  ctx,
-  { type: "user", id: userId },
-  { type: "project", id: projId },
-);
-// Returns: ["owner"]
-
-const relationships = await zbar.getRelationships(
-  ctx,
-  { type: "user", id: userId },
-  { type: "project", id: projId },
-  { timezone: "EST" }, // Optional conditions context
-  { includeInherited: true }, // Expands inheritance
-);
-// Returns: ["viewer", "editor", "owner"] (respects local inheritance!)
-```
-
-### 6. Cleaning Up
+### 8. Cleaning Up
 
 When an entity is deleted from your application, you must remove it from the
 authorization graph to prevent stale access and clean up the traversal cache.
@@ -422,7 +594,8 @@ export const deleteProject = mutation({
 
 ## Architecture Notes
 
-- **`relationships` table:** Stores the ground-truth edges.
+- **`relationships` table:** Stores the ground-truth edges (including
+  auto-inserted reverse edges).
 - **`effectiveRelationships` table:** A materialized cache storing flattened
   cross-object traversal paths. It heavily utilizes token lineage so that deeply
   nested edge deletions can cascade securely and surgically in O(N) without full
@@ -431,3 +604,8 @@ export const deleteProject = mutation({
   `viewer`) is purposefully _not_ expanded in the cache. It is inferred entirely
   in memory during the read step to prevent massive database write
   amplification.
+- **Reverse Edges:** Declared via `{ type, reverse }` in the schema. At
+  write-time, the engine inserts the mirrored edge as a real base relationship
+  and queues it for graph expansion alongside the forward edge. On removal,
+  both edges are deleted atomically and their downstream derivations are
+  cascade-removed.
