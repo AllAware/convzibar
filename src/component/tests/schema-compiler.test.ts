@@ -1,17 +1,17 @@
 import { expect, test, describe } from "vitest";
+import { Zbar, createZbarSchema } from "../../client/index.js";
+import { convexTest } from "convex-test";
+import schema from "../schema.js";
+import { api } from "../_generated/api.js";
 import { parseSchemaToGraphConfig } from "../helpers";
+import { register as registerWorkpool } from "@convex-dev/workpool/test";
 
-describe("Schema Compiler Deduplication", () => {
+// ============================================================================
+// Unit Tests: parseSchemaToGraphConfig deduplication logic
+// ============================================================================
+
+describe("Schema Compiler Deduplication (Unit)", () => {
   test("Basic deduplication: Distant inheritance pruned by local implication", () => {
-    // Scenario:
-    // User is an 'admin' on a system.
-    // 'device' has a 'manager' role that distant-inherits from 'system.admin'.
-    // 'device' has a 'viewer' role that distant-inherits from 'system.viewer'.
-    // 'system.admin' locally inherits 'system.viewer'.
-    // 'device.manager' locally inherits 'device.viewer'.
-    // EXPECTATION: When a user becomes 'system.admin', they qualify for 'device.manager' and 'device.viewer'.
-    // Because 'device.manager' implies 'device.viewer', only 'manager' should be emitted as a rule.
-
     const schema = {
       entities: {
         system: {
@@ -32,7 +32,6 @@ describe("Schema Compiler Deduplication", () => {
 
     const config = parseSchemaToGraphConfig(schema);
 
-    // Let's find rules triggered by system.admin -> device.manager/viewer
     const adminTriggerRules = config.traversalRules.filter(
       (r) =>
         r.sourceObjectType === "device" &&
@@ -40,24 +39,11 @@ describe("Schema Compiler Deduplication", () => {
         r.targetRelation === "admin",
     );
 
-    // Without deduplication, there would be TWO rules here: one for manager, one for viewer
-    // (Because device.viewer inherits system.viewer, which includes system.admin)
-    // WITH deduplication, there should be exactly ONE rule: derivedRelation = "manager".
-
     expect(adminTriggerRules).toHaveLength(1);
     expect(adminTriggerRules[0].derivedRelation).toBe("manager");
   });
 
   test("Condition compatibility: Strict rules do not dominate loose rules", () => {
-    // Scenario:
-    // 'device.manager' implies 'device.viewer'.
-    // 'device.manager' requires a condition (e.g. 'isActive').
-    // 'device.viewer' does NOT require a condition.
-    // Both distant-inherit from 'system.admin'.
-    // EXPECTATION: Because 'manager' has strict conditions, it MIGHT FAIL at read-time.
-    // Therefore, it CANNOT safely dominate 'viewer', which has no conditions and would always pass.
-    // Both rules must be emitted.
-
     const schema = {
       entities: {
         system: {
@@ -84,7 +70,6 @@ describe("Schema Compiler Deduplication", () => {
         r.targetRelation === "admin",
     );
 
-    // Both manager and viewer rules must exist because manager has a strict condition and viewer does not.
     expect(adminTriggerRules).toHaveLength(2);
 
     const managerRule = adminTriggerRules.find(
@@ -102,15 +87,6 @@ describe("Schema Compiler Deduplication", () => {
   });
 
   test("Condition compatibility: Loose rules CAN dominate strict rules", () => {
-    // Scenario:
-    // 'device.manager' implies 'device.viewer'.
-    // 'device.manager' has NO condition.
-    // 'device.viewer' HAS a condition.
-    // Both distant-inherit from 'system.admin'.
-    // EXPECTATION: 'manager' always grants 'viewer', unconditionally.
-    // Therefore, 'manager' safely dominates 'viewer' (which is stricter).
-    // Only 'manager' should be emitted.
-
     const schema = {
       entities: {
         system: {
@@ -146,12 +122,6 @@ describe("Schema Compiler Deduplication", () => {
   });
 
   test("Condition compatibility: Equal conditions can dominate", () => {
-    // Scenario:
-    // 'device.manager' implies 'device.viewer'.
-    // Both require the exact SAME condition ('isActive').
-    // Both distant-inherit from 'system.admin'.
-    // EXPECTATION: 'manager' safely dominates 'viewer' since conditions are equal.
-
     const schema = {
       entities: {
         system: {
@@ -187,11 +157,6 @@ describe("Schema Compiler Deduplication", () => {
   });
 
   test("Non-domination: Independent relations are not pruned", () => {
-    // Scenario:
-    // 'device.manager' and 'device.auditor' both distant-inherit from 'system.admin'.
-    // They do NOT imply each other locally.
-    // EXPECTATION: Both rules must be emitted.
-
     const schema = {
       entities: {
         system: {
@@ -225,5 +190,101 @@ describe("Schema Compiler Deduplication", () => {
     expect(adminTriggerRules.some((r) => r.derivedRelation === "auditor")).toBe(
       true,
     );
+  });
+});
+
+// ============================================================================
+// Integration Tests: Deduplication through Zbar client
+// ============================================================================
+
+const setup = () => {
+  const t = convexTest(schema, import.meta.glob("../**/*.ts"));
+  registerWorkpool(t, "workpool");
+  return t;
+};
+
+async function assertDbState(
+  t: any,
+  expectedRelationships: number,
+  expectedEffectiveRelationships: number,
+) {
+  const relationships = await t.run(
+    async (innerCtx: any) => await innerCtx.db.query("relationships").collect(),
+  );
+  const effectiveRelationships = await t.run(
+    async (innerCtx: any) =>
+      await innerCtx.db.query("effectiveRelationships").collect(),
+  );
+
+  expect(relationships.length).toBe(expectedRelationships);
+  expect(effectiveRelationships.length).toBe(expectedEffectiveRelationships);
+}
+
+const dedupSchema = createZbarSchema<any>()
+  .entity("user")
+  .entity("org", (e) =>
+    e
+      .relation("admin", "user")
+      .relation("manager", "user", "admin")
+      .relation("viewer", "user", "manager"),
+  )
+  .entity("project", (e) =>
+    e
+      .relation("parent_org", "org")
+      .relation("admin", "user", "parent_org.admin")
+      .relation("manager", "user", "parent_org.manager", "admin")
+      .relation("viewer", "user", "parent_org.viewer", "manager")
+      .permission("delete_project", "admin")
+      .permission("edit_project", "manager")
+      .permission("view_project", "viewer"),
+  )
+  .build();
+
+describe("Schema Compiler Deduplication (Integration)", () => {
+  test("granting admin triggers correct graph expansion with deduplication (minimal row)", async () => {
+    const t = setup();
+    const ctx = {
+      runQuery: t.query.bind(t),
+      runMutation: t.mutation.bind(t),
+    } as any;
+
+    const zbar = new Zbar(api, {
+      schema: dedupSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const user = { type: "user" as const, id: "u1" };
+    const org = { type: "org" as const, id: "org1" };
+    const project = { type: "project" as const, id: "proj1" };
+
+    await zbar.addRelation(ctx, org, "parent_org", project);
+    await zbar.addRelation(ctx, user, "admin", org);
+
+    // All permissions should work via the deduplicated admin rule
+    expect(await zbar.can(ctx, user, "delete_project", project)).toBe(true);
+    expect(await zbar.can(ctx, user, "edit_project", project)).toBe(true);
+    expect(await zbar.can(ctx, user, "view_project", project)).toBe(true);
+
+    // Only the dominant 'admin' row was propagated
+    const allRels = await ctx.runQuery(api.queries.checkPermissionFast, {
+      tenantId: "t1",
+      subject: user,
+      object: project,
+      relations: ["admin", "manager", "viewer"],
+    });
+
+    expect(allRels).toHaveLength(1);
+    expect(allRels[0].relation).toBe("admin");
+
+    // No direct relationship between user and project
+    const directRels = await zbar.listDirect()
+      .object(project)
+      .subject(user)
+      .collect(ctx);
+    expect(directRels).toEqual([]);
+
+    // 2 bases + 1 distant materialization (admin) = 3
+    await assertDbState(t, 2, 3);
   });
 });
