@@ -463,6 +463,104 @@ describe("Fluent List Query Builder", () => {
     expect(viaSys1).toEqual([]);
   });
 
+  // ---- .map() ----
+  test(".map() transforms results in parallel", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const alice = { type: "user" as const, id: "alice" };
+    const sys1 = { type: "system" as const, id: "sys1" };
+    const dev1 = { type: "device" as const, id: "dev1" };
+    const dev2 = { type: "device" as const, id: "dev2" };
+
+    await zbar.addRelation(ctx, alice, "admin", sys1);
+    await zbar.addRelation(ctx, sys1, "admin", dev1);
+    await zbar.addRelation(ctx, sys1, "admin", dev2);
+
+    // .map() transforms each result and runs in parallel
+    const ids = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .map((d) => d.objectId.toUpperCase())
+      .collect(ctx);
+
+    expect(ids.sort()).toEqual(["DEV1", "DEV2"]);
+  });
+
+  test(".map() works with async mapper", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const alice = { type: "user" as const, id: "alice" };
+    const sys1 = { type: "system" as const, id: "sys1" };
+    const dev1 = { type: "device" as const, id: "dev1" };
+
+    await zbar.addRelation(ctx, alice, "admin", sys1);
+    await zbar.addRelation(ctx, sys1, "admin", dev1);
+
+    const results = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .map(async (d) => {
+        // Simulate async work
+        return { id: d.objectId, fetched: true };
+      })
+      .collect(ctx);
+
+    expect(results).toEqual([{ id: "dev1", fetched: true }]);
+  });
+
+  test(".map() works after .via()", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const alice = { type: "user" as const, id: "alice" };
+    const sys1 = { type: "system" as const, id: "sys1" };
+    const dev1 = { type: "device" as const, id: "dev1" };
+
+    await zbar.addRelation(ctx, alice, "admin", sys1);
+    await zbar.addRelation(ctx, sys1, "admin", dev1);
+
+    const ids = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .via(sys1)
+      .map((d) => d.objectId)
+      .collect(ctx);
+
+    expect(ids).toEqual(["dev1"]);
+  });
+
+  test(".map() works for listing subjects", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const alice = { type: "user" as const, id: "alice" };
+    const dev1 = { type: "device" as const, id: "dev1" };
+
+    await zbar.addRelation(ctx, alice, "admin", dev1);
+
+    const ids = await zbar
+      .list()
+      .object(dev1)
+      .relation("admin")
+      .subject("user")
+      .map((s) => s.subjectId)
+      .collect(ctx);
+
+    expect(ids).toEqual(["alice"]);
+  });
+
   test("collect without via returns all results", async () => {
     const t = setup();
     const ctx = mkCtx(t);

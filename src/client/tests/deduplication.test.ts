@@ -95,17 +95,13 @@ describe("Schema Compiler Deduplication Integration", () => {
     expect(allRels).toHaveLength(1);
     expect(allRels[0].relation).toBe("admin");
 
-    // 3. Functionally, inherited relationships still surface manager and viewer correctly
-    const inheritedRels = await zbar.getRelationships(
-      ctx,
-      user,
-      project,
-      undefined,
-      {
-        includeInherited: true,
-      },
-    );
-    expect(inheritedRels.sort()).toEqual(["admin", "manager", "viewer"]);
+    // 3. No direct (base) relationship between user and project exists —
+    // the access is entirely through the distant materialisation.
+    const directRels = await zbar.listDirect()
+      .object(project)
+      .subject(user)
+      .collect(ctx);
+    expect(directRels).toEqual([]);
 
     // Verify exactly 2 bases (org -> parent_org -> project, user -> admin -> org)
     // and 2 base effective + 1 distant materialization (admin) = 3

@@ -499,7 +499,7 @@ describe("Client API & Read-Time Inference", () => {
     await assertDbState(t, 2, 2);
   });
 
-  test("getRelationships returns all relationships for a subject and object", async () => {
+  test("listDirect returns direct relationships for a subject and object", async () => {
     const t = setup();
     const ctx = {
       runQuery: t.query.bind(t),
@@ -517,18 +517,23 @@ describe("Client API & Read-Time Inference", () => {
 
     await zbar.addRelation(ctx, ownerUser, "owner", org);
 
-    // Should ONLY return owner by default (includeInherited is false)
-    const explicitRels = await zbar.getRelationships(ctx, ownerUser, org);
+    // Should ONLY return the direct base relationship (owner)
+    const explicitRels = await zbar.listDirect()
+      .object(org)
+      .subject(ownerUser)
+      .collect(ctx);
     expect(explicitRels.length).toBe(1);
-    expect(explicitRels).toEqual(["owner"]);
+    expect(explicitRels[0].relation).toBe("owner");
 
-    // Should return owner, admin, and viewer because of inheritance!
-    const rels = await zbar.getRelationships(ctx, ownerUser, org, undefined, {
-      includeInherited: true,
-    });
-
-    expect(rels.length).toBe(3);
-    expect(rels.sort()).toEqual(["admin", "owner", "viewer"]);
+    // With .relation("viewer") — inheritance expands to [viewer, admin, owner],
+    // so the direct "owner" row matches (owner inherits admin inherits viewer).
+    const viewerRels = await zbar.listDirect()
+      .object(org)
+      .subject(ownerUser)
+      .relation("viewer")
+      .collect(ctx);
+    expect(viewerRels.length).toBe(1);
+    expect(viewerRels[0].relation).toBe("owner");
 
     // owner
     await assertDbState(t, 1, 1);
@@ -564,11 +569,12 @@ describe("Client API & Read-Time Inference", () => {
     // Since admin inherits viewer, they should still technically have viewer access
     expect(await zbar.hasRelationship(ctx, user, "viewer", org)).toBe(true);
 
-    // However, if we check explicitly (includeInherited: false), viewer should be GONE
-    const explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: false,
-    });
-    expect(explicit).toEqual(["admin"]);
+    // The direct relationship should be admin only (viewer was removed)
+    const explicit = await zbar.listDirect()
+      .object(org)
+      .subject(user)
+      .collect(ctx);
+    expect(explicit.map((r) => r.relation)).toEqual(["admin"]);
 
     // just admin
     await assertDbState(t, 1, 1);
@@ -594,25 +600,30 @@ describe("Client API & Read-Time Inference", () => {
     await zbar.addRelation(ctx, user, "viewer", org);
     await zbar.addRelation(ctx, user, "admin", org);
 
-    let explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: false,
-    });
-    expect(explicit.sort()).toEqual(["admin", "viewer"]);
+    let explicit = await zbar.listDirect()
+      .object(org)
+      .subject(user)
+      .collect(ctx);
+    expect(explicit.map((r) => r.relation).sort()).toEqual(["admin", "viewer"]);
 
     // Override with JUST owner
     await zbar.setRelation(ctx, user, "owner", org);
 
-    // The explicit relationships should ONLY be "owner" now
-    explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: false,
-    });
-    expect(explicit).toEqual(["owner"]);
+    // The direct relationship should ONLY be "owner" now
+    explicit = await zbar.listDirect()
+      .object(org)
+      .subject(user)
+      .collect(ctx);
+    expect(explicit.map((r) => r.relation)).toEqual(["owner"]);
 
-    // But due to inheritance, they still have admin and viewer powers
-    const all = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: true,
-    });
-    expect(all.sort()).toEqual(["admin", "owner", "viewer"]);
+    // But with .relation("viewer") the owner row still matches
+    // (owner satisfies viewer through inheritance chain)
+    const all = await zbar.listDirect()
+      .object(org)
+      .subject(user)
+      .relation("viewer")
+      .collect(ctx);
+    expect(all.map((r) => r.relation)).toEqual(["owner"]);
 
     // owner
     await assertDbState(t, 1, 1);
@@ -699,11 +710,12 @@ describe("Client API & Read-Time Inference", () => {
     });
 
     // 5. Verification: Even though the `admin` worker aborted, the "viewer" cleanup should have cascaded!
-    const explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: false,
-    });
+    const explicit = await zbar.listDirect()
+      .object(org)
+      .subject(user)
+      .collect(ctx);
 
-    // Viewer should be completely scrubbed from effectiveRelationships!
+    // Everything was deleted — no direct relationships remain
     expect(explicit).toEqual([]);
 
     // Everything was deleted

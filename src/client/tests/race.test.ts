@@ -73,9 +73,8 @@ describe("Asynchronous Race Conditions", () => {
     await drainMockWorkpool(t);
 
     expect(
-      await zbar.getRelationships(ctx, user, org, undefined, {
-        includeInherited: false,
-      }),
+      (await zbar.listDirect().object(org).subject(user).collect(ctx))
+        .map((r) => r.relation),
     ).toEqual(["viewer"]);
 
     // 1. Call setRelation to "owner". This drops "viewer" and adds "owner".
@@ -96,10 +95,8 @@ describe("Asynchronous Race Conditions", () => {
     // but crucially STILL FIRE its batched cleanup for "viewer".
     await drainMockWorkpool(t);
 
-    // The user should have NO explicit relationships left (viewer was cleaned up, owner was deleted sync)
-    const explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: false,
-    });
+    // The user should have NO direct relationships left (viewer was cleaned up, owner was deleted sync)
+    const explicit = await zbar.listDirect().object(org).subject(user).collect(ctx);
 
     expect(explicit).toEqual([]);
   });
@@ -184,11 +181,9 @@ describe("Asynchronous Race Conditions", () => {
     });
 
     // 5. Verification: Even though the `admin` worker aborted, the "viewer" cleanup should have cascaded!
-    const explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: false,
-    });
+    const explicit = await zbar.listDirect().object(org).subject(user).collect(ctx);
 
-    // Viewer should be completely scrubbed from effectiveRelationships!
+    // No direct relationships should remain
     expect(explicit).toEqual([]);
   });
 
@@ -212,10 +207,8 @@ describe("Asynchronous Race Conditions", () => {
     await zbar.addRelation(ctx, user, "viewer", org);
     await zbar.addRelation(ctx, user, "admin", org);
 
-    let explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: false,
-    });
-    expect(explicit.sort()).toEqual(["admin", "viewer"]);
+    let explicit = await zbar.listDirect().object(org).subject(user).collect(ctx);
+    expect(explicit.map((r) => r.relation).sort()).toEqual(["admin", "viewer"]);
 
     // 2. Manually orchestrate a setRelation("owner") payload
     const graphConfig = (zbar as any).graphConfig;
@@ -274,9 +267,7 @@ describe("Asynchronous Race Conditions", () => {
     });
 
     // 5. Verification: The batched cleanup should have executed for BOTH viewer and admin
-    explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: false,
-    });
+    explicit = await zbar.listDirect().object(org).subject(user).collect(ctx);
     expect(explicit).toEqual([]);
   });
 
@@ -509,9 +500,7 @@ describe("Asynchronous Race Conditions", () => {
     await zbar.removeRelation(ctx, user, "admin", org);
 
     // After removing both owner and admin, they should have NO access to Org explicitly.
-    const explicit = await zbar.getRelationships(ctx, user, org, undefined, {
-      includeInherited: false,
-    });
+    const explicit = await zbar.listDirect().object(org).subject(user).collect(ctx);
     expect(explicit).toEqual([]);
 
     // They should definitely NOT be an editor of the project anymore.

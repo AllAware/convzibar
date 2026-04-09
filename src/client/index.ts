@@ -333,7 +333,7 @@ export interface ListSubjectsNeedSubject<
   ): ListCollectable<Schema, Data, { subjectId: string }>;
 }
 
-/** Ready to collect, with optional `.via()` filtering. */
+/** Ready to collect, with optional `.via()` filtering and `.map()`. */
 export interface ListCollectable<
   Schema extends ZbarSchema<Data>,
   Data,
@@ -342,19 +342,331 @@ export interface ListCollectable<
   via<VT extends keyof Schema["entities"] & string>(
     ...entities: Array<{ type: VT; id: string } | null | undefined>
   ): ListFinal<Data, Result>;
+  map<T>(
+    fn: (item: Result) => T | Promise<T>,
+  ): ListMapped<Data, T>;
   collect(
     ctx: QueryCtx | ActionCtx,
     requestContext?: Data,
   ): Promise<Result[]>;
 }
 
-/** Terminal — can only `.collect()`. */
+/** After `.via()` — can `.map()` or `.collect()`. */
 export interface ListFinal<Data, Result> {
+  map<T>(
+    fn: (item: Result) => T | Promise<T>,
+  ): ListMapped<Data, T>;
   collect(
     ctx: QueryCtx | ActionCtx,
     requestContext?: Data,
   ): Promise<Result[]>;
 }
+
+/** After `.map()` — terminal, can only `.collect()`. */
+export interface ListMapped<Data, T> {
+  collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<T[]>;
+}
+
+// ============================================================================
+// Fluent Direct Relationship Query Builder
+// ============================================================================
+
+/** Result row from a direct relationship query. */
+export interface DirectRelationship {
+  subject: { type: string; id: string };
+  relation: string;
+  object: { type: string; id: string };
+}
+
+/**
+ * Entry point returned by `zbar.listDirect()`. Provide `.object()`,
+ * `.subject()`, or both to scope the query.
+ *
+ * - `.object("device")` — all direct relationships where the object type is "device"
+ * - `.object({ type: "device", id })` — all direct relationships for that specific object
+ * - `.subject("user")` — all direct relationships where the subject type is "user"
+ * - `.subject({ type: "user", id })` — all direct relationships for that specific subject
+ *
+ * At least one of `.object()` or `.subject()` must be called before `.collect()`.
+ */
+export interface ListDirectInitial<
+  Schema extends ZbarSchema<Data>,
+  Data,
+> {
+  object<OT extends keyof Schema["entities"] & string>(
+    objectType: OT,
+  ): ListDirectWithObjectType<Schema, Data, OT>;
+  object<OT extends keyof Schema["entities"] & string>(
+    object: { type: OT; id: string },
+  ): ListDirectWithObjectInstance<Schema, Data, OT>;
+  subject<ST extends keyof Schema["entities"] & string>(
+    subjectType: ST,
+  ): ListDirectSubjectOnly<Schema, Data>;
+  subject<ST extends keyof Schema["entities"] & string>(
+    subject: { type: ST; id: string },
+  ): ListDirectSubjectOnly<Schema, Data>;
+}
+
+/** After `.object(type)` — can add `.subject()`, `.relation()`, `.permission()`, `.map()`, or `.collect()`. */
+export interface ListDirectWithObjectType<
+  Schema extends ZbarSchema<Data>,
+  Data,
+  OT extends keyof Schema["entities"] & string,
+> {
+  subject<ST extends keyof Schema["entities"] & string>(
+    subjectType: ST,
+  ): ListDirectCollectable<Schema, Data, OT>;
+  subject<ST extends keyof Schema["entities"] & string>(
+    subject: { type: ST; id: string },
+  ): ListDirectCollectable<Schema, Data, OT>;
+  relation<R extends EntityRelations<Schema, OT>>(
+    relation: R,
+  ): ListDirectObjectFiltered<Schema, Data, OT>;
+  permission<P extends EntityPermissions<Schema, OT>>(
+    permission: P,
+  ): ListDirectObjectFiltered<Schema, Data, OT>;
+  map<T>(
+    fn: (item: DirectRelationship) => T | Promise<T>,
+  ): ListDirectMapped<Data, T>;
+  collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<DirectRelationship[]>;
+}
+
+/** After `.object({type, id})` — can add `.subject()`, `.relation()`, `.permission()`, `.map()`, or `.collect()`. */
+export interface ListDirectWithObjectInstance<
+  Schema extends ZbarSchema<Data>,
+  Data,
+  OT extends keyof Schema["entities"] & string,
+> {
+  subject<ST extends keyof Schema["entities"] & string>(
+    subjectType: ST,
+  ): ListDirectCollectable<Schema, Data, OT>;
+  subject<ST extends keyof Schema["entities"] & string>(
+    subject: { type: ST; id: string },
+  ): ListDirectCollectable<Schema, Data, OT>;
+  relation<R extends EntityRelations<Schema, OT>>(
+    relation: R,
+  ): ListDirectObjectFiltered<Schema, Data, OT>;
+  permission<P extends EntityPermissions<Schema, OT>>(
+    permission: P,
+  ): ListDirectObjectFiltered<Schema, Data, OT>;
+  map<T>(
+    fn: (item: DirectRelationship) => T | Promise<T>,
+  ): ListDirectMapped<Data, T>;
+  collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<DirectRelationship[]>;
+}
+
+/** After `.object()` + `.relation()`/`.permission()` — can add `.subject()`, `.map()`, or `.collect()`. */
+export interface ListDirectObjectFiltered<
+  Schema extends ZbarSchema<Data>,
+  Data,
+  OT extends keyof Schema["entities"] & string,
+> {
+  subject<ST extends keyof Schema["entities"] & string>(
+    subjectType: ST,
+  ): ListDirectCollectable<Schema, Data, OT>;
+  subject<ST extends keyof Schema["entities"] & string>(
+    subject: { type: ST; id: string },
+  ): ListDirectCollectable<Schema, Data, OT>;
+  map<T>(
+    fn: (item: DirectRelationship) => T | Promise<T>,
+  ): ListDirectMapped<Data, T>;
+  collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<DirectRelationship[]>;
+}
+
+/** After `.subject()` only (no object yet) — can add `.object()`, `.map()`, or `.collect()`. */
+export interface ListDirectSubjectOnly<
+  Schema extends ZbarSchema<Data>,
+  Data,
+> {
+  object<OT extends keyof Schema["entities"] & string>(
+    objectType: OT,
+  ): ListDirectCollectable<Schema, Data, OT>;
+  object<OT extends keyof Schema["entities"] & string>(
+    object: { type: OT; id: string },
+  ): ListDirectCollectable<Schema, Data, OT>;
+  map<T>(
+    fn: (item: DirectRelationship) => T | Promise<T>,
+  ): ListDirectMapped<Data, T>;
+  collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<DirectRelationship[]>;
+}
+
+/** Can add `.relation()`/`.permission()`, `.map()`, or `.collect()`. */
+export interface ListDirectCollectable<
+  Schema extends ZbarSchema<Data>,
+  Data,
+  OT extends keyof Schema["entities"] & string,
+> {
+  relation<R extends EntityRelations<Schema, OT>>(
+    relation: R,
+  ): ListDirectFinal<Data>;
+  permission<P extends EntityPermissions<Schema, OT>>(
+    permission: P,
+  ): ListDirectFinal<Data>;
+  map<T>(
+    fn: (item: DirectRelationship) => T | Promise<T>,
+  ): ListDirectMapped<Data, T>;
+  collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<DirectRelationship[]>;
+}
+
+/** After `.relation()`/`.permission()` — can `.map()` or `.collect()`. */
+export interface ListDirectFinal<Data> {
+  map<T>(
+    fn: (item: DirectRelationship) => T | Promise<T>,
+  ): ListDirectMapped<Data, T>;
+  collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<DirectRelationship[]>;
+}
+
+/** After `.map()` — terminal, can only `.collect()`. */
+export interface ListDirectMapped<Data, T> {
+  collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<T[]>;
+}
+
+/**
+ * Internal implementation of the fluent direct-relationship query builder.
+ */
+class ListDirectQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
+  private _objectType?: string;
+  private _objectId?: string;
+  private _subjectType?: string;
+  private _subjectId?: string;
+  private _relation?: string;
+  private _permission?: string;
+  private _mapFn?: (item: any) => any;
+
+  constructor(private zbar: Zbar<Schema, Data>) {}
+
+  object(objectOrType: string | { type: string; id: string }): this {
+    if (typeof objectOrType === "string") {
+      this._objectType = objectOrType;
+    } else {
+      this._objectType = objectOrType.type;
+      this._objectId = objectOrType.id;
+    }
+    return this;
+  }
+
+  subject(subjectOrType: string | { type: string; id: string }): this {
+    if (typeof subjectOrType === "string") {
+      this._subjectType = subjectOrType;
+    } else {
+      this._subjectType = subjectOrType.type;
+      this._subjectId = subjectOrType.id;
+    }
+    return this;
+  }
+
+  relation(relation: string): this {
+    this._relation = relation;
+    return this;
+  }
+
+  permission(permission: string): this {
+    this._permission = permission;
+    return this;
+  }
+
+  map(fn: (item: any) => any): this {
+    this._mapFn = fn;
+    return this;
+  }
+
+  async collect(
+    ctx: QueryCtx | ActionCtx,
+    requestContext?: Data,
+  ): Promise<DirectRelationship[]> {
+    const z = this.zbar as any;
+    const objectType = this._objectType;
+
+    // 1. Determine which relations to filter for.
+    let filterRelations: string[] | undefined;
+
+    if (this._permission && objectType) {
+      // Permission → expand to all relations that satisfy it (including inherited).
+      const targets = z.resolvePermissionRelations(objectType, this._permission);
+      filterRelations = targets.map((t: any) => t.relation);
+    } else if (this._relation && objectType) {
+      // Relation → expand with inheritance.
+      const targets = z.resolveRelationInheritance(objectType, this._relation);
+      filterRelations = targets.map((t: any) => t.relation);
+    }
+
+    // 2. Build the query args.
+    const subjectArg =
+      this._subjectType && this._subjectId
+        ? { type: this._subjectType, id: this._subjectId }
+        : undefined;
+    const objectArg =
+      this._objectType && this._objectId
+        ? { type: this._objectType, id: this._objectId }
+        : undefined;
+
+    // 3. Query base relationships from the component.
+    // Pass type-only filters server-side to minimise data transfer
+    // and leverage deeper index prefixes where possible.
+    const rows: any[] = await ctx.runQuery(
+      z.component.queries.listDirectRelationships,
+      {
+        tenantId: z.options.tenantId,
+        subject: subjectArg,
+        object: objectArg,
+        relations: filterRelations,
+        filterSubjectType:
+          this._subjectType && !this._subjectId
+            ? this._subjectType
+            : undefined,
+        filterObjectType:
+          this._objectType && !this._objectId
+            ? this._objectType
+            : undefined,
+      },
+    );
+
+    // Server now handles type-only filtering; no client-side pass needed.
+    const filtered = rows;
+
+    // 5. Map to result shape.
+    const results = filtered.map((r: any) => ({
+      subject: { type: r.subjectType, id: r.subjectId },
+      relation: r.relation,
+      object: { type: r.objectType, id: r.objectId },
+    }));
+
+    // 6. Apply user-provided mapper in parallel if present.
+    if (this._mapFn) {
+      return Promise.all(results.map(this._mapFn));
+    }
+
+    return results;
+  }
+}
+
+// ============================================================================
+// Fluent List Query Builder (effective relationships)
+// ============================================================================
 
 /**
  * Internal implementation of the fluent list query builder.
@@ -370,6 +682,7 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
   private _permission?: string;
   private _via: Array<{ type: string; id: string }> = [];
   private _mode!: "listObjects" | "listSubjects";
+  private _mapFn?: (item: any) => any;
 
   constructor(private zbar: Zbar<Schema, Data>) {}
 
@@ -411,6 +724,18 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
         e != null && typeof e.type === "string" && typeof e.id === "string",
     );
     return this;
+  }
+
+  map(fn: (item: any) => any): this {
+    this._mapFn = fn;
+    return this;
+  }
+
+  private _finalize(results: any[]): Promise<any[]> {
+    if (this._mapFn) {
+      return Promise.all(results.map(this._mapFn));
+    }
+    return Promise.resolve(results);
   }
 
   async collect(
@@ -528,7 +853,9 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
         // Fast path: tight gate + no conditions → materialisation
         // guarantees subject→object, return IDs directly.
         if (!schemaHasConditions && isTightGate) {
-          return [...candidateIds].map((id) => ({ objectId: id }));
+          return this._finalize(
+            [...candidateIds].map((id) => ({ objectId: id })),
+          );
         }
 
         // Slow path: batch-verify + validate conditions
@@ -554,7 +881,9 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
           requestContext,
         );
 
-        return validated.map((r: any) => ({ objectId: r.id }));
+        return this._finalize(
+          validated.map((r: any) => ({ objectId: r.id })),
+        );
       }
 
       // ── No via: standard full-scan path ───────────────────────────
@@ -579,7 +908,9 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
         requestContext,
       );
 
-      return validated.map((r: any) => ({ objectId: r.id }));
+      return this._finalize(
+        validated.map((r: any) => ({ objectId: r.id })),
+      );
     } else {
       // listSubjects mode
       const object = { type: this._objectType, id: this._objectId! };
@@ -662,7 +993,9 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
 
         // Fast path: tight expand + no conditions
         if (!schemaHasConditions && isTightExpand) {
-          return [...candidateIds].map((id) => ({ subjectId: id }));
+          return this._finalize(
+            [...candidateIds].map((id) => ({ subjectId: id })),
+          );
         }
 
         // Slow path
@@ -691,7 +1024,9 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
           requestContext,
         );
 
-        return validated.map((r: any) => ({ subjectId: r.id }));
+        return this._finalize(
+          validated.map((r: any) => ({ subjectId: r.id })),
+        );
       }
 
       // ── No via: standard full-scan path ───────────────────────────
@@ -716,7 +1051,9 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
         requestContext,
       );
 
-      return validated.map((r: any) => ({ subjectId: r.id }));
+      return this._finalize(
+        validated.map((r: any) => ({ subjectId: r.id })),
+      );
     }
   }
 }
@@ -1045,101 +1382,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     return false;
   }
 
-  /**
-   * Retrieve a list of all relationships a subject has on an object.
-   */
-  async getRelationships<
-    SubjectType extends keyof Schema["entities"] & string,
-    ObjectType extends keyof Schema["entities"] & string,
-  >(
-    ctx: QueryCtx | ActionCtx,
-    subject: { type: SubjectType; id: string },
-    object: { type: ObjectType; id: string },
-    requestContext?: Data,
-    options?: {
-      includeInherited?: boolean;
-    },
-  ): Promise<Array<EntityRelations<Schema, ObjectType>>> {
-    const objectRelations = Object.keys(
-      this.options.schema.entities[object.type]?.relations || {},
-    ) as Array<EntityRelations<Schema, ObjectType>>;
 
-    if (objectRelations.length === 0) return [];
-
-    const includeInherited = options?.includeInherited ?? false;
-
-    // 1. Expand all possible relations to find every target we might need
-    const relationTargets = new Map<
-      string,
-      Array<{ relation: string; condition?: string }>
-    >();
-    const allAcceptableRelations = new Set<string>();
-
-    for (const rel of objectRelations) {
-      const targets = includeInherited
-        ? this.resolveRelationInheritance(object.type, rel)
-        : [{ relation: rel, condition: undefined }];
-      relationTargets.set(rel, targets);
-      for (const t of targets) {
-        allAcceptableRelations.add(t.relation);
-      }
-    }
-
-    if (allAcceptableRelations.size === 0) return [];
-
-    // 2. Fetch all effective relationships in a SINGLE query
-    const effectiveRels = await ctx.runQuery(
-      this.component.queries.checkPermissionFast,
-      {
-        tenantId: this.options.tenantId,
-        subject,
-        relations: Array.from(allAcceptableRelations),
-        object,
-      },
-    );
-
-    // 3. Evaluate each relation locally using the fetched effective relationships
-    const validRelations: Array<EntityRelations<Schema, ObjectType>> = [];
-
-    for (const rel of objectRelations) {
-      const targets = relationTargets.get(rel)!;
-      let hasRel = false;
-
-      for (const eff of effectiveRels) {
-        const targetDef = targets.find((t) => t.relation === eff.relation);
-        if (!targetDef) continue;
-
-        for (const path of eff.paths) {
-          // If includeInherited is false, ONLY consider base relationships (path length 1)
-          if (!includeInherited && path.baseIds && path.baseIds.length > 1) {
-            continue;
-          }
-
-          const isValid = await this.validatePath(
-            path,
-            targetDef,
-            ctx,
-            subject,
-            object,
-            rel,
-            requestContext,
-          );
-
-          if (isValid) {
-            hasRel = true;
-            break;
-          }
-        }
-        if (hasRel) break;
-      }
-
-      if (hasRel) {
-        validRelations.push(rel);
-      }
-    }
-
-    return validRelations;
-  }
   async can<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
@@ -1294,6 +1537,47 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
    */
   list(): ListInitial<Schema, Data> {
     return new ListQueryBuilder<Schema, Data>(this) as any;
+  }
+
+  /**
+   * Fluent query builder for listing **direct** (base) relationships.
+   *
+   * Unlike `.list()` which queries the materialised effective-relationship
+   * graph, `.listDirect()` reads the raw `relationships` table — only
+   * explicitly-written edges, no transitive or inherited expansions.
+   *
+   * Provide `.object()`, `.subject()`, or both to scope the query.
+   * Optionally add `.relation()` or `.permission()` to filter by
+   * relation name (`.permission()` expands to all contributing relations
+   * including inherited ones).
+   *
+   * ```ts
+   * // All direct relationships where org1 is the object
+   * const rels = await zbar.listDirect()
+   *   .object({ type: "org", id: "org1" })
+   *   .collect(ctx);
+   *
+   * // Direct relationships between a specific subject and object
+   * const rels = await zbar.listDirect()
+   *   .object({ type: "org", id: "org1" })
+   *   .subject({ type: "user", id: "u1" })
+   *   .collect(ctx);
+   *
+   * // Filter by relation (with inheritance: owner → admin → viewer)
+   * const viewers = await zbar.listDirect()
+   *   .object({ type: "org", id: "org1" })
+   *   .relation("viewer")
+   *   .collect(ctx);
+   *
+   * // Filter by permission (expands to all contributing relations)
+   * const editors = await zbar.listDirect()
+   *   .object({ type: "org", id: "org1" })
+   *   .permission("edit_settings")
+   *   .collect(ctx);
+   * ```
+   */
+  listDirect(): ListDirectInitial<Schema, Data> {
+    return new ListDirectQueryBuilder<Schema, Data>(this) as any;
   }
 
   // ============================================================================

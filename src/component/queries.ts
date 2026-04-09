@@ -149,6 +149,131 @@ export const checkPermissionBatchSubjects = query({
   },
 });
 
+/**
+ * List direct (base) relationships from the `relationships` table.
+ * Supports querying by subject only, object only, or both.
+ */
+export const listDirectRelationships = query({
+  args: {
+    tenantId: v.optional(v.string()),
+    subject: v.optional(subjectValidator),
+    object: v.optional(objectValidator),
+    relations: v.optional(v.array(v.string())),
+    // Optional type-only filters — allow the server to narrow results
+    // when the caller only has a type (no id) for subject or object.
+    filterSubjectType: v.optional(v.string()),
+    filterObjectType: v.optional(v.string()),
+  },
+  handler: async (ctx: any, args: any) => {
+    const { tenantId, subject, object, relations, filterSubjectType, filterObjectType } = args;
+
+    let rows: any[];
+
+    if (subject && object) {
+      // Both provided — use the compound index for a tight point query.
+      // If relations are specified, query each; otherwise query all via
+      // a prefix scan on subject fields.
+      if (relations && relations.length > 0) {
+        const promises = relations.map((rel: string) =>
+          ctx.db
+            .query("relationships")
+            .withIndex("by_tenant_subject_relation_object", (q: any) =>
+              q
+                .eq("tenantId", tenantId)
+                .eq("subjectType", subject.type)
+                .eq("subjectId", subject.id)
+                .eq("relation", rel)
+                .eq("objectType", object.type)
+                .eq("objectId", object.id),
+            )
+            .collect(),
+        );
+        rows = (await Promise.all(promises)).flat();
+      } else {
+        rows = await ctx.db
+          .query("relationships")
+          .withIndex("by_tenant_subject_relation_object", (q: any) =>
+            q
+              .eq("tenantId", tenantId)
+              .eq("subjectType", subject.type)
+              .eq("subjectId", subject.id),
+          )
+          .collect();
+        // Post-filter to matching object
+        rows = rows.filter(
+          (r: any) => r.objectType === object.type && r.objectId === object.id,
+        );
+      }
+    } else if (object) {
+      // Object only — all relationships where this entity is the object.
+      rows = await ctx.db
+        .query("relationships")
+        .withIndex("by_tenant_object", (q: any) =>
+          q
+            .eq("tenantId", tenantId)
+            .eq("objectType", object.type)
+            .eq("objectId", object.id),
+        )
+        .collect();
+    } else if (subject) {
+      // Subject only — all relationships where this entity is the subject.
+      if (relations && relations.length > 0) {
+        // Use the 4th index field (relation) for tighter scans.
+        // When filterObjectType is also provided, extend to the 5th field.
+        const promises = relations.map((rel: string) =>
+          ctx.db
+            .query("relationships")
+            .withIndex("by_tenant_subject_relation_object", (q: any) => {
+              let chain = q
+                .eq("tenantId", tenantId)
+                .eq("subjectType", subject.type)
+                .eq("subjectId", subject.id)
+                .eq("relation", rel);
+              if (filterObjectType) {
+                chain = chain.eq("objectType", filterObjectType);
+              }
+              return chain;
+            })
+            .collect(),
+        );
+        rows = (await Promise.all(promises)).flat();
+      } else {
+        rows = await ctx.db
+          .query("relationships")
+          .withIndex("by_tenant_subject_relation_object", (q: any) =>
+            q
+              .eq("tenantId", tenantId)
+              .eq("subjectType", subject.type)
+              .eq("subjectId", subject.id),
+          )
+          .collect();
+      }
+    } else {
+      return [];
+    }
+
+    // Filter by relations if provided and not already filtered above.
+    // The subject+object and subject-only branches handle relations via
+    // the index; only the object-only branch needs post-filtering.
+    if (relations && relations.length > 0 && !subject) {
+      const relSet = new Set(relations);
+      rows = rows.filter((r: any) => relSet.has(r.relation));
+    }
+
+    // Server-side type filtering for type-only parameters.
+    // These narrow results that couldn't be handled by the index alone.
+    if (filterSubjectType) {
+      rows = rows.filter((r: any) => r.subjectType === filterSubjectType);
+    }
+    if (filterObjectType && !(subject && relations && relations.length > 0)) {
+      // Skip when subject+relations already used filterObjectType in index.
+      rows = rows.filter((r: any) => r.objectType === filterObjectType);
+    }
+
+    return rows;
+  },
+});
+
 export const listSubjectsWithAccessFast = query({
   args: {
     tenantId: v.optional(v.string()),
