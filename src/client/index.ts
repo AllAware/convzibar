@@ -27,9 +27,10 @@ export type ConditionFunction<Data = any> = (
 
 export type SchemaRelation =
   | string
-  | { type: string; reverse?: string }
+  | { type: string }
+  | { type: string; reverse: string }
   | { relation: string; condition: string }
-  | Array<string | { type: string; reverse?: string } | { relation: string; condition: string }>;
+  | Array<string | { type: string } | { type: string; reverse: string } | { relation: string; condition: string }>;
 
 export interface EntityDefinition {
   relations?: Record<string, SchemaRelation>;
@@ -85,6 +86,20 @@ type TargetRelationKeys<
     ? keyof Entities[Target]["relations"] & string
     : never;
 
+// Resolves valid relation names on a target entity for reverse edge typing.
+// When Target is the entity currently being defined (EntName), uses Relations.
+// Otherwise, looks up the target's relations from the already-defined Entities.
+type ReverseTargetRelations<
+  Target extends string,
+  EntName extends string,
+  Relations,
+  Entities extends Record<string, { relations: Record<string, string>; permissions: string }>,
+> = Target extends EntName
+  ? keyof Relations & string
+  : Target extends keyof Entities
+    ? keyof Entities[Target]["relations"] & string
+    : never;
+
 // Userset path: "entityType#relationName" (e.g. "group#admin").
 // Uses # to distinguish from traversal dot-paths ("relation.targetRelation").
 // For self-referential entities, we include RelName (the relation currently
@@ -109,15 +124,44 @@ export class EntityBuilder<
   >,
   Relations extends Record<string, string> = {},
   Permissions extends string = never,
+  Reverses extends Record<string, { relations: Record<string, string> }> = {},
 > {
   declare _relations: Relations;
   declare _permissions: Permissions;
+  declare _reverses: Reverses;
 
   public def: any = { relations: {}, permissions: {} };
 
+  /**
+   * Placeholder overload: declares a relation name with no subject type.
+   * Used for reverse-edge targets that will be populated by entities
+   * defined later in the schema chain.
+   *
+   * ```ts
+   * .entity('system', e => e
+   *   .relation('device_member')  // placeholder — populated by device.owner reverse
+   * )
+   * ```
+   */
+  relation<RelName extends string>(
+    name: RelName,
+  ): EntityBuilder<
+    EntName,
+    Conditions,
+    Entities,
+    Relations & Record<RelName, string>,
+    Permissions,
+    Reverses
+  >;
+
+  /**
+   * Full overload: declares a relation with one or more typed targets.
+   */
   relation<
     RelName extends string,
-    Target extends string = (keyof Entities | EntName) & string,
+    Target extends (keyof Entities | EntName) & string = (keyof Entities | EntName) & string,
+    RTarget extends (keyof Entities | EntName) & string = never,
+    RRev extends string = never,
   >(
     name: RelName,
     ...targets: Array<
@@ -128,7 +172,8 @@ export class EntityBuilder<
             string]: `${K}.${TargetRelationKeys<Relations[K], EntName, Relations, Entities>}`;
         }[keyof Relations & string]
       | EntityUsersetPath<EntName, RelName, Relations, Entities>
-      | { type: string; reverse?: string }
+      | { type: Target }
+      | { type: RTarget; reverse: RRev & ReverseTargetRelations<RTarget, EntName, Relations, Entities> }
       | {
           relation:
             | keyof Relations
@@ -139,19 +184,24 @@ export class EntityBuilder<
             | EntityUsersetPath<EntName, RelName, Relations, Entities>;
           condition: keyof Conditions & string;
         }
-      // Allow forward-referencing traversals to relations that will be
-      // auto-injected by reverse edges from entities defined later.
-      | `${string}.${string}`
     >
   ): EntityBuilder<
     EntName,
     Conditions,
     Entities,
     Relations & Record<RelName, Target>,
-    Permissions
-  > {
-    this.def.relations[name] = targets.length === 1 ? targets[0] : targets;
-    return this as any;
+    Permissions,
+    Reverses & ([RRev] extends [never] ? {} : Record<RTarget & string, { relations: Record<RRev & string, EntName> }>)
+  >;
+
+  // Implementation
+  relation(name: string, ...targets: any[]): any {
+    this.def.relations[name] = targets.length === 0
+      ? undefined  // placeholder — no subject type
+      : targets.length === 1
+        ? targets[0]
+        : targets;
+    return this;
   }
 
   permission<PermName extends string>(
@@ -165,7 +215,8 @@ export class EntityBuilder<
     Conditions,
     Entities,
     Relations,
-    Permissions | PermName
+    Permissions | PermName,
+    Reverses
   > {
     this.def.permissions[name] = targets;
     return this as any;
@@ -194,15 +245,16 @@ export class SchemaBuilder<
     Name extends string,
     Rel extends Record<string, string> = {},
     Perm extends string = never,
+    Rev extends Record<string, { relations: Record<string, string> }> = {},
   >(
     name: Name,
     build?: (
-      e: EntityBuilder<Name, Conditions, Entities, {}, never>,
-    ) => EntityBuilder<Name, Conditions, Entities, Rel, Perm>,
+      e: EntityBuilder<Name, Conditions, Entities, {}, never, {}>,
+    ) => EntityBuilder<Name, Conditions, Entities, Rel, Perm, Rev>,
   ): SchemaBuilder<
     Data,
     Conditions,
-    Entities & Record<Name, { relations: Rel; permissions: Perm }>
+    Entities & Record<Name, { relations: Rel; permissions: Perm }> & Rev
   > {
     if (build) {
       const e = build(new EntityBuilder());
@@ -213,17 +265,80 @@ export class SchemaBuilder<
     return this as any;
   }
 
+  /**
+   * Extend an already-defined entity with additional relations and/or permissions.
+   *
+   * Use this to add forward references that depend on entities defined later
+   * in the schema chain. By the time `.extend()` is called, those entities
+   * (and their relations) are visible to the type system.
+   *
+   * ```ts
+   * createZbarSchema()
+   *   .entity('system', e => e
+   *     .relation('has_group')           // placeholder
+   *     .relation('owner', 'user')
+   *   )
+   *   .entity('group', e => e
+   *     .relation('owner', { type: 'system', reverse: 'has_group' })
+   *     .relation('device_member')
+   *   )
+   *   // Now group.device_member exists — wire up the forward reference:
+   *   .extend('system', e => e
+   *     .relation('device_member', 'has_group.device_member')
+   *   )
+   *   .build()
+   * ```
+   */
+  extend<
+    Name extends keyof Entities & string,
+    NewRel extends Record<string, string> = {},
+    NewPerm extends string = never,
+    Rev extends Record<string, { relations: Record<string, string> }> = {},
+  >(
+    name: Name,
+    build: (
+      e: EntityBuilder<Name, Conditions, Entities, Entities[Name]["relations"], Entities[Name]["permissions"], {}>,
+    ) => EntityBuilder<Name, Conditions, Entities, Entities[Name]["relations"] & NewRel, Entities[Name]["permissions"] | NewPerm, Rev>,
+  ): SchemaBuilder<
+    Data,
+    Conditions,
+    Omit<Entities, Name> & Record<Name, { relations: Entities[Name]["relations"] & NewRel; permissions: Entities[Name]["permissions"] | NewPerm }> & Rev
+  > {
+    const existing = this._schema.entities[name];
+    if (!existing) {
+      throw new Error(
+        `Zbar Schema Error: Cannot extend entity '${name}' — it has not been defined yet. Call .entity('${name}', ...) first.`,
+      );
+    }
+
+    // Seed a new EntityBuilder with the existing definition so the callback
+    // can reference already-declared relations in dot-paths / permissions.
+    const builder = new EntityBuilder();
+    builder.def = {
+      relations: { ...existing.relations },
+      permissions: { ...existing.permissions },
+    };
+
+    const result = build(builder as any);
+
+    // Merge the (potentially new) relations and permissions back.
+    this._schema.entities[name] = result.def;
+    return this as any;
+  }
+
   build(): BuiltZbarSchema<Data, Conditions, Entities> {
-    // Post-process: auto-inject reverse relation targets.
-    // When entity A declares relation('foo', { type: 'B', reverse: 'bar' }),
-    // the reverse relation 'bar' is automatically added to entity B's relations
-    // with entity A as the subject type (if not already declared).
-    // This eliminates the need to pre-declare reverse targets manually.
-    for (const [entityType, entityDef] of Object.entries(
-      this._schema.entities as Record<string, EntityDefinition>,
-    )) {
+    const entities = this._schema.entities as Record<string, any>;
+
+    // ── Pass 1: Collect all reverse edge declarations ──
+    // reverseMap[targetEntity][reverseRelName] = { sourceEntity, via relation on targetEntity }
+    const reverseMap: Record<
+      string,
+      Record<string, { subjectType: string; relName: string }>
+    > = {};
+
+    for (const [entityType, entityDef] of Object.entries(entities)) {
       const relations = entityDef.relations || {};
-      for (const [, relDef] of Object.entries(relations)) {
+      for (const [relName, relDef] of Object.entries(relations)) {
         const defs = Array.isArray(relDef) ? relDef : [relDef];
         for (const d of defs) {
           if (
@@ -235,20 +350,13 @@ export class SchemaBuilder<
           ) {
             const targetEntityName = (d as any).type as string;
             const reverseRelName = (d as any).reverse as string;
-            const reverseSubjectType = entityType;
+            if (!entities[targetEntityName]) continue;
 
-            const targetEntity = (this._schema.entities as any)[
-              targetEntityName
-            ];
-            if (!targetEntity) continue;
-            if (!targetEntity.relations) targetEntity.relations = {};
-
-            // Only inject if the relation doesn't already exist.
-            // If the user explicitly declared it (e.g., to add traversals),
-            // we leave their definition intact.
-            if (!(reverseRelName in targetEntity.relations)) {
-              targetEntity.relations[reverseRelName] = reverseSubjectType;
-            }
+            reverseMap[targetEntityName] = reverseMap[targetEntityName] || {};
+            reverseMap[targetEntityName][reverseRelName] = {
+              subjectType: entityType,
+              relName,
+            };
           }
         }
       }

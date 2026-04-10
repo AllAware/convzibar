@@ -96,6 +96,30 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
     }
   }
 
+  // Resolve placeholder relations (undefined values) using reverseEdges.
+  // When entity A declares { type: 'B', reverse: 'foo' }, B.foo may be
+  // a placeholder (undefined). Replace it with the subject type (A) so
+  // that traversal processing finds correct target entity types.
+  for (const [entityType, relMap] of Object.entries(reverseEdges)) {
+    for (const [relName, reverseRelName] of Object.entries(relMap)) {
+      const targetEntity = schema.entities[entityType];
+      // The target entity that has { type, reverse } is entityType.
+      // The type field tells us the entity that RECEIVES the reverse relation.
+      const relDef = targetEntity?.relations?.[relName];
+      if (!relDef) continue;
+      const defs = Array.isArray(relDef) ? relDef : [relDef];
+      for (const d of defs) {
+        if (typeof d === "object" && d !== null && "reverse" in d) {
+          const receiverEntity = (d as any).type as string;
+          const receiverRels = schema.entities[receiverEntity]?.relations;
+          if (receiverRels && receiverRels[reverseRelName] === undefined) {
+            receiverRels[reverseRelName] = entityType;
+          }
+        }
+      }
+    }
+  }
+
   // Generate distant traversal rules with fully expanded local aliases
   // Note: we NO LONGER emit rules for local inheritance to avoid materialization!
   for (const [entityType, def] of Object.entries(schema.entities || {})) {

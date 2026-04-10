@@ -45,26 +45,30 @@ const notificationSchema = createZbarSchema<any>()
       .relation("owner", "user")
       .relation("admin", "user", "owner")
       .relation("viewer", "user", "admin")
-      // has_group is auto-injected by group.parent's { reverse: 'has_group' }.
-      // This traversal propagates device_member from groups to system.
-      .relation("device_member", "device", "has_group.device_member")
-      .relation("contact_member", "contact", "has_group.contact_member")
+      // Placeholder — populated by group.owner's { reverse: 'has_group' }.
+      .relation("has_group")
   )
   .entity("group", (e) =>
     e
       // reverse: system → parent → group auto-creates group → has_group → system.
-      // 'has_group' is auto-injected onto the system entity by .build().
+      // 'has_group' is type-checked against system's declared relations.
       .relation("parent", { type: "system", reverse: "has_group" })
-      // device_member auto-injected by device.container's reverse.
-      // contact_member auto-injected by contact.container's reverse.
+      // Placeholders for device/contact membership.
+      .relation("device_member")
+      .relation("contact_member")
       .relation("admin", "user", "parent.admin")
       .relation("viewer", "user", "admin", "parent.viewer")
+  )
+  // group is now defined — wire up forward references on system
+  .extend("system", (e) =>
+    e
+      .relation("device_member", "has_group.device_member")
+      .relation("contact_member", "has_group.contact_member")
   )
   .entity("device", (e) =>
     e
       // reverse: group → container → device auto-creates device → device_member → group.
-      // 'device_member' is auto-injected onto the group entity by .build().
-      // The traversal engine then propagates: device → device_member → system.
+      // 'device_member' is type-checked against group's declared relations.
       .relation("container", { type: "group", reverse: "device_member" })
       .relation("admin", "user", "system#admin", "container.admin")
       .relation("viewer", "user", "admin", "system#viewer", "container.viewer")
@@ -72,7 +76,7 @@ const notificationSchema = createZbarSchema<any>()
   .entity("contact", (e) =>
     e
       // reverse: group → container → contact auto-creates contact → contact_member → group.
-      // 'contact_member' is auto-injected onto the group entity by .build().
+      // 'contact_member' is type-checked against group's declared relations.
       .relation("container", { type: "group", reverse: "contact_member" })
   )
   .entity("notification_rule", (e) =>
@@ -89,58 +93,26 @@ const notificationSchema = createZbarSchema<any>()
 // ============================================================================
 
 describe("Reverse Edge: Schema auto-injection", () => {
-  test(".build() auto-injects reverse relations onto target entities", () => {
-    // The test schema declares NO manual reverse targets:
-    // - system has NO 'has_group' declared
-    // - group has NO 'device_member' or 'contact_member' declared
-    // They should be auto-injected by .build().
+  test("placeholder relations are declared on target entities", () => {
     const entities = notificationSchema.entities as any;
 
-    // group.parent has { type: 'system', reverse: 'has_group' }
-    // → system should get 'has_group' auto-injected with subject type 'group'
-    expect(entities.system.relations.has_group).toBe("group");
-
-    // device.container has { type: 'group', reverse: 'device_member' }
-    // → group should get 'device_member' auto-injected with subject type 'device'
-    expect(entities.group.relations.device_member).toBe("device");
-
-    // contact.container has { type: 'group', reverse: 'contact_member' }
-    // → group should get 'contact_member' auto-injected with subject type 'contact'
-    expect(entities.group.relations.contact_member).toBe("contact");
+    // These exist as relation keys (declared as placeholders)
+    expect("has_group" in entities.system.relations).toBe(true);
+    expect("device_member" in entities.group.relations).toBe(true);
+    expect("contact_member" in entities.group.relations).toBe(true);
   });
 
-  test(".build() does not overwrite explicitly declared reverse targets", () => {
-    const schema = createZbarSchema<any>()
-      .entity("user")
-      .entity("system", (e) =>
-        e
-          // Explicitly declared with extra traversal — should NOT be overwritten
-          .relation("has_group", "group")
-          .relation("device_member", "device", "has_group.device_member")
-      )
-      .entity("group", (e) =>
-        e
-          .relation("parent", { type: "system", reverse: "has_group" })
-          .relation("device_member", "device") // Explicitly declared
-      )
-      .entity("device", (e) =>
-        e.relation("container", { type: "group", reverse: "device_member" })
-      )
-      .build();
+  test("explicit traversals on placeholders are preserved", () => {
+    const entities = notificationSchema.entities as any;
 
-    const entities = schema.entities as any;
-
-    // system.has_group was explicitly declared as 'group' — should be preserved
-    expect(entities.system.relations.has_group).toBe("group");
-
-    // system.device_member was explicitly declared with traversal — should be preserved
-    expect(entities.system.relations.device_member).toEqual([
-      "device",
+    // system.device_member was declared with 'has_group.device_member' traversal.
+    expect(entities.system.relations.device_member).toBe(
       "has_group.device_member",
-    ]);
+    );
 
-    // group.device_member was explicitly declared as 'device' — should be preserved
-    expect(entities.group.relations.device_member).toBe("device");
+    expect(entities.system.relations.contact_member).toBe(
+      "has_group.contact_member",
+    );
   });
 });
 
