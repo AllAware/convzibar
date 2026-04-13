@@ -133,6 +133,7 @@ export const scanRelationships = query({
         objectId: r.objectId,
         condition: r.condition,
         conditionContext: r.conditionContext,
+        properties: r.properties,
       })),
       cursor: nextCursor,
       isDone: nextCursor === undefined,
@@ -201,6 +202,7 @@ export const insertRelationship = mutation({
     objectId: v.string(),
     condition: v.optional(v.string()),
     conditionContext: v.optional(v.any()),
+    properties: v.optional(v.any()),
   },
   handler: async (ctx: any, args: any) => {
     return await ctx.db.insert("relationships", {
@@ -212,6 +214,7 @@ export const insertRelationship = mutation({
       objectId: args.objectId,
       condition: args.condition,
       conditionContext: args.conditionContext,
+      properties: args.properties,
     });
   },
 });
@@ -227,6 +230,7 @@ export const patchRelationship = mutation({
       objectId: v.optional(v.string()),
       condition: v.optional(v.union(v.string(), v.null())),
       conditionContext: v.optional(v.any()),
+      properties: v.optional(v.union(v.any(), v.null())),
     }),
   },
   handler: async (ctx: any, args: any) => {
@@ -709,6 +713,7 @@ export const transformChunk = mutation({
             objectId: v.optional(v.string()),
             condition: v.optional(v.union(v.string(), v.null())),
             conditionContext: v.optional(v.any()),
+            properties: v.optional(v.union(v.any(), v.null())),
           }),
         ),
         inserts: v.optional(
@@ -722,6 +727,7 @@ export const transformChunk = mutation({
               objectId: v.string(),
               condition: v.optional(v.string()),
               conditionContext: v.optional(v.any()),
+              properties: v.optional(v.any()),
             }),
           ),
         ),

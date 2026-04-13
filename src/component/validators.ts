@@ -16,3 +16,5 @@ export const conditionValidator = v.optional(
     conditionContext: v.optional(v.any()),
   }),
 );
+
+export const propertiesValidator = v.optional(v.any());

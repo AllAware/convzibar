@@ -5,6 +5,11 @@ import type {
   GenericMutationCtx,
   GenericQueryCtx,
 } from "convex/server";
+import type {
+  GenericValidator,
+  ObjectType as ConvexObjectType,
+  PropertyValidators,
+} from "convex/values";
 import { parseSchemaToGraphConfig } from "../component/helpers";
 
 import type { GraphConfig } from "../component/types";
@@ -38,6 +43,7 @@ export interface EntityDefinition {
     string,
     Array<string | { relation: string; condition: string }>
   >;
+  propertyValidators?: Record<string, PropertyValidators>;
 }
 
 export interface ZbarSchema<Data = any> {
@@ -50,7 +56,7 @@ export type BuiltZbarSchema<
   Conditions extends Record<string, any>,
   Entities extends Record<
     string,
-    { relations: Record<string, string>; permissions: string }
+    { relations: Record<string, string>; permissions: string; properties: Record<string, PropertyValidators> }
   >,
 > = {
   conditions: Record<keyof Conditions & string, ConditionFunction<Data>>;
@@ -64,6 +70,7 @@ export type BuiltZbarSchema<
         Entities[E]["permissions"] & string,
         Array<string | { relation: string; condition: string }>
       >;
+      propertyValidators: Entities[E]["properties"];
     };
   };
 };
@@ -79,7 +86,7 @@ type TargetRelationKeys<
   Target,
   EntName extends string,
   Relations,
-  Entities extends Record<string, { relations: Record<string, string>; permissions: string }>,
+  Entities extends Record<string, { relations: Record<string, string>; permissions: string; properties: Record<string, PropertyValidators> }>,
 > = Target extends EntName
   ? keyof Relations & string
   : Target extends keyof Entities
@@ -93,7 +100,7 @@ type ReverseTargetRelations<
   Target extends string,
   EntName extends string,
   Relations,
-  Entities extends Record<string, { relations: Record<string, string>; permissions: string }>,
+  Entities extends Record<string, { relations: Record<string, string>; permissions: string; properties: Record<string, PropertyValidators> }>,
 > = Target extends EntName
   ? keyof Relations & string
   : Target extends keyof Entities
@@ -108,7 +115,7 @@ type EntityUsersetPath<
   EntName extends string,
   RelName extends string,
   Relations,
-  Entities extends Record<string, { relations: Record<string, string>; permissions: string }>,
+  Entities extends Record<string, { relations: Record<string, string>; permissions: string; properties: Record<string, PropertyValidators> }>,
 > = {
   [E in (keyof Entities | EntName) & string]: E extends EntName
     ? `${E}#${(keyof Relations | RelName) & string}`
@@ -120,17 +127,25 @@ export class EntityBuilder<
   Conditions extends Record<string, any>,
   Entities extends Record<
     string,
-    { relations: Record<string, string>; permissions: string }
+    { relations: Record<string, string>; permissions: string; properties: Record<string, PropertyValidators> }
   >,
   Relations extends Record<string, string> = {},
   Permissions extends string = never,
-  Reverses extends Record<string, { relations: Record<string, string> }> = {},
+  Reverses extends Record<string, { relations: Record<string, string>; properties: Record<string, PropertyValidators> }> = {},
+  Properties extends Record<string, PropertyValidators> = {},
 > {
   declare _relations: Relations;
   declare _permissions: Permissions;
   declare _reverses: Reverses;
+  declare _properties: Properties;
 
-  public def: any = { relations: {}, permissions: {} };
+  public def: any = { relations: {}, permissions: {}, propertyValidators: {} };
+
+  /**
+   * When true, `.relation()` merges new targets into existing relation
+   * definitions instead of overwriting them. Set by `SchemaBuilder.extend()`.
+   */
+  public _mergeMode = false;
 
   /**
    * Placeholder overload: declares a relation name with no subject type.
@@ -151,7 +166,8 @@ export class EntityBuilder<
     Entities,
     Relations & Record<RelName, string>,
     Permissions,
-    Reverses
+    Reverses,
+    Properties
   >;
 
   /**
@@ -191,16 +207,44 @@ export class EntityBuilder<
     Entities,
     Relations & Record<RelName, Target>,
     Permissions,
-    Reverses & ([RRev] extends [never] ? {} : Record<RTarget & string, { relations: Record<RRev & string, EntName> }>)
+    Reverses & ([RRev] extends [never] ? {} : Record<RTarget & string, { relations: Record<RRev & string, EntName>; properties: {} }>),
+    Properties
   >;
 
   // Implementation
   relation(name: string, ...targets: any[]): any {
-    this.def.relations[name] = targets.length === 0
-      ? undefined  // placeholder — no subject type
-      : targets.length === 1
-        ? targets[0]
-        : targets;
+    if (targets.length === 0) {
+      this.def.relations[name] = this.def.relations[name] ?? undefined;
+      return this;
+    }
+
+    const newValue = targets.length === 1 ? targets[0] : targets;
+
+    // In merge mode (used by .extend()), append new targets to any
+    // existing relation definition instead of replacing it.
+    const existing = this.def.relations[name];
+    if (this._mergeMode && existing != null) {
+      const existingArr = Array.isArray(existing) ? existing : [existing];
+      const newArr = Array.isArray(newValue) ? newValue : [newValue];
+      // Deduplicate: skip targets that are already present (by reference
+      // equality for objects, strict equality for strings).
+      const merged = [...existingArr];
+      for (const t of newArr) {
+        const isDuplicate = merged.some((m) =>
+          typeof t === "string" && typeof m === "string" ? t === m
+          : typeof t === "object" && typeof m === "object" && t !== null && m !== null
+            ? JSON.stringify(t) === JSON.stringify(m)
+            : false,
+        );
+        if (!isDuplicate) {
+          merged.push(t);
+        }
+      }
+      this.def.relations[name] = merged.length === 1 ? merged[0] : merged;
+    } else {
+      this.def.relations[name] = newValue;
+    }
+
     return this;
   }
 
@@ -216,9 +260,46 @@ export class EntityBuilder<
     Entities,
     Relations,
     Permissions | PermName,
-    Reverses
+    Reverses,
+    Properties
   > {
     this.def.permissions[name] = targets;
+    return this as any;
+  }
+
+  /**
+   * Define typed properties for a relation using Convex validators.
+   *
+   * Properties are stored on direct edges and returned by `.listDirect()`.
+   * They are validated at write-time by the client before being persisted.
+   *
+   * ```ts
+   * .entity('project', e => e
+   *   .relation('editor', 'user')
+   *   .properties('editor', {
+   *     weight: v.number(),
+   *     note: v.optional(v.string()),
+   *     since: v.string(),
+   *   })
+   * )
+   * ```
+   */
+  properties<
+    RelName extends keyof Relations & string,
+    P extends PropertyValidators,
+  >(
+    relation: RelName,
+    validators: P,
+  ): EntityBuilder<
+    EntName,
+    Conditions,
+    Entities,
+    Relations,
+    Permissions,
+    Reverses,
+    Properties & Record<RelName, P>
+  > {
+    this.def.propertyValidators[relation] = validators;
     return this as any;
   }
 }
@@ -228,7 +309,7 @@ export class SchemaBuilder<
   Conditions extends Record<string, any> = {},
   Entities extends Record<
     string,
-    { relations: Record<string, string>; permissions: string }
+    { relations: Record<string, string>; permissions: string; properties: Record<string, PropertyValidators> }
   > = {},
 > {
   public _schema: any = { conditions: {}, entities: {} };
@@ -245,16 +326,17 @@ export class SchemaBuilder<
     Name extends string,
     Rel extends Record<string, string> = {},
     Perm extends string = never,
-    Rev extends Record<string, { relations: Record<string, string> }> = {},
+    Rev extends Record<string, { relations: Record<string, string>; properties: Record<string, PropertyValidators> }> = {},
+    Props extends Record<string, PropertyValidators> = {},
   >(
     name: Name,
     build?: (
-      e: EntityBuilder<Name, Conditions, Entities, {}, never, {}>,
-    ) => EntityBuilder<Name, Conditions, Entities, Rel, Perm, Rev>,
+      e: EntityBuilder<Name, Conditions, Entities, {}, never, {}, {}>,
+    ) => EntityBuilder<Name, Conditions, Entities, Rel, Perm, Rev, Props>,
   ): SchemaBuilder<
     Data,
     Conditions,
-    Entities & Record<Name, { relations: Rel; permissions: Perm }> & Rev
+    Entities & Record<Name, { relations: Rel; permissions: Perm; properties: Props }> & Rev
   > {
     if (build) {
       const e = build(new EntityBuilder());
@@ -293,16 +375,17 @@ export class SchemaBuilder<
     Name extends keyof Entities & string,
     NewRel extends Record<string, string> = {},
     NewPerm extends string = never,
-    Rev extends Record<string, { relations: Record<string, string> }> = {},
+    Rev extends Record<string, { relations: Record<string, string>; properties: Record<string, PropertyValidators> }> = {},
+    NewProps extends Record<string, PropertyValidators> = {},
   >(
     name: Name,
     build: (
-      e: EntityBuilder<Name, Conditions, Entities, Entities[Name]["relations"], Entities[Name]["permissions"], {}>,
-    ) => EntityBuilder<Name, Conditions, Entities, Entities[Name]["relations"] & NewRel, Entities[Name]["permissions"] | NewPerm, Rev>,
+      e: EntityBuilder<Name, Conditions, Entities, Entities[Name]["relations"], Entities[Name]["permissions"], {}, Entities[Name]["properties"]>,
+    ) => EntityBuilder<Name, Conditions, Entities, Entities[Name]["relations"] & NewRel, Entities[Name]["permissions"] | NewPerm, Rev, Entities[Name]["properties"] & NewProps>,
   ): SchemaBuilder<
     Data,
     Conditions,
-    Omit<Entities, Name> & Record<Name, { relations: Entities[Name]["relations"] & NewRel; permissions: Entities[Name]["permissions"] | NewPerm }> & Rev
+    Omit<Entities, Name> & Record<Name, { relations: Entities[Name]["relations"] & NewRel; permissions: Entities[Name]["permissions"] | NewPerm; properties: Entities[Name]["properties"] & NewProps }> & Rev
   > {
     const existing = this._schema.entities[name];
     if (!existing) {
@@ -313,11 +396,15 @@ export class SchemaBuilder<
 
     // Seed a new EntityBuilder with the existing definition so the callback
     // can reference already-declared relations in dot-paths / permissions.
+    // Enable merge mode so that .relation() appends to existing definitions
+    // instead of overwriting them.
     const builder = new EntityBuilder();
     builder.def = {
       relations: { ...existing.relations },
       permissions: { ...existing.permissions },
+      propertyValidators: { ...existing.propertyValidators },
     };
+    builder._mergeMode = true;
 
     const result = build(builder as any);
 
@@ -405,6 +492,34 @@ export type SchemaConditions<Schema extends ZbarSchema<any>> = Schema extends {
 }
   ? keyof C & string
   : never;
+
+/**
+ * Extract the property validators for a specific relation on an entity type.
+ * Returns `never` if the relation has no properties defined.
+ */
+export type EntityRelationProperties<
+  Schema extends ZbarSchema,
+  ObjType extends keyof Schema["entities"],
+  Relation extends string,
+> = Schema["entities"][ObjType] extends { propertyValidators: infer PV }
+  ? PV extends Record<string, PropertyValidators>
+    ? Relation extends keyof PV
+      ? ConvexObjectType<PV[Relation]>
+      : never
+    : never
+  : never;
+
+/**
+ * Resolve the inferred property type for a relation.
+ * Returns `undefined` when no properties are declared.
+ */
+type ResolvedProperties<
+  Schema extends ZbarSchema,
+  OT extends keyof Schema["entities"] & string,
+  Rel extends string,
+> = EntityRelationProperties<Schema, OT, Rel> extends never
+  ? undefined
+  : EntityRelationProperties<Schema, OT, Rel>;
 
 export class PermissionError extends Error {
   constructor(message: string) {
@@ -530,6 +645,7 @@ export interface DirectRelationship {
   subject: { type: string; id: string };
   relation: string;
   object: { type: string; id: string };
+  properties?: unknown;
 }
 
 /**
@@ -804,6 +920,7 @@ class ListDirectQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
       subject: { type: r.subjectType, id: r.subjectId },
       relation: r.relation,
       object: { type: r.objectType, id: r.objectId },
+      properties: r.properties,
     }));
 
     // 6. Apply user-provided mapper in parallel if present.
@@ -1307,6 +1424,54 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     }
   }
 
+  /**
+   * Validate edge properties against the schema-defined validators.
+   * Throws if required fields are missing or types don't match.
+   */
+  private validateProperties(
+    objectType: string,
+    relation: string,
+    properties: unknown,
+  ) {
+    const entityDef = this.options.schema.entities[objectType];
+    const validators = entityDef?.propertyValidators?.[relation];
+
+    if (!validators) {
+      throw new Error(
+        `Zbar Schema Error: No properties defined for relation '${relation}' on entity type '${objectType}'. ` +
+        `Remove the 'properties' option or define properties with .properties('${relation}', { ... }) in the schema.`,
+      );
+    }
+
+    if (typeof properties !== "object" || properties === null) {
+      throw new Error(
+        `Zbar Schema Error: Properties for relation '${relation}' on '${objectType}' must be an object.`,
+      );
+    }
+
+    const props = properties as Record<string, unknown>;
+
+    // Check for required fields (non-optional validators)
+    for (const [key, validator] of Object.entries(validators)) {
+      const val = validator as GenericValidator;
+      if (val.isOptional !== "optional" && !(key in props)) {
+        throw new Error(
+          `Zbar Schema Error: Missing required property '${key}' for relation '${relation}' on '${objectType}'.`,
+        );
+      }
+    }
+
+    // Check for unknown fields
+    for (const key of Object.keys(props)) {
+      if (!(key in validators)) {
+        throw new Error(
+          `Zbar Schema Error: Unknown property '${key}' for relation '${relation}' on '${objectType}'. ` +
+          `Defined properties: ${Object.keys(validators).join(", ")}.`,
+        );
+      }
+    }
+  }
+
   private resolvePermissionRelations(objectType: string, permission: string) {
     const cacheKey = `${objectType}:${permission}`;
     if (this.permissionRelationsCache.has(cacheKey)) {
@@ -1794,13 +1959,21 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
 
   /**
    * Add a relationship between a subject and an object.
+   *
+   * If the relation has properties defined in the schema, pass them
+   * via `options.properties`. Properties are validated at write-time
+   * and stored on the direct edge.
+   *
+   * ```ts
+   * await zbar.addRelation(ctx, user, "editor", project, {
+   *   properties: { weight: 0.8, note: "Lead editor" },
+   * });
+   * ```
    */
   async addRelation<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
-    Relation extends
-      | EntityRelations<Schema, ObjectType>
-      | EntityRelations<Schema, SubjectType>,
+    Relation extends EntityRelations<Schema, ObjectType>
   >(
     ctx: MutationCtx | ActionCtx,
     subject: { type: SubjectType; id: string },
@@ -1810,9 +1983,16 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       condition?: SchemaConditions<Schema>;
       conditionContext?: unknown;
       createdBy?: string;
+      properties?: ResolvedProperties<Schema, ObjectType, Relation & string> extends undefined
+        ? never
+        : ResolvedProperties<Schema, ObjectType, Relation & string>;
     },
   ): Promise<string> {
     this.validateRelationParameter(subject, relation, object);
+
+    if (options?.properties !== undefined) {
+      this.validateProperties(object.type, relation, options.properties);
+    }
 
     return ctx.runMutation(this.component.mutations.addRelation, {
       tenantId: this.options.tenantId,
@@ -1825,6 +2005,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
             conditionContext: options.conditionContext,
           }
         : undefined,
+      properties: options?.properties,
       createdBy: options?.createdBy ?? this.options.defaultActorId,
       graphConfig: this.graphConfig,
       enableAuditLog: this.options.enableAuditLog,
@@ -1854,10 +2035,17 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       condition?: SchemaConditions<Schema>;
       conditionContext?: unknown;
       createdBy?: string;
+      properties?: ResolvedProperties<Schema, ObjectType, NewRelation & string> extends undefined
+        ? never
+        : ResolvedProperties<Schema, ObjectType, NewRelation & string>;
     },
   ): Promise<string> {
     this.validateRelationParameter(subject, oldRelation as string, object);
     this.validateRelationParameter(subject, newRelation as string, object);
+
+    if (options?.properties !== undefined) {
+      this.validateProperties(object.type, newRelation as string, options.properties);
+    }
 
     return ctx.runMutation(this.component.mutations.updateRelation, {
       tenantId: this.options.tenantId,
@@ -1871,6 +2059,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
             conditionContext: options.conditionContext,
           }
         : undefined,
+      properties: options?.properties,
       createdBy: options?.createdBy ?? this.options.defaultActorId,
       graphConfig: this.graphConfig,
       enableAuditLog: this.options.enableAuditLog,
@@ -1896,9 +2085,16 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       condition?: SchemaConditions<Schema>;
       conditionContext?: unknown;
       createdBy?: string;
+      properties?: ResolvedProperties<Schema, ObjectType, Relation & string> extends undefined
+        ? never
+        : ResolvedProperties<Schema, ObjectType, Relation & string>;
     },
   ): Promise<string> {
     this.validateRelationParameter(subject, relation, object);
+
+    if (options?.properties !== undefined) {
+      this.validateProperties(object.type, relation, options.properties);
+    }
 
     const objectRelations = Object.keys(
       this.options.schema.entities[object.type]?.relations || {},
@@ -1916,6 +2112,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
             conditionContext: options.conditionContext,
           }
         : undefined,
+      properties: options?.properties,
       createdBy: options?.createdBy ?? this.options.defaultActorId,
       graphConfig: this.graphConfig,
       enableAuditLog: this.options.enableAuditLog,

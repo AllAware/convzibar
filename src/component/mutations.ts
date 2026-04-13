@@ -20,6 +20,7 @@ import { v } from "convex/values";
 import {
   conditionValidator,
   objectValidator,
+  propertiesValidator,
   subjectValidator,
 } from "./validators";
 import type { GraphConfig } from "./types";
@@ -37,6 +38,7 @@ export const addRelation = mutation({
     relation: v.string(),
     object: objectValidator,
     condition: conditionValidator,
+    properties: propertiesValidator,
     createdBy: v.optional(v.string()),
     graphConfig: v.any(), // GraphConfig
     enableAuditLog: v.optional(v.boolean()),
@@ -55,6 +57,7 @@ async function addRelationInternal(ctx: any, args: any) {
     relation,
     object,
     condition,
+    properties,
     createdBy,
     enableAuditLog,
     onComplete,
@@ -93,6 +96,7 @@ async function addRelationInternal(ctx: any, args: any) {
     objectId: object.id,
     condition: condition?.condition,
     conditionContext: condition?.conditionContext,
+    properties,
   });
 
   if (enableAuditLog !== false) {
@@ -959,6 +963,7 @@ export const updateRelation = mutation({
     newRelation: v.string(),
     object: objectValidator,
     condition: conditionValidator,
+    properties: propertiesValidator,
     createdBy: v.optional(v.string()),
     graphConfig: v.any(), // GraphConfig
     enableAuditLog: v.optional(v.boolean()),
@@ -972,6 +977,7 @@ export const updateRelation = mutation({
       newRelation,
       object,
       condition,
+      properties,
       createdBy,
       enableAuditLog,
       graphConfig,
@@ -1017,6 +1023,7 @@ export const updateRelation = mutation({
       relation: newRelation,
       object,
       condition,
+      properties,
       createdBy,
       enableAuditLog,
       graphConfig,
@@ -1034,6 +1041,7 @@ export const setRelation = mutation({
     object: objectValidator,
     objectRelations: v.array(v.string()),
     condition: conditionValidator,
+    properties: propertiesValidator,
     createdBy: v.optional(v.string()),
     graphConfig: v.any(), // GraphConfig
     enableAuditLog: v.optional(v.boolean()),
@@ -1046,6 +1054,7 @@ export const setRelation = mutation({
       relation,
       object,
       condition,
+      properties,
       createdBy,
       enableAuditLog,
       graphConfig,
@@ -1106,6 +1115,7 @@ export const setRelation = mutation({
       relation,
       object,
       condition,
+      properties,
       createdBy,
       enableAuditLog,
       graphConfig,

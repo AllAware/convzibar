@@ -29,6 +29,7 @@ export interface RawRelationship {
   objectId: string;
   condition?: string;
   conditionContext?: unknown;
+  properties?: unknown;
 }
 
 export interface RawRelationshipFields {
@@ -40,6 +41,7 @@ export interface RawRelationshipFields {
   objectId: string;
   condition?: string;
   conditionContext?: unknown;
+  properties?: unknown;
 }
 
 export interface ScanFilter {

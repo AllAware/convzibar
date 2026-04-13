@@ -11,6 +11,7 @@ const schema = {
     objectId: v.string(),
     condition: v.optional(v.string()), // name of a registered condition
     conditionContext: v.optional(v.any()), // static context passed to condition
+    properties: v.optional(v.any()), // user-defined edge properties
   })
     .index("by_tenant_object", ["tenantId", "objectType", "objectId"])
     .index("by_tenant_subject_relation_object", [

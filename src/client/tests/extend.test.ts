@@ -164,6 +164,101 @@ describe("SchemaBuilder.extend()", () => {
     expect(await zbar.can(ctx, alice, "manage", grp)).toBe(true);
   });
 
+  test("extend merges targets into existing relation instead of overwriting", () => {
+    // When .extend() calls .relation() on a name that already has targets,
+    // the new targets should be appended, not replace the originals.
+    const schema = createZbarSchema<ZbarContext>()
+      .entity("user")
+      .entity("system", (e) =>
+        e
+          .relation("owner", "user")
+          .relation("admin", "user", "owner")
+          .relation("viewer", "user", "admin")
+          .relation("has_group")
+          .relation("user_member", "viewer")  // initial: inherits from viewer
+          .permission("view", "viewer")
+      )
+      .entity("group", (e) =>
+        e
+          .relation("owner", { type: "system", reverse: "has_group" })
+          .relation("user_member", "user")
+          .relation("admin", "user", "owner.admin")
+          .relation("viewer", "user", "admin", "owner.viewer")
+      )
+      .extend("system", (e) =>
+        e.relation("user_member", "has_group.user_member")
+      )
+      .build();
+
+    const rels = schema.entities.system.relations as any;
+    // Should contain BOTH the original 'viewer' AND the new traversal
+    expect(rels.user_member).toEqual(["viewer", "has_group.user_member"]);
+  });
+
+  test("extend merge deduplicates identical string targets", () => {
+    const schema = createZbarSchema<ZbarContext>()
+      .entity("user")
+      .entity("system", (e) =>
+        e
+          .relation("owner", "user")
+          .relation("admin", "user", "owner")
+          .relation("viewer", "user", "admin")
+      )
+      .extend("system", (e) =>
+        e.relation("viewer", "user", "admin")  // duplicates of existing targets
+      )
+      .build();
+
+    const rels = schema.entities.system.relations as any;
+    // 'user' and 'admin' already existed — should not be duplicated
+    expect(rels.viewer).toEqual(["user", "admin"]);
+  });
+
+  test("extend merge deduplicates identical object targets", () => {
+    const schema = createZbarSchema<ZbarContext>()
+      .entity("user")
+      .entity("system", (e) =>
+        e
+          .relation("owner", "user")
+          .relation("has_group")
+      )
+      .entity("group", (e) =>
+        e.relation("parent", { type: "system", reverse: "has_group" })
+      )
+      .extend("system", (e) =>
+        // Adding the same reverse-edge object again should not duplicate
+        e.relation("has_group", "group")
+      )
+      .build();
+
+    const rels = schema.entities.system.relations as any;
+    // Placeholder was resolved to 'group' by the reverse edge mechanism,
+    // then extend adds 'group' — should be just 'group', not ['group', 'group']
+    expect(rels.has_group).toBe("group");
+  });
+
+  test("extend on placeholder relation sets value without merging", () => {
+    // When the original relation is a placeholder (undefined), extend
+    // should just set the new value normally.
+    const schema = createZbarSchema<ZbarContext>()
+      .entity("user")
+      .entity("system", (e) =>
+        e
+          .relation("owner", "user")
+          .relation("device_member")  // placeholder
+      )
+      .entity("group", (e) =>
+        e.relation("device_member", "user")
+      )
+      .extend("system", (e) =>
+        e.relation("device_member", "has_group.device_member")
+      )
+      .build();
+
+    const rels = schema.entities.system.relations as any;
+    expect(rels.device_member).toBe("has_group.device_member");
+  });
+
   test("extend throws for undefined entity", () => {
     expect(() => {
       createZbarSchema<any>()

@@ -270,7 +270,19 @@ export const listDirectRelationships = query({
       rows = rows.filter((r: any) => r.objectType === filterObjectType);
     }
 
-    return rows;
+    return rows.map((r: any) => ({
+      _id: r._id,
+      _creationTime: r._creationTime,
+      tenantId: r.tenantId,
+      subjectType: r.subjectType,
+      subjectId: r.subjectId,
+      relation: r.relation,
+      objectType: r.objectType,
+      objectId: r.objectId,
+      condition: r.condition,
+      conditionContext: r.conditionContext,
+      properties: r.properties,
+    }));
   },
 });
 
