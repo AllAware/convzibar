@@ -1091,13 +1091,23 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
           );
         }
 
-        // [N] Expand: via[N-1] → objects (using acceptable relations
-        //     so we only get objects reachable via the right path).
+        // [N] Expand: via[N-1] → objects.
+        // Use structural relations (e.g. device.owner → system) when the
+        // via entity connects to the object type via a typed relation,
+        // otherwise fall back to acceptable (permission-derived) relations.
+        const structuralExpandRels = z.getStructuralRelations(
+          objectType,
+          lastVia.type,
+        );
+        const expandRelations =
+          structuralExpandRels.length > 0
+            ? structuralExpandRels
+            : acceptableRelations;
         promises.push(
           ctx.runQuery(z.component.queries.listAccessibleObjectsFast, {
             tenantId: z.options.tenantId,
             subject: lastVia,
-            relations: acceptableRelations,
+            relations: expandRelations,
             objectType,
           }),
         );
@@ -1211,12 +1221,23 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
 
         const promises: Promise<any>[] = [];
 
-        // [0] Gate: via[N-1] → object (using acceptable relations)
+        // [0] Gate: via[N-1] → object.
+        // Use structural relations when the via entity connects to the
+        // object type via a typed relation (e.g. device.owner → system),
+        // otherwise fall back to acceptable (permission-derived) relations.
+        const structuralGateRels = z.getStructuralRelations(
+          this._objectType,
+          lastVia.type,
+        );
+        const gateRelationsForSubjects =
+          structuralGateRels.length > 0
+            ? structuralGateRels
+            : acceptableRelations;
         promises.push(
           ctx.runQuery(z.component.queries.checkPermissionFast, {
             tenantId: z.options.tenantId,
             subject: lastVia,
-            relations: acceptableRelations,
+            relations: gateRelationsForSubjects,
             object,
           }),
         );
@@ -1934,10 +1955,30 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       if (!relDef) continue;
       const defs = Array.isArray(relDef) ? relDef : [relDef];
       for (const d of defs) {
+        // Handle # notation: 'system#admin'
         if (typeof d === "string" && d.includes("#")) {
           const [type, viaRel] = d.split("#");
           if (type === viaType) {
             baseRelations.add(viaRel);
+          }
+        }
+        // Handle . notation: 'owner.admin' where owner points to viaType
+        if (typeof d === "string" && d.includes(".")) {
+          const [baseRel, viaRel] = d.split(".");
+          const baseRelDef = objectDef.relations?.[baseRel];
+          if (baseRelDef) {
+            const baseDefs = Array.isArray(baseRelDef) ? baseRelDef : [baseRelDef];
+            for (const bd of baseDefs) {
+              if (
+                typeof bd === "object" &&
+                bd !== null &&
+                "type" in bd &&
+                (bd as any).type === viaType
+              ) {
+                baseRelations.add(viaRel);
+                break;
+              }
+            }
           }
         }
       }
@@ -1955,6 +1996,37 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     }
 
     return [...expanded];
+  }
+
+  /**
+   * Get relations on objectType whose subject type matches the given type.
+   * These are the structural/ownership relations connecting two entity types
+   * (e.g. device.owner → system).
+   */
+  private getStructuralRelations(
+    objectType: string,
+    subjectType: string,
+  ): string[] {
+    const schema = this.options.schema;
+    const objectDef = schema.entities[objectType];
+    if (!objectDef?.relations) return [];
+
+    const result: string[] = [];
+    for (const [relName, relDef] of Object.entries(objectDef.relations as Record<string, any>)) {
+      const defs = Array.isArray(relDef) ? relDef : [relDef];
+      for (const d of defs) {
+        if (
+          typeof d === "object" &&
+          d !== null &&
+          "type" in d &&
+          (d as any).type === subjectType
+        ) {
+          result.push(relName);
+          break;
+        }
+      }
+    }
+    return result;
   }
 
   /**
