@@ -139,7 +139,12 @@ export class ZbarUnsafe<Schema extends ZbarSchema = ZbarSchema> {
 
   /**
    * Insert a base relationship tuple directly. No schema validation,
-   * no effective relationship expansion. Returns the relationship ID.
+   * no effective relationship expansion, and — unlike the production
+   * `addRelation` path — no auto-insertion of the declared reverse base
+   * row. Callers that want both sides of a `{ type, reverse }` declaration
+   * as base rows must insert both explicitly. `rebuildEffectiveRelationships()`
+   * will still materialise derived reverse effectives via BFS. Returns
+   * the relationship ID.
    */
   async insertRelationship(
     ctx: MutationCtx | ActionCtx,

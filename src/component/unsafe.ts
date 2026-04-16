@@ -1,6 +1,6 @@
 import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { internal } from "./_generated/api";
+import { api } from "./_generated/api";
 import { expansionPool } from "./workpool";
 import type { GraphConfig } from "./types";
 
@@ -344,7 +344,7 @@ export const clearEffectiveRelationshipsChunked = internalMutation({
  * the graph expansion engine. This is an internal mutation that processes in
  * chunks and self-schedules for continuation.
  */
-export const rebuildEffectiveChunk = internalMutation({
+export const rebuildEffectiveChunk = mutation({
   args: {
     tenantId: v.optional(v.string()),
     graphConfig: v.any(),
@@ -477,7 +477,7 @@ export const rebuildEffectiveChunk = internalMutation({
       } else {
         await expansionPool.enqueueMutation(
           ctx,
-          internal.unsafe.rebuildEffectiveChunk,
+          api.unsafe.rebuildEffectiveChunk,
           {
             tenantId,
             graphConfig,
@@ -503,7 +503,21 @@ async function expandTraversalRules(ctx: any, args: any) {
     object: { type: string; id: string };
     path: any;
     depth: number;
-  }> = [{ subject, relation, object, path, depth: 1 }];
+    skipReverse?: boolean;
+  }> = [
+    {
+      subject,
+      relation,
+      object,
+      path,
+      depth: 1,
+      // Rebuild walks every base row independently, so both sides of a
+      // reverse-edge declaration are already scheduled. Skip the depth-1
+      // reverse push to avoid creating duplicate effective paths for the
+      // same underlying base pair.
+      skipReverse: true,
+    },
+  ];
 
   // We've already written the direct effective rel, so skip depth 1 expansion for the initial entry
   // but do traverse rules
@@ -682,6 +696,26 @@ async function expandTraversalRules(ctx: any, args: any) {
             }
           }
         }
+      }
+    }
+
+    // Effective reverse edges — mirror production BFS at
+    // src/component/mutations.ts so derived edges with a declared reverse
+    // also materialise the reverse side during rebuild.
+    if (graphConfig.reverseEdges && !current.skipReverse) {
+      const reverseRel =
+        graphConfig.reverseEdges?.[current.object.type]?.[current.relation]?.[
+          current.subject.type
+        ];
+      if (reverseRel && current.depth < maxWriteDepth) {
+        queue.push({
+          subject: current.object,
+          relation: reverseRel,
+          object: current.subject,
+          path: current.path,
+          depth: current.depth + 1,
+          skipReverse: true,
+        });
       }
     }
   }

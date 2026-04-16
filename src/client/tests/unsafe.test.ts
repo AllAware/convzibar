@@ -1021,3 +1021,92 @@ describe("ZbarUnsafe: End-to-End Migration Scenarios", () => {
     }
   });
 });
+
+// ============================================================================
+// Effective Reverse Edges in Rebuild
+// ============================================================================
+
+describe("ZbarUnsafe: Rebuild preserves effective reverse edges", () => {
+  const revSchema = createZbarSchema<any>()
+    .entity("user")
+    .entity("system", (e) =>
+      e
+        .relation("viewer", "user")
+        .relation("user_member", "viewer")
+        .relation("contact_member"),
+    )
+    .entity("contact", (e) =>
+      e.relation("owner", { type: "system", reverse: "contact_member" }),
+    )
+    .extend("user", (e) => e.relation("primary_contact", "contact"))
+    .extend("system", (e) =>
+      e.relation("contact_member", "user_member.primary_contact"),
+    )
+    .build();
+
+  test("derived contact_member edges and their reverse survive rebuild", async () => {
+    const t = setup();
+    const ctx = makeCtx(t);
+    const zbar = new Zbar(api, {
+      schema: revSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+    const unsafe = new ZbarUnsafe(api, {
+      schema: revSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    await zbar.addRelation(
+      ctx,
+      { type: "user", id: "alice" },
+      "viewer",
+      { type: "system", id: "sys1" },
+    );
+    await zbar.addRelation(
+      ctx,
+      { type: "contact", id: "c_alice" },
+      "primary_contact",
+      { type: "user", id: "alice" },
+    );
+
+    const effBefore = await t.run(async (innerCtx: any) =>
+      innerCtx.db.query("effectiveRelationships").collect(),
+    );
+    const memberBefore = effBefore.filter(
+      (e: any) =>
+        e.relation === "contact_member" &&
+        e.subjectKey === "contact:c_alice" &&
+        e.objectKey === "system:sys1",
+    );
+    const reverseBefore = effBefore.filter(
+      (e: any) =>
+        e.relation === "owner" &&
+        e.subjectKey === "system:sys1" &&
+        e.objectKey === "contact:c_alice",
+    );
+    expect(memberBefore.length).toBe(1);
+    expect(reverseBefore.length).toBe(1);
+
+    await unsafe.rebuildEffectiveRelationships(ctx);
+
+    const effAfter = await t.run(async (innerCtx: any) =>
+      innerCtx.db.query("effectiveRelationships").collect(),
+    );
+    const memberAfter = effAfter.filter(
+      (e: any) =>
+        e.relation === "contact_member" &&
+        e.subjectKey === "contact:c_alice" &&
+        e.objectKey === "system:sys1",
+    );
+    const reverseAfter = effAfter.filter(
+      (e: any) =>
+        e.relation === "owner" &&
+        e.subjectKey === "system:sys1" &&
+        e.objectKey === "contact:c_alice",
+    );
+    expect(memberAfter.length).toBe(1);
+    expect(reverseAfter.length).toBe(1);
+  });
+});
