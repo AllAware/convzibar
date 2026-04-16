@@ -551,3 +551,95 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     expect(sources.length).toBe(0);
   });
 });
+
+// ============================================================================
+// Schema: Multi-target reverse edges (one relation → multiple { type, reverse })
+// ============================================================================
+
+const multiReverseSchema = createZbarSchema<any>()
+  .entity("user")
+  .entity("org", (e) =>
+    e
+      .relation("members")
+      .relation("admin", "user"),
+  )
+  .entity("team", (e) =>
+    e
+      .relation("members")
+      .relation("admin", "user"),
+  )
+  .entity("person", (e) =>
+    e
+      .relation("belongs_to",
+        { type: "org", reverse: "members" },
+        { type: "team", reverse: "members" },
+      ),
+  )
+  .build();
+
+describe("Reverse Edge: Multi-target reverse declarations", () => {
+  test("each target type gets its own correct reverse relation name", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = new Zbar(api, {
+      schema: multiReverseSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const org = { type: "org" as const, id: "org1" };
+    const team = { type: "team" as const, id: "team1" };
+    const alice = { type: "person" as const, id: "alice" };
+    const bob = { type: "person" as const, id: "bob" };
+
+    // alice belongs_to org, bob belongs_to team
+    await zbar.addRelation(ctx, org, "belongs_to", alice);
+    await zbar.addRelation(ctx, team, "belongs_to", bob);
+
+    // Verify reverse edges: org should have alice as member, team should have bob as member
+    const orgMembers = await zbar.listDirect()
+      .object(org)
+      .relation("members")
+      .collect(ctx);
+    expect(orgMembers.length).toBe(1);
+    expect(orgMembers[0].subject.id).toBe("alice");
+
+    const teamMembers = await zbar.listDirect()
+      .object(team)
+      .relation("members")
+      .collect(ctx);
+    expect(teamMembers.length).toBe(1);
+    expect(teamMembers[0].subject.id).toBe("bob");
+  });
+
+  test("removing forward edge auto-removes correct reverse for each target type", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = new Zbar(api, {
+      schema: multiReverseSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const org = { type: "org" as const, id: "org1" };
+    const team = { type: "team" as const, id: "team1" };
+    const alice = { type: "person" as const, id: "alice" };
+
+    await zbar.addRelation(ctx, org, "belongs_to", alice);
+    await zbar.addRelation(ctx, team, "belongs_to", alice);
+
+    // Both reverses exist
+    let orgMembers = await zbar.listDirect().object(org).relation("members").collect(ctx);
+    let teamMembers = await zbar.listDirect().object(team).relation("members").collect(ctx);
+    expect(orgMembers.length).toBe(1);
+    expect(teamMembers.length).toBe(1);
+
+    // Remove alice from org only
+    await zbar.removeRelation(ctx, org, "belongs_to", alice);
+
+    orgMembers = await zbar.listDirect().object(org).relation("members").collect(ctx);
+    teamMembers = await zbar.listDirect().object(team).relation("members").collect(ctx);
+    expect(orgMembers.length).toBe(0);
+    expect(teamMembers.length).toBe(1); // team membership untouched
+  });
+});

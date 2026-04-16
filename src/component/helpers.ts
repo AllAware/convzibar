@@ -76,10 +76,18 @@ function getTargetEntityTypes(
 }
 
 export function parseSchemaToGraphConfig(schema: any): GraphConfig {
-  const rules: TraversalRule[] = [];
-  const reverseEdges: Record<string, Record<string, string>> = {};
+  // Deep-clone entities so that Pass 2 reverse-edge resolution does not
+  // mutate the caller's schema object.
+  schema = { ...schema, entities: JSON.parse(JSON.stringify(schema.entities || {})) };
 
-  // First pass: collect all reverse edges declared via { type, reverse } syntax
+  const rules: TraversalRule[] = [];
+  // reverseEdges: objectType -> relation -> subjectType -> reverseRelation
+  const reverseEdges: Record<string, Record<string, Record<string, string>>> =
+    {};
+
+  // First pass: collect all reverse edges declared via { type, reverse } syntax.
+  // A single relation may target multiple entity types, each with its own
+  // reverse name, so we key by (objectType, relation, subjectType).
   for (const [entityType, def] of Object.entries(schema.entities || {})) {
     const relations = (def as any).relations || {};
     for (const [relName, relDef] of Object.entries(relations)) {
@@ -89,31 +97,47 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
           const objItem = item as { type: string; reverse?: string };
           if (objItem.reverse) {
             reverseEdges[entityType] = reverseEdges[entityType] || {};
-            reverseEdges[entityType][relName] = objItem.reverse;
+            reverseEdges[entityType][relName] =
+              reverseEdges[entityType][relName] || {};
+            reverseEdges[entityType][relName][objItem.type] = objItem.reverse;
           }
         }
       }
     }
   }
 
-  // Resolve placeholder relations (undefined values) using reverseEdges.
-  // When entity A declares { type: 'B', reverse: 'foo' }, B.foo may be
-  // a placeholder (undefined). Replace it with the subject type (A) so
-  // that traversal processing finds correct target entity types.
+  // Resolve reverse-edge target types into the receiving relation.
+  // When entity A declares { type: 'B', reverse: 'foo' }, B.foo must
+  // include A as an entity-type target so that getTargetEntityTypes can
+  // discover what types are reachable through B.foo.
+  //
+  // If B.foo is still an undefined placeholder, simply set it to A.
+  // If B.foo was already populated (e.g. by .extend()), merge A into
+  // the existing targets so the type information is not lost.
   for (const [entityType, relMap] of Object.entries(reverseEdges)) {
-    for (const [relName, reverseRelName] of Object.entries(relMap)) {
+    for (const [relName, subjectMap] of Object.entries(relMap)) {
       const targetEntity = schema.entities[entityType];
-      // The target entity that has { type, reverse } is entityType.
-      // The type field tells us the entity that RECEIVES the reverse relation.
       const relDef = targetEntity?.relations?.[relName];
       if (!relDef) continue;
       const defs = Array.isArray(relDef) ? relDef : [relDef];
       for (const d of defs) {
         if (typeof d === "object" && d !== null && "reverse" in d) {
           const receiverEntity = (d as any).type as string;
+          const actualReverseName = (d as any).reverse as string;
+          if (!actualReverseName) continue;
           const receiverRels = schema.entities[receiverEntity]?.relations;
-          if (receiverRels && receiverRels[reverseRelName] === undefined) {
-            receiverRels[reverseRelName] = entityType;
+          if (!receiverRels) continue;
+          const current = receiverRels[actualReverseName];
+          if (current === undefined) {
+            receiverRels[actualReverseName] = entityType;
+          } else {
+            // Merge: ensure entityType is present as a target
+            const currentArr = Array.isArray(current) ? current : [current];
+            if (!currentArr.includes(entityType)) {
+              currentArr.push(entityType);
+              receiverRels[actualReverseName] =
+                currentArr.length === 1 ? currentArr[0] : currentArr;
+            }
           }
         }
       }

@@ -1095,22 +1095,58 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
         // Use structural relations (e.g. device.owner → system) when the
         // via entity connects to the object type via a typed relation,
         // otherwise fall back to acceptable (permission-derived) relations.
+        //
+        // Two directions must be checked:
+        //   Forward: via entity is the subject (e.g. device#owner@system)
+        //   Reverse: via entity is the object (e.g. system#device_member has
+        //            device as subject — used for transitive membership like
+        //            system.device_member = has_group.device_member)
         const structuralExpandRels = z.getStructuralRelations(
           objectType,
           lastVia.type,
         );
-        const expandRelations =
-          structuralExpandRels.length > 0
-            ? structuralExpandRels
-            : acceptableRelations;
-        promises.push(
-          ctx.runQuery(z.component.queries.listAccessibleObjectsFast, {
-            tenantId: z.options.tenantId,
-            subject: lastVia,
-            relations: expandRelations,
-            objectType,
-          }),
+        const reverseStructuralRels = z.getReverseStructuralRelations(
+          objectType,
+          lastVia.type,
         );
+        const hasStructural =
+          structuralExpandRels.length > 0 || reverseStructuralRels.length > 0;
+
+        if (hasStructural) {
+          // Forward: via is the subject of the relation on objectType
+          if (structuralExpandRels.length > 0) {
+            promises.push(
+              ctx.runQuery(z.component.queries.listAccessibleObjectsFast, {
+                tenantId: z.options.tenantId,
+                subject: lastVia,
+                relations: structuralExpandRels,
+                objectType,
+              }),
+            );
+          }
+          // Reverse: objectType entities are subjects of a relation on viaType
+          if (reverseStructuralRels.length > 0) {
+            promises.push(
+              ctx.runQuery(z.component.queries.listSubjectsWithAccessFast, {
+                tenantId: z.options.tenantId,
+                object: lastVia,
+                relations: reverseStructuralRels,
+                subjectType: objectType,
+              }),
+            );
+          }
+        } else {
+          // Fallback: use permission-derived relations (original behaviour
+          // for schemas that use # notation userset rewrites)
+          promises.push(
+            ctx.runQuery(z.component.queries.listAccessibleObjectsFast, {
+              tenantId: z.options.tenantId,
+              subject: lastVia,
+              relations: acceptableRelations,
+              objectType,
+            }),
+          );
+        }
 
         const results = await Promise.all(promises);
 
@@ -1120,11 +1156,33 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
           if ((results[i] as any[]).length === 0) return [];
         }
 
-        // Collect expand results
-        const expandRows = results[results.length - 1] as any[];
+        // Collect expand results — may come from multiple expand queries
+        // (forward structural + reverse structural)
         const candidateIds = new Set<string>();
-        for (const eff of expandRows) {
-          candidateIds.add(eff.objectKey.split(":")[1]);
+        let expandIdx = numChecks; // first expand result index
+
+        if (hasStructural) {
+          if (structuralExpandRels.length > 0) {
+            // Forward: via is subject, objects are the candidates
+            const fwdRows = results[expandIdx] as any[];
+            for (const eff of fwdRows) {
+              candidateIds.add(eff.objectKey.split(":")[1]);
+            }
+            expandIdx++;
+          }
+          if (reverseStructuralRels.length > 0) {
+            // Reverse: objects are subjects, via is the object
+            const revRows = results[expandIdx] as any[];
+            for (const eff of revRows) {
+              candidateIds.add(eff.subjectKey.split(":")[1]);
+            }
+            expandIdx++;
+          }
+        } else {
+          const fallbackRows = results[expandIdx] as any[];
+          for (const eff of fallbackRows) {
+            candidateIds.add(eff.objectKey.split(":")[1]);
+          }
         }
         if (candidateIds.size === 0) return [];
 
@@ -1222,23 +1280,60 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
         const promises: Promise<any>[] = [];
 
         // [0] Gate: via[N-1] → object.
-        // Use structural relations when the via entity connects to the
-        // object type via a typed relation (e.g. device.owner → system),
-        // otherwise fall back to acceptable (permission-derived) relations.
+        // Check connectivity between the via entity and the object.
+        // Must check both directions:
+        //   Forward: via is subject of a relation on objectType
+        //   Reverse: objectType is subject of a relation on viaType
         const structuralGateRels = z.getStructuralRelations(
           this._objectType,
           lastVia.type,
         );
-        const gateRelationsForSubjects =
-          structuralGateRels.length > 0
-            ? structuralGateRels
-            : acceptableRelations;
+        const reverseGateRels = z.getReverseStructuralRelations(
+          this._objectType,
+          lastVia.type,
+        );
+        const hasStructuralGate =
+          structuralGateRels.length > 0 || reverseGateRels.length > 0;
+
+        // Combined gate: fire both directions in parallel, gate passes
+        // if EITHER direction has a match.
+        const gatePromises: Promise<any[]>[] = [];
+        if (hasStructuralGate) {
+          if (structuralGateRels.length > 0) {
+            gatePromises.push(
+              ctx.runQuery(z.component.queries.checkPermissionFast, {
+                tenantId: z.options.tenantId,
+                subject: lastVia,
+                relations: structuralGateRels,
+                object,
+              }),
+            );
+          }
+          if (reverseGateRels.length > 0) {
+            gatePromises.push(
+              ctx.runQuery(z.component.queries.checkPermissionFast, {
+                tenantId: z.options.tenantId,
+                subject: object,
+                relations: reverseGateRels,
+                object: lastVia,
+              }),
+            );
+          }
+        } else {
+          gatePromises.push(
+            ctx.runQuery(z.component.queries.checkPermissionFast, {
+              tenantId: z.options.tenantId,
+              subject: lastVia,
+              relations: acceptableRelations,
+              object,
+            }),
+          );
+        }
+        // Wrap gate into a single promise that passes if any direction matches
         promises.push(
-          ctx.runQuery(z.component.queries.checkPermissionFast, {
-            tenantId: z.options.tenantId,
-            subject: lastVia,
-            relations: gateRelationsForSubjects,
-            object,
+          Promise.all(gatePromises).then((gateResults) => {
+            const combined = gateResults.flat();
+            return combined;
           }),
         );
 
@@ -2023,6 +2118,41 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
         ) {
           result.push(relName);
           break;
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Get relations on viaType where objectType entities are subjects.
+   * These are the reverse structural relations discovered from
+   * `{ type, reverse }` declarations on the objectType entity.
+   *
+   * Example: device.owner = { type: 'system', reverse: 'device_member' }
+   * → for objectType='device', viaType='system' returns ['device_member']
+   */
+  private getReverseStructuralRelations(
+    objectType: string,
+    viaType: string,
+  ): string[] {
+    const schema = this.options.schema;
+    const objectDef = schema.entities[objectType];
+    if (!objectDef?.relations) return [];
+
+    const result: string[] = [];
+    for (const [, relDef] of Object.entries(objectDef.relations as Record<string, any>)) {
+      const defs = Array.isArray(relDef) ? relDef : [relDef];
+      for (const d of defs) {
+        if (
+          typeof d === "object" &&
+          d !== null &&
+          "type" in d &&
+          "reverse" in d &&
+          (d as any).type === viaType &&
+          typeof (d as any).reverse === "string"
+        ) {
+          result.push((d as any).reverse);
         }
       }
     }

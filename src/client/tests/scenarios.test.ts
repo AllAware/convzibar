@@ -205,3 +205,166 @@ describe("Scenario: IoT platform (User → System → Device)", () => {
     await assertDbState(t, 3, 6);
   });
 });
+
+// ============================================================================
+// Scenario: Reverse edge placeholder overwritten by extend
+// When extend replaces an undefined placeholder with a traversal, the reverse
+// edge type resolution is lost, causing getTargetEntityTypes to return [].
+// ============================================================================
+
+const iotExtendSchema = createZbarSchema<any>()
+  .entity("user", (e) => e.relation("primary_contact"))
+  .entity("system", (e) =>
+    e
+      .relation("owner", "user")
+      .relation("admin", "user", "owner")
+      .relation("viewer", "user", "admin")
+      .relation("has_group")
+      .relation("user_member", "viewer")
+      .relation("device_member") // placeholder — will be auto-resolved by device.owner reverse
+      .relation("contact_member") // placeholder — will be auto-resolved by contact.owner reverse
+      .permission("view", "viewer"),
+  )
+  .entity("group", (e) =>
+    e
+      .relation("owner", { type: "system", reverse: "has_group" })
+      .relation("admin", "user", "owner.admin")
+      .relation("viewer", "user", "admin", "owner.viewer")
+      .relation("user_member", "viewer")
+      .relation("device_member") // placeholder
+      .relation("contact_member") // placeholder
+      .permission("view", "viewer"),
+  )
+  .entity("device", (e) =>
+    e
+      .relation("owner", { type: "system", reverse: "device_member" })
+      .relation("container", { type: "group", reverse: "device_member" })
+      .relation("admin", "user", "owner.admin", "container.admin")
+      .relation("viewer", "user", "admin", "owner.viewer", "container.viewer")
+      .relation("user_member", "viewer")
+      .permission("view", "viewer"),
+  )
+  .entity("contact", (e) =>
+    e
+      .relation("owner", { type: "system", reverse: "contact_member" })
+      .relation("container", { type: "group", reverse: "contact_member" })
+      .relation("admin", "owner.admin", "container.admin")
+      .relation("viewer", "admin", "owner.viewer", "container.viewer")
+      .permission("view", "viewer"),
+  )
+  .extend("group", (e) =>
+    e.relation("user_member", "device_member.user_member"),
+  )
+  .extend("user", (e) => e.relation("primary_contact", "contact"))
+  .extend("system", (e) =>
+    e
+      .relation("user_member", "has_group.user_member", "device_member.user_member")
+      .relation("device_member", "has_group.device_member")
+      .relation(
+        "contact_member",
+        "has_group.contact_member",
+        "user_member.primary_contact",
+      ),
+  )
+  .build();
+
+describe("Scenario: extend overwrites reverse-edge placeholder", () => {
+  test("direct device viewer propagates to system user_member and contact_member", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+
+    const zbar = new Zbar(api, {
+      schema: iotExtendSchema,
+      tenantId: TENANT,
+      asyncWrites: false,
+    });
+
+    const sys = { type: "system" as const, id: "s1" };
+    const device = { type: "device" as const, id: "d1" };
+    const user = { type: "user" as const, id: "u1" };
+    const contact = { type: "contact" as const, id: "c1" };
+
+    // Wire up: device owned by system, user is viewer of device, user has primary_contact
+    await zbar.addRelation(ctx, sys, "owner", device);
+    await zbar.addRelation(ctx, user, "viewer", device);
+    await zbar.addRelation(ctx, contact, "primary_contact", user);
+
+    // device.user_member should include user (via viewer local inheritance)
+    const deviceUserMembers = await zbar
+      .list()
+      .subject("user")
+      .relation("user_member")
+      .object(device)
+      .collect(ctx);
+    expect(deviceUserMembers.map((r) => r.subjectId)).toContain("u1");
+
+    // system.device_member should include device (reverse edge from device.owner)
+    const sysDeviceMembers = await zbar
+      .list()
+      .subject("device")
+      .relation("device_member")
+      .object(sys)
+      .collect(ctx);
+    expect(sysDeviceMembers.map((r) => r.subjectId)).toContain("d1");
+
+    // system.user_member should include user via device_member.user_member
+    const sysUserMembers = await zbar
+      .list()
+      .subject("user")
+      .relation("user_member")
+      .object(sys)
+      .collect(ctx);
+    expect(sysUserMembers.map((r) => r.subjectId)).toContain("u1");
+
+    // system.contact_member should include contact via user_member.primary_contact
+    const sysContactMembers = await zbar
+      .list()
+      .subject("contact")
+      .relation("contact_member")
+      .object(sys)
+      .collect(ctx);
+    expect(sysContactMembers.map((r) => r.subjectId)).toContain("c1");
+  });
+
+  test("device in group - user viewer propagates via group path", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+
+    const zbar = new Zbar(api, {
+      schema: iotExtendSchema,
+      tenantId: TENANT,
+      asyncWrites: false,
+    });
+
+    const sys = { type: "system" as const, id: "s1" };
+    const group = { type: "group" as const, id: "g1" };
+    const device = { type: "device" as const, id: "d1" };
+    const user = { type: "user" as const, id: "u1" };
+    const contact = { type: "contact" as const, id: "c1" };
+
+    // Wire up: system → group → device, user is viewer of device, user has primary_contact
+    await zbar.addRelation(ctx, sys, "owner", group);
+    await zbar.addRelation(ctx, group, "container", device);
+    await zbar.addRelation(ctx, sys, "owner", device);
+    await zbar.addRelation(ctx, user, "viewer", device);
+    await zbar.addRelation(ctx, contact, "primary_contact", user);
+
+    // system.user_member should include user (via group path)
+    const sysUserMembers = await zbar
+      .list()
+      .subject("user")
+      .relation("user_member")
+      .object(sys)
+      .collect(ctx);
+    expect(sysUserMembers.map((r) => r.subjectId)).toContain("u1");
+
+    // system.contact_member should include contact
+    const sysContactMembers = await zbar
+      .list()
+      .subject("contact")
+      .relation("contact_member")
+      .object(sys)
+      .collect(ctx);
+    expect(sysContactMembers.map((r) => r.subjectId)).toContain("c1");
+  });
+});
