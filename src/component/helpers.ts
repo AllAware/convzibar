@@ -1,4 +1,4 @@
-import type { GraphConfig, TraversalRule } from "./types";
+import type { GraphConfig, ReadTimePath, TraversalRule } from "./types";
 
 function expandRelation(
   schema: any,
@@ -88,6 +88,18 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
   // First pass: collect all reverse edges declared via { type, reverse } syntax.
   // A single relation may target multiple entity types, each with its own
   // reverse name, so we key by (objectType, relation, subjectType).
+  //
+  // We also store the INVERSE mapping so the lookup works symmetrically from
+  // either direction of the relationship. Given a declaration
+  //   entityType.relName = { type: targetType, reverse: reverseRel }
+  // the forward entry is reverseEdges[entityType][relName][targetType] = reverseRel
+  // and the inverse entry is reverseEdges[targetType][reverseRel][entityType] = relName.
+  // The initial-add lookup (reverseEdges[object.type][relation][subject.type])
+  // matches forward when adding the declared direction and matches the
+  // inverse when adding the reverse direction — giving bidirectional base
+  // edge auto-insertion. The BFS-effective-reverse-edge lookup uses the same
+  // key pattern, so derived relationships in either direction trigger the
+  // corresponding reverse.
   for (const [entityType, def] of Object.entries(schema.entities || {})) {
     const relations = (def as any).relations || {};
     for (const [relName, relDef] of Object.entries(relations)) {
@@ -100,6 +112,12 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
             reverseEdges[entityType][relName] =
               reverseEdges[entityType][relName] || {};
             reverseEdges[entityType][relName][objItem.type] = objItem.reverse;
+
+            // Inverse entry for bidirectional lookup.
+            reverseEdges[objItem.type] = reverseEdges[objItem.type] || {};
+            reverseEdges[objItem.type][objItem.reverse] =
+              reverseEdges[objItem.type][objItem.reverse] || {};
+            reverseEdges[objItem.type][objItem.reverse][entityType] = relName;
           }
         }
       }
@@ -323,8 +341,41 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
     return !isDominated;
   });
 
+  // Collect read-time relation declarations. These deliberately produce NO
+  // traversal rules — the BFS ignores them at write time. `can()` and
+  // `list()` evaluate them on demand.
+  //
+  // `sourceTypes` is resolved from the (now placeholder-filled) schema so
+  // the client can walk the first hop without re-running schema resolution
+  // at read time.
+  const readTimePaths: ReadTimePath[] = [];
+  for (const [entityType, def] of Object.entries(schema.entities || {})) {
+    const rtRels = (def as any).readTimeRelations as
+      | Array<{ derivedRelation: string; dotPath: string }>
+      | undefined;
+    if (!rtRels) continue;
+    for (const rt of rtRels) {
+      const parts = rt.dotPath.split(".");
+      if (parts.length !== 2) continue;
+      const [sourceRelation, targetRelation] = parts;
+      const sourceTypes = getTargetEntityTypes(
+        schema,
+        entityType,
+        sourceRelation,
+      );
+      readTimePaths.push({
+        objectType: entityType,
+        derivedRelation: rt.derivedRelation,
+        sourceRelation,
+        targetRelation,
+        sourceTypes,
+      });
+    }
+  }
+
   return {
     traversalRules: optimizedRules,
     reverseEdges: Object.keys(reverseEdges).length > 0 ? reverseEdges : undefined,
+    readTimePaths: readTimePaths.length > 0 ? readTimePaths : undefined,
   };
 }

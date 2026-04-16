@@ -44,6 +44,11 @@ export interface EntityDefinition {
     Array<string | { relation: string; condition: string }>
   >;
   propertyValidators?: Record<string, PropertyValidators>;
+  /**
+   * Dot-path relations evaluated at read time instead of materialised at
+   * write time. See {@link EntityBuilder.readTimeRelation}.
+   */
+  readTimeRelations?: Array<{ derivedRelation: string; dotPath: string }>;
 }
 
 export interface ZbarSchema<Data = any> {
@@ -302,6 +307,45 @@ export class EntityBuilder<
     this.def.propertyValidators[relation] = validators;
     return this as any;
   }
+
+  /**
+   * Declare a dot-path that should be evaluated at **read time** rather than
+   * materialised at write time. Unlike regular dot-paths passed to
+   * `.relation()` (which fan out across the entire subject population and
+   * write one effective edge per pair), read-time paths produce **no**
+   * traversal rules. `can()` and `list()` evaluate them on demand using 2–3
+   * indexed queries.
+   *
+   * Use this for relationships that would be prohibitively expensive to
+   * materialise — e.g. paths that traverse high-fan-out memberships — while
+   * still keeping the permission model concise.
+   *
+   * The `derivedRelation` must already exist on the current entity (declared
+   * via `.relation()`). The results of the read-time path are **unioned**
+   * with any materialised results when evaluating `can()` / `list()`.
+   *
+   * ```ts
+   * .entity('contact', e => e
+   *   .relation('viewer', 'user', 'admin')
+   *   .readTimeRelation('viewer', 'owner.user_member')
+   * )
+   * ```
+   */
+  readTimeRelation(
+    derivedRelation: keyof Relations & string,
+    ...dotPaths: string[]
+  ): this {
+    for (const path of dotPaths) {
+      if (!path.includes(".")) {
+        throw new Error(
+          `Zbar Schema Error: readTimeRelation requires a dot-path (got '${path}').`,
+        );
+      }
+      this.def.readTimeRelations = this.def.readTimeRelations ?? [];
+      this.def.readTimeRelations.push({ derivedRelation, dotPath: path });
+    }
+    return this;
+  }
 }
 
 export class SchemaBuilder<
@@ -403,6 +447,9 @@ export class SchemaBuilder<
       relations: { ...existing.relations },
       permissions: { ...existing.permissions },
       propertyValidators: { ...existing.propertyValidators },
+      ...(existing.readTimeRelations
+        ? { readTimeRelations: [...existing.readTimeRelations] }
+        : {}),
     };
     builder._mergeMode = true;
 
@@ -1244,6 +1291,24 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
         requestContext,
       );
 
+      // Union read-time path matches — these are not in the materialised
+      // graph by design. Deduplicate against validated IDs.
+      const readTimeIds = await z.listReadTimeObjects(
+        ctx,
+        subject,
+        objectType,
+        acceptableRelations,
+      );
+      if (readTimeIds.length > 0) {
+        const seen = new Set(validated.map((r: any) => r.id));
+        for (const id of readTimeIds) {
+          if (!seen.has(id)) {
+            seen.add(id);
+            validated.push({ id });
+          }
+        }
+      }
+
       return this._finalize(
         validated.map((r: any) => ({ objectId: r.id })),
       );
@@ -1435,6 +1500,22 @@ class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
         requestContext,
       );
 
+      const readTimeIds = await z.listReadTimeSubjects(
+        ctx,
+        object,
+        subjectType,
+        acceptableRelations,
+      );
+      if (readTimeIds.length > 0) {
+        const seen = new Set(validated.map((r: any) => r.id));
+        for (const id of readTimeIds) {
+          if (!seen.has(id)) {
+            seen.add(id);
+            validated.push({ id });
+          }
+        }
+      }
+
       return this._finalize(
         validated.map((r: any) => ({ subjectId: r.id })),
       );
@@ -1461,6 +1542,21 @@ export function createZbar<Schema extends ZbarSchema<Data>, Data = any>(
     enableAuditLog?: boolean;
     maxWriteDepth?: number;
     asyncWrites?: boolean;
+    /**
+     * Maximum recursion depth for chained read-time-relation evaluation.
+     *
+     * When evaluating a `readTimeRelation(derived, 'source.target')`, step 2
+     * checks whether the subject has `target` access on the source entity.
+     * If that materialised check misses, the evaluator recursively walks
+     * further read-time paths on the source entity, up to this depth.
+     *
+     * A higher value enables RT paths to chain through multiple layers
+     * (e.g. `notification_rule.viewer` → `contact.viewer` → `system.viewer`).
+     * A lower value caps read-time cost. Defaults to 3 — enough for typical
+     * schemas, small enough to prevent runaway on accidentally cyclic paths.
+     * Set to 0 to disable chaining entirely.
+     */
+    readTimeChainDepth?: number;
   },
 ) {
   return new Zbar<Schema, Data>(component, options);
@@ -1468,6 +1564,7 @@ export function createZbar<Schema extends ZbarSchema<Data>, Data = any>(
 
 export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
   private graphConfig: GraphConfig;
+  private readTimeChainDepth: number;
   private permissionRelationsCache = new Map<
     string,
     Array<{ relation: string; condition?: string }>
@@ -1482,6 +1579,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       enableAuditLog?: boolean;
       maxWriteDepth?: number;
       asyncWrites?: boolean;
+      readTimeChainDepth?: number;
     },
   ) {
     this.graphConfig = parseSchemaToGraphConfig(options.schema);
@@ -1490,6 +1588,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     }
     this.options.enableAuditLog = options.enableAuditLog ?? true;
     this.options.asyncWrites = options.asyncWrites ?? true;
+    this.readTimeChainDepth = options.readTimeChainDepth ?? 3;
   }
 
   withTenant(tenantId: string): Zbar<Schema, Data> {
@@ -1719,6 +1818,263 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     return true;
   }
 
+  /**
+   * For listObjects mode: return object IDs reachable from `subject` through
+   * any read-time dot-path whose derived relation is in
+   * `acceptableRelations`. Skips the materialised graph entirely — callers
+   * should union with materialised results and deduplicate.
+   *
+   * `depth` caps recursive chaining: when a read-time path's first hop
+   * ("which sources does subject have targetRelation access to?") would
+   * itself resolve through another read-time path, we recurse up to
+   * `readTimeChainDepth` levels so list semantics match `can()` semantics.
+   */
+  private async listReadTimeObjects(
+    ctx: QueryCtx | ActionCtx,
+    subject: { type: string; id: string },
+    objectType: string,
+    acceptableRelations: string[],
+    depth: number = 0,
+  ): Promise<string[]> {
+    const paths = this.graphConfig.readTimePaths;
+    if (!paths || paths.length === 0) return [];
+    const accepted = new Set(acceptableRelations);
+    const relevant = paths.filter(
+      (p) => p.objectType === objectType && accepted.has(p.derivedRelation),
+    );
+    if (relevant.length === 0) return [];
+
+    const found = new Set<string>();
+    for (const path of relevant) {
+      for (const sourceType of path.sourceTypes) {
+        const targetRelations = this.resolveRelationInheritance(
+          sourceType,
+          path.targetRelation,
+        ).map((t: { relation: string }) => t.relation);
+        if (targetRelations.length === 0) continue;
+
+        // Step 1a: materialised sources (subject has targetRelation on source).
+        const matSources: any[] = await ctx.runQuery(
+          this.component.queries.listAccessibleObjectsFast,
+          {
+            tenantId: this.options.tenantId,
+            subject,
+            relations: targetRelations,
+            objectType: sourceType,
+          },
+        );
+
+        const sourceIds = new Set<string>();
+        for (const s of matSources) {
+          sourceIds.add(s.objectKey.split(":")[1]);
+        }
+
+        // Step 1b: recursively gather sources reachable via further RT paths.
+        if (depth + 1 < this.readTimeChainDepth) {
+          const chainedSourceIds = await this.listReadTimeObjects(
+            ctx,
+            subject,
+            sourceType,
+            targetRelations,
+            depth + 1,
+          );
+          for (const id of chainedSourceIds) sourceIds.add(id);
+        }
+
+        if (sourceIds.size === 0) continue;
+
+        // Step 2: for each source, list objects of `objectType` where the
+        // source has `sourceRelation`. The source relation itself is
+        // assumed materialised (typical case).
+        for (const sourceId of sourceIds) {
+          const objects: any[] = await ctx.runQuery(
+            this.component.queries.listAccessibleObjectsFast,
+            {
+              tenantId: this.options.tenantId,
+              subject: { type: sourceType, id: sourceId },
+              relations: [path.sourceRelation],
+              objectType,
+            },
+          );
+          for (const obj of objects) {
+            found.add(obj.objectKey.split(":")[1]);
+          }
+        }
+      }
+    }
+
+    return [...found];
+  }
+
+  /**
+   * For listSubjects mode: return subject IDs (of `subjectType`) that reach
+   * `object` through any read-time dot-path whose derived relation is in
+   * `acceptableRelations`. Callers union with materialised results.
+   *
+   * `depth` caps recursive chaining: when step 2's materialised lookup on
+   * a source doesn't cover a given subject, we recurse through further RT
+   * paths on that source so list semantics match `can()` semantics.
+   */
+  private async listReadTimeSubjects(
+    ctx: QueryCtx | ActionCtx,
+    object: { type: string; id: string },
+    subjectType: string,
+    acceptableRelations: string[],
+    depth: number = 0,
+  ): Promise<string[]> {
+    const paths = this.graphConfig.readTimePaths;
+    if (!paths || paths.length === 0) return [];
+    const accepted = new Set(acceptableRelations);
+    const relevant = paths.filter(
+      (p) => p.objectType === object.type && accepted.has(p.derivedRelation),
+    );
+    if (relevant.length === 0) return [];
+
+    const found = new Set<string>();
+    for (const path of relevant) {
+      for (const sourceType of path.sourceTypes) {
+        const sources: any[] = await ctx.runQuery(
+          this.component.queries.listSubjectsWithAccessFast,
+          {
+            tenantId: this.options.tenantId,
+            object,
+            relations: [path.sourceRelation],
+            subjectType: sourceType,
+          },
+        );
+        if (sources.length === 0) continue;
+
+        const targetRelations = this.resolveRelationInheritance(
+          sourceType,
+          path.targetRelation,
+        ).map((t: { relation: string }) => t.relation);
+        if (targetRelations.length === 0) continue;
+
+        for (const eff of sources) {
+          const sourceId = eff.subjectKey.split(":")[1];
+          const sourceObj = { type: sourceType, id: sourceId };
+
+          // Step 2a: materialised subjects (subject has targetRelation on source).
+          const matSubjects: any[] = await ctx.runQuery(
+            this.component.queries.listSubjectsWithAccessFast,
+            {
+              tenantId: this.options.tenantId,
+              object: sourceObj,
+              relations: targetRelations,
+              subjectType,
+            },
+          );
+          for (const sub of matSubjects) {
+            found.add(sub.subjectKey.split(":")[1]);
+          }
+
+          // Step 2b: recursive RT chain — subjects who reach `sourceObj`
+          // through further read-time paths.
+          if (depth + 1 < this.readTimeChainDepth) {
+            const rtSubIds = await this.listReadTimeSubjects(
+              ctx,
+              sourceObj,
+              subjectType,
+              targetRelations,
+              depth + 1,
+            );
+            for (const id of rtSubIds) found.add(id);
+          }
+        }
+      }
+    }
+
+    return [...found];
+  }
+
+  /**
+   * Evaluate read-time dot-paths to determine whether `subject` reaches
+   * `object` via any declared `.readTimeRelation()` whose derived relation
+   * is in `acceptableRelations`.
+   *
+   * Walks the path as two indexed hops:
+   *   1. Find sources S connected via (S, sourceRelation, object).
+   *   2. For each S, check whether (subject, targetRelation*, S) exists,
+   *      expanding `targetRelation` through local inheritance on S's type.
+   *
+   * When the step-2 materialised check misses and `depth` is below the
+   * configured `readTimeChainDepth`, the evaluator recursively looks for
+   * read-time paths on S — enabling RT-over-RT chains such as
+   * `notification_rule.viewer` → `contact.viewer` → `system.viewer`.
+   *
+   * Short-circuits on the first hit. Returns false if no read-time paths
+   * are declared, none apply to this object type / relation set, or no
+   * path succeeds.
+   */
+  private async evaluateReadTimePaths(
+    ctx: QueryCtx | ActionCtx,
+    subject: { type: string; id: string },
+    object: { type: string; id: string },
+    acceptableRelations: string[],
+    depth: number = 0,
+  ): Promise<boolean> {
+    const paths = this.graphConfig.readTimePaths;
+    if (!paths || paths.length === 0) return false;
+
+    const accepted = new Set(acceptableRelations);
+    const relevant = paths.filter(
+      (p) => p.objectType === object.type && accepted.has(p.derivedRelation),
+    );
+    if (relevant.length === 0) return false;
+
+    for (const path of relevant) {
+      for (const sourceType of path.sourceTypes) {
+        const sourceRels: any[] = await ctx.runQuery(
+          this.component.queries.listSubjectsWithAccessFast,
+          {
+            tenantId: this.options.tenantId,
+            object,
+            relations: [path.sourceRelation],
+            subjectType: sourceType,
+          },
+        );
+        if (sourceRels.length === 0) continue;
+
+        const targetRelations = this.resolveRelationInheritance(
+          sourceType,
+          path.targetRelation,
+        ).map((t: { relation: string }) => t.relation);
+        if (targetRelations.length === 0) continue;
+
+        for (const eff of sourceRels) {
+          const sourceId = eff.subjectKey.split(":")[1];
+          const sourceObj = { type: sourceType, id: sourceId };
+
+          const hits: any[] = await ctx.runQuery(
+            this.component.queries.checkPermissionFast,
+            {
+              tenantId: this.options.tenantId,
+              subject,
+              relations: targetRelations,
+              object: sourceObj,
+            },
+          );
+          if (hits.length > 0) return true;
+
+          // Chain: if the materialised check missed on the source, look
+          // for further read-time paths on it. Bounded by `readTimeChainDepth`.
+          if (depth + 1 < this.readTimeChainDepth) {
+            const chained = await this.evaluateReadTimePaths(
+              ctx,
+              subject,
+              sourceObj,
+              targetRelations,
+              depth + 1,
+            );
+            if (chained) return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
   private resolveRelationInheritance(objectType: string, relation: string) {
     const cacheKey = `rel_inh:${objectType}:${relation}`;
     if (this.permissionRelationsCache.has(cacheKey)) {
@@ -1811,7 +2167,12 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       }
     }
 
-    return false;
+    return this.evaluateReadTimePaths(
+      ctx,
+      subject,
+      object,
+      acceptableRelations,
+    );
   }
 
 
@@ -1859,7 +2220,12 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
       }
     }
 
-    return false;
+    return this.evaluateReadTimePaths(
+      ctx,
+      subject,
+      object,
+      acceptableRelations,
+    );
   }
 
   /**

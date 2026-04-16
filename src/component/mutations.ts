@@ -125,6 +125,7 @@ async function addRelationInternal(ctx: any, args: any) {
     object: { type: string; id: string };
     path: any;
     depth: number;
+    skipReverse?: boolean;
   }> = [
     {
       subject,
@@ -132,6 +133,11 @@ async function addRelationInternal(ctx: any, args: any) {
       object,
       path: pathItem,
       depth: 1,
+      // The auto-inserted reverse below handles the base-reverse side for
+      // this explicit add. Skip the BFS effective-reverse-edge push here so
+      // we don't create duplicate effective paths for the same underlying
+      // base pair.
+      skipReverse: true,
     },
   ];
 
@@ -170,6 +176,7 @@ async function addRelationInternal(ctx: any, args: any) {
         object: subject,
         path: { baseIds: [revId] },
         depth: 1,
+        skipReverse: true,
       });
     }
   }
@@ -453,6 +460,29 @@ async function processAddChunkInternal(ctx: any, args: any) {
               }
             }
           }
+        }
+      }
+
+      // Effective reverse edges: when the BFS materialises a derived
+      // relationship that corresponds to a declared `{ reverse: … }` side,
+      // also materialise the other side so the bidirectional semantics of
+      // the declaration apply to derivations — not just explicit writes.
+      // `skipReverse` is set by the producer (initial-add items and the
+      // push below) to prevent reverse-of-reverse loops.
+      if (graphConfig.reverseEdges && !current.skipReverse) {
+        const reverseRel =
+          graphConfig.reverseEdges?.[current.object.type]?.[current.relation]?.[
+            current.subject.type
+          ];
+        if (reverseRel && current.depth < maxWriteDepth) {
+          queue.push({
+            subject: current.object,
+            relation: reverseRel,
+            object: current.subject,
+            path: current.path,
+            depth: current.depth + 1,
+            skipReverse: true,
+          });
         }
       }
     }
@@ -804,6 +834,30 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
                   });
                 }
               }
+            }
+          }
+        }
+
+        // Cascade through effective reverse edges — mirror of the add-path
+        // logic. When a derived relationship is torn down, the effective
+        // relationship on the reverse side must be pruned too. The `seen`
+        // set prevents reverse-of-reverse loops since re-queuing the same
+        // (subject, relation, object, cascadeId) is a no-op.
+        if (graphConfig.reverseEdges) {
+          const reverseRel =
+            graphConfig.reverseEdges?.[current.object.type]?.[
+              current.relation
+            ]?.[current.subject.type];
+          if (reverseRel) {
+            const queueKey = `${buildScopeKey(current.object.type, current.object.id)}:${reverseRel}:${buildScopeKey(current.subject.type, current.subject.id)}:${cascadeId}`;
+            if (!seen.has(queueKey)) {
+              seen.add(queueKey);
+              queue.push({
+                subject: current.object,
+                relation: reverseRel,
+                object: current.subject,
+                removedRelationId: cascadeId,
+              });
             }
           }
         }
