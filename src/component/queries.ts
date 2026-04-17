@@ -316,3 +316,81 @@ export const listSubjectsWithAccessFast = query({
     return results.flat();
   },
 });
+
+/**
+ * Batched forward expansion: for each `subject` × `relation`, return every
+ * effective edge whose object is of `objectType`. One Convex query instead
+ * of N client round-trips. Drives `Compose.expandObjects` so the planner's
+ * forward fan-out collapses to a single round-trip.
+ */
+export const listAccessibleObjectsBatch = query({
+  args: {
+    tenantId: v.optional(v.string()),
+    subjects: v.array(subjectValidator),
+    relations: v.array(v.string()),
+    objectType: v.string(),
+  },
+  handler: async (ctx: any, args: any) => {
+    const { tenantId, subjects, relations, objectType } = args;
+    if (subjects.length === 0 || relations.length === 0) return [];
+
+    const promises = subjects.flatMap((sub: any) => {
+      const sKey = buildScopeKey(sub.type, sub.id);
+      return relations.map((rel: string) =>
+        ctx.db
+          .query("effectiveRelationships")
+          .withIndex("by_tenant_subject_relation_object", (q: any) =>
+            q
+              .eq("tenantId", tenantId)
+              .eq("subjectKey", sKey)
+              .eq("relation", rel)
+              .gte("objectKey", `${objectType}:`)
+              .lt("objectKey", `${objectType}:\u{10FFFF}`),
+          )
+          .collect(),
+      );
+    });
+
+    const results = await Promise.all(promises);
+    return results.flat();
+  },
+});
+
+/**
+ * Batched reverse expansion: for each `object` × `relation`, return every
+ * effective edge whose subject is of `subjectType`. Drives
+ * `Compose.expandSubjects` so the planner's reverse fan-out collapses to
+ * a single round-trip.
+ */
+export const listSubjectsWithAccessBatch = query({
+  args: {
+    tenantId: v.optional(v.string()),
+    objects: v.array(objectValidator),
+    relations: v.array(v.string()),
+    subjectType: v.string(),
+  },
+  handler: async (ctx: any, args: any) => {
+    const { tenantId, objects, relations, subjectType } = args;
+    if (objects.length === 0 || relations.length === 0) return [];
+
+    const promises = objects.flatMap((obj: any) => {
+      const oKey = buildScopeKey(obj.type, obj.id);
+      return relations.map((rel: string) =>
+        ctx.db
+          .query("effectiveRelationships")
+          .withIndex("by_tenant_object_relation_subject", (q: any) =>
+            q
+              .eq("tenantId", tenantId)
+              .eq("objectKey", oKey)
+              .eq("relation", rel)
+              .gte("subjectKey", `${subjectType}:`)
+              .lt("subjectKey", `${subjectType}:\u{10FFFF}`),
+          )
+          .collect(),
+      );
+    });
+
+    const results = await Promise.all(promises);
+    return results.flat();
+  },
+});

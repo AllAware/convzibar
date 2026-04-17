@@ -16,9 +16,8 @@ import {
   resolvePermissionRelations,
   resolveRelationInheritance,
 } from "./resolvers";
-import { evaluateReadTimePaths } from "./read-time";
+import { evaluateManyPermissions, planRelation } from "./traversal";
 import {
-  validatePath,
   validateProperties,
   validateRelationParameter,
 } from "./validation";
@@ -111,6 +110,10 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
 
   /**
    * Determine if a subject has a specific relationship with an object.
+   *
+   * Plan-driven: compiles a `Union(ValidatedMaterialised, RT)` plan and
+   * evaluates its `check`. One path for both materialised + RT answers —
+   * no hand-rolled "try materialised, fall back to RT" scaffolding.
    */
   async hasRelationship<
     SubjectType extends keyof Schema["entities"] & string,
@@ -126,45 +129,14 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     const z = this._internal;
     const targets = resolveRelationInheritance(z, object.type, relation);
     if (targets.length === 0) return false;
-
-    const acceptableRelations = targets.map((t) => t.relation);
-
-    const effectiveRels = await ctx.runQuery(
-      this.component.queries.checkPermissionFast,
-      {
-        tenantId: z.tenantId,
-        subject,
-        relations: acceptableRelations,
-        object,
-      },
-    );
-
-    for (const eff of effectiveRels) {
-      const targetDef = targets.find((t) => t.relation === eff.relation);
-
-      for (const path of eff.paths) {
-        const isValid = await validatePath(
-          z,
-          path,
-          targetDef,
-          ctx,
-          subject,
-          object,
-          relation,
-          requestContext,
-        );
-
-        if (isValid) return true;
-      }
-    }
-
-    return evaluateReadTimePaths(
+    const plan = planRelation(
       z,
-      ctx,
-      subject,
-      object,
-      acceptableRelations,
+      object.type,
+      targets,
+      relation,
+      requestContext,
     );
+    return plan.check(ctx, subject, object);
   }
 
   async can<
@@ -181,59 +153,24 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     const z = this._internal;
     const targets = resolvePermissionRelations(z, object.type, permission);
     if (targets.length === 0) return false;
-
-    const acceptableRelations = targets.map((t) => t.relation);
-
-    const effectiveRels = await ctx.runQuery(
-      this.component.queries.checkPermissionFast,
-      {
-        tenantId: z.tenantId,
-        subject,
-        relations: acceptableRelations,
-        object,
-      },
-    );
-
-    for (const eff of effectiveRels) {
-      const targetDef = targets.find((t) => t.relation === eff.relation);
-
-      for (const path of eff.paths) {
-        const isValid = await validatePath(
-          z,
-          path,
-          targetDef,
-          ctx,
-          subject,
-          object,
-          permission,
-          requestContext,
-        );
-
-        if (isValid) return true;
-      }
-    }
-
-    return evaluateReadTimePaths(
+    const plan = planRelation(
       z,
-      ctx,
-      subject,
-      object,
-      acceptableRelations,
+      object.type,
+      targets,
+      permission,
+      requestContext,
     );
+    return plan.check(ctx, subject, object);
   }
 
   /**
    * Return every permission the subject currently holds on the object.
    *
-   * Enumerates all permissions declared on `object.type` in the schema,
-   * expands each to the set of relations that satisfies it, then issues a
-   * **single** `checkPermissionFast` query for the union of those relations.
-   * Effective relationships are mapped back to the owning permissions and
-   * validated against any conditions. Permissions not satisfied by the
-   * materialised graph fall back to read-time path evaluation.
-   *
-   * The returned array is typed as the literal union of permission names
-   * for that object type, so callers get autocomplete and narrowing.
+   * Delegates to `evaluateManyPermissions`, the minimum-work multi-
+   * permission evaluator: a single materialised query covers every
+   * target relation on the schema, and each permission's RT fallback is
+   * a parallel RT-branch plan on only the relations the materialised
+   * branch didn't resolve. Declaration order is preserved.
    *
    * ```ts
    * const perms = await zbar.getPermissions(ctx, user, device);
@@ -255,82 +192,21 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     ) as Array<EntityPermissions<Schema, ObjectType>>;
     if (permissions.length === 0) return [];
 
-    const permTargets = new Map<
-      string,
-      Array<{ relation: string; condition?: string }>
-    >();
-    const allRelations = new Set<string>();
-    for (const p of permissions) {
-      const targets = resolvePermissionRelations(z, object.type, p);
-      permTargets.set(p, targets);
-      for (const t of targets) allRelations.add(t.relation);
-    }
-    if (allRelations.size === 0) return [];
-
-    const effectiveRels: any[] = await ctx.runQuery(
-      this.component.queries.checkPermissionFast,
-      {
-        tenantId: z.tenantId,
-        subject,
-        relations: [...allRelations],
-        object,
-      },
+    const perms = permissions.map((permission) => ({
+      permission: permission as string,
+      targets: resolvePermissionRelations(z, object.type, permission),
+    }));
+    const granted = await evaluateManyPermissions(
+      z,
+      ctx,
+      subject,
+      object,
+      perms,
+      requestContext,
     );
-
-    const effByRelation = new Map<string, any>();
-    for (const eff of effectiveRels) effByRelation.set(eff.relation, eff);
-
-    const granted = new Set<string>();
-    const needsRT: Array<{ permission: string; relations: string[] }> = [];
-
-    await Promise.all(
-      permissions.map(async (permission) => {
-        const targets = permTargets.get(permission)!;
-        for (const target of targets) {
-          const eff = effByRelation.get(target.relation);
-          if (!eff) continue;
-          for (const path of eff.paths) {
-            const isValid = await validatePath(
-              z,
-              path,
-              target,
-              ctx,
-              subject,
-              object,
-              permission,
-              requestContext,
-            );
-            if (isValid) {
-              granted.add(permission);
-              return;
-            }
-          }
-        }
-        needsRT.push({
-          permission,
-          relations: targets.map((t) => t.relation),
-        });
-      }),
-    );
-
-    const rtPaths = z.graphConfig.readTimePaths;
-    if (rtPaths && rtPaths.length > 0 && needsRT.length > 0) {
-      const rtResults = await Promise.all(
-        needsRT.map(async ({ permission, relations }) => {
-          const ok = await evaluateReadTimePaths(
-            z,
-            ctx,
-            subject,
-            object,
-            relations,
-          );
-          return ok ? permission : null;
-        }),
-      );
-      for (const p of rtResults) if (p !== null) granted.add(p);
-    }
-
-    return permissions.filter((p) => granted.has(p));
+    // `evaluateManyPermissions` already preserves input order — just narrow
+    // back to the typed literal union so callers get autocomplete.
+    return granted as Array<EntityPermissions<Schema, ObjectType>>;
   }
 
   /**

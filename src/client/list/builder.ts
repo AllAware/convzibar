@@ -4,19 +4,14 @@ import {
   resolvePermissionRelations,
   resolveRelationInheritance,
 } from "../zbar/resolvers";
-import {
-  appendReadTimeHits,
-  hasAccessOrRT,
-  listReadTimeObjects,
-  listReadTimeSubjects,
-} from "../zbar/read-time";
+import { hasAccessOrRT } from "../zbar/read-time";
+import { planRelation } from "../zbar/traversal";
 import {
   getEntityRelations,
   getReverseStructuralRelations,
   getStructuralRelations,
   getViaRelevantRelations,
 } from "../zbar/structural";
-import { listWithValidation } from "../zbar/validation";
 
 /**
  * Internal implementation of the fluent list query builder.
@@ -104,6 +99,17 @@ export class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
     if (targets.length === 0) return [];
     const acceptableRelations = targets.map((t) => t.relation);
     const hasVia = this._via.length > 0;
+
+    // Single permission-check plan drives every flavour of list — no-via
+    // enumerates via expand*, via-slow-path verifies via checkBatch /
+    // checkBatchSubjects. Conditions + RT fallback live inside the plan.
+    const plan = planRelation(
+      z,
+      this._objectType,
+      targets,
+      relOrPerm,
+      requestContext,
+    );
 
     // Detect whether any conditions exist in the schema.  When there
     // are none we can skip the per-candidate permission verification
@@ -279,94 +285,20 @@ export class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
           );
         }
 
-        // Slow path: batch-verify + validate conditions
-        const effectiveRels = await ctx.runQuery(
-          z.component.queries.checkPermissionBatchObjects,
-          {
-            tenantId: z.tenantId,
-            subject,
-            relations: acceptableRelations,
-            objectType,
-            candidateObjectIds: [...candidateIds],
-          },
-        );
-
-        const validated = await listWithValidation(
-          z,
+        // Slow path: one plan.checkBatch covers materialised validation
+        // AND RT fallback in a single narrowing pass.
+        const hits = await plan.checkBatch(
           ctx,
-          effectiveRels,
-          targets,
-          (eff: any) => eff.objectKey.split(":")[1],
-          () => subject,
-          (_: any, id: string) => ({ type: objectType, id }),
-          relOrPerm,
-          requestContext,
-        );
-
-        // Candidates were already scoped by `.via()`; those the
-        // materialised check missed get a read-time probe.
-        await appendReadTimeHits(
-          z,
-          ctx,
-          validated,
-          candidateIds,
-          acceptableRelations,
-          (id: string) => ({
-            subject,
-            object: { type: objectType, id },
-          }),
-        );
-
-        return this._finalize(
-          validated.map((r: any) => ({ objectId: r.id })),
-        );
-      }
-
-      // ── No via: standard full-scan path ───────────────────────────
-      const effectiveRels = await ctx.runQuery(
-        z.component.queries.listAccessibleObjectsFast,
-        {
-          tenantId: z.tenantId,
           subject,
-          relations: acceptableRelations,
           objectType,
-        },
-      );
-
-      const validated = await listWithValidation(
-        z,
-        ctx,
-        effectiveRels,
-        targets,
-        (eff: any) => eff.objectKey.split(":")[1],
-        () => subject,
-        (_: any, id: string) => ({ type: objectType, id }),
-        relOrPerm,
-        requestContext,
-      );
-
-      // Union read-time path matches — these are not in the materialised
-      // graph by design. Deduplicate against validated IDs.
-      const readTimeIds = await listReadTimeObjects(
-        z,
-        ctx,
-        subject,
-        objectType,
-        acceptableRelations,
-      );
-      if (readTimeIds.length > 0) {
-        const seen = new Set(validated.map((r: any) => r.id));
-        for (const id of readTimeIds) {
-          if (!seen.has(id)) {
-            seen.add(id);
-            validated.push({ id });
-          }
-        }
+          [...candidateIds],
+        );
+        return this._finalize([...hits].map((id) => ({ objectId: id })));
       }
 
-      return this._finalize(
-        validated.map((r: any) => ({ objectId: r.id })),
-      );
+      // ── No via: plan-driven full enumeration ──────────────────────
+      const ids = await plan.expandObjects(ctx, subject, objectType);
+      return this._finalize([...ids].map((id) => ({ objectId: id })));
     } else {
       // listSubjects mode
       const object = { type: this._objectType, id: this._objectId! };
@@ -498,93 +430,20 @@ export class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
           );
         }
 
-        // Slow path
-        const effectiveRels = await ctx.runQuery(
-          z.component.queries.checkPermissionBatchSubjects,
-          {
-            tenantId: z.tenantId,
-            object,
-            relations: acceptableRelations,
-            subjectType,
-            candidateSubjectIds: [...candidateIds],
-          },
-        );
-
-        const validated = await listWithValidation(
-          z,
+        // Slow path: plan.checkBatchSubjects covers materialised validation
+        // AND RT fallback in a single narrowing pass.
+        const hits = await plan.checkBatchSubjects(
           ctx,
-          effectiveRels,
-          targets,
-          (eff: any) => eff.subjectKey.split(":")[1],
-          (eff: any, id: string) => ({
-            type: eff.subjectKey.split(":")[0],
-            id,
-          }),
-          () => object,
-          relOrPerm,
-          requestContext,
-        );
-
-        await appendReadTimeHits(
-          z,
-          ctx,
-          validated,
-          candidateIds,
-          acceptableRelations,
-          (id: string) => ({
-            subject: { type: subjectType, id },
-            object,
-          }),
-        );
-
-        return this._finalize(
-          validated.map((r: any) => ({ subjectId: r.id })),
-        );
-      }
-
-      // ── No via: standard full-scan path ───────────────────────────
-      const effectiveRels = await ctx.runQuery(
-        z.component.queries.listSubjectsWithAccessFast,
-        {
-          tenantId: z.tenantId,
           object,
-          relations: acceptableRelations,
           subjectType,
-        },
-      );
-
-      const validated = await listWithValidation(
-        z,
-        ctx,
-        effectiveRels,
-        targets,
-        (eff: any) => eff.subjectKey.split(":")[1],
-        (eff: any, id: string) => ({ type: eff.subjectKey.split(":")[0], id }),
-        () => object,
-        relOrPerm,
-        requestContext,
-      );
-
-      const readTimeIds = await listReadTimeSubjects(
-        z,
-        ctx,
-        object,
-        subjectType,
-        acceptableRelations,
-      );
-      if (readTimeIds.length > 0) {
-        const seen = new Set(validated.map((r: any) => r.id));
-        for (const id of readTimeIds) {
-          if (!seen.has(id)) {
-            seen.add(id);
-            validated.push({ id });
-          }
-        }
+          [...candidateIds],
+        );
+        return this._finalize([...hits].map((id) => ({ subjectId: id })));
       }
 
-      return this._finalize(
-        validated.map((r: any) => ({ subjectId: r.id })),
-      );
+      // ── No via: plan-driven full enumeration ──────────────────────
+      const ids = await plan.expandSubjects(ctx, object, subjectType);
+      return this._finalize([...ids].map((id) => ({ subjectId: id })));
     }
   }
 }
