@@ -69,19 +69,19 @@ async function effectiveRowExists(
 //      resources that are sources or recipients").
 //   2. Extends group.contact_member with `user_member.primary_contact`, giving
 //      groups the same primary-contact auto-enrolment the system already had.
-//   3. Drops `owner.viewer` and `container.viewer` from contact.viewer's
-//      materialised definition and re-adds them via `.readTimeRelation()`.
-//      Eliminates the O(#system_viewers × #primary-contact-derived contacts)
-//      write amplification — the worst in the schema.
-//   4. Makes notification_rule.viewer RT on `source.viewer` / `recipient.viewer`.
-//      Eliminates O(#rules × #viewers_per_source_or_recipient) amplification.
+//   3. Moves both `contact.admin` and `contact.viewer` to read-time paths.
+//      Eliminates O(#system_members × #primary-contact-derived contacts)
+//      write amplification on both viewer *and* admin tiers.
+//   4. Moves both `notification_rule.admin` and `notification_rule.viewer` to
+//      RT. Eliminates O(#rules × #members_per_source_or_recipient)
+//      amplification across the rule's entire permission set.
 //   5. Keeps device.viewer materialised on `owner.viewer` / `container.viewer`.
 //      The fan-out is modest (bounded by #devices × #system_viewers per
-//      system), and keeping it materialised lets notification_rule.viewer RT
-//      step-2 resolve device sources without chaining.
+//      system), and keeping it materialised lets the rule-source RT step-2
+//      resolve device sources without chaining.
 //
-// `device.admin`, `contact.admin`, `group.admin`, `system.admin` all stay
-// materialised — admin checks are the hot path for management permissions.
+// `device.admin`, `group.admin`, `system.admin` stay materialised — device /
+// group / system admin checks are the hot path for management permissions.
 // ============================================================================
 
 const iotSchema = createZbarSchema<any>()
@@ -135,9 +135,10 @@ const iotSchema = createZbarSchema<any>()
     e
       .relation("owner", { type: "system", reverse: "contact_member" })
       .relation("container", { type: "group", reverse: "contact_member" })
-      // Admin stays materialised — permission-critical.
-      .relation("admin", "owner.admin", "container.admin")
-      // Viewer drops `owner.viewer` / `container.viewer`; RT below.
+      // Both admin and viewer are RT — the whole contact permission set is
+      // resolved at read time to avoid any write amplification.
+      .relation("admin")
+      .readTimeRelation("admin", "owner.admin", "container.admin")
       .relation("viewer", "admin")
       .readTimeRelation("viewer", "owner.viewer", "container.viewer")
       .permission("view", "viewer")
@@ -162,9 +163,9 @@ const iotSchema = createZbarSchema<any>()
         "group#contact_member",
         "system#contact_member",
       )
-      .relation("admin", "source.admin", "recipient.admin")
-      // Viewer only gets admin inheritance materialised; source/recipient
-      // viewer access resolved at read time.
+      // Both admin and viewer are RT — no rule-access rows materialised.
+      .relation("admin")
+      .readTimeRelation("admin", "source.admin", "recipient.admin")
       .relation("viewer", "admin")
       .readTimeRelation("viewer", "source.viewer", "recipient.viewer")
       .permission("view", "viewer")
@@ -1251,4 +1252,330 @@ describe("Stress: multi-system IoT deployment", () => {
     expect(after.base).toBe(0);
     expect(after.effective).toBe(0);
   }, 60_000);
+});
+
+// ============================================================================
+// getPermissions — batched permission enumeration
+// ============================================================================
+
+describe("getPermissions on the IoT schema", () => {
+  test("owner of a system gets every permission declared on system", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const ownerUser = { type: "user" as const, id: "owner1" };
+    await zbar.addRelation(ctx, ownerUser, "owner", sys);
+
+    const perms = await zbar.getPermissions(ctx, ownerUser, sys);
+    expect([...perms].sort()).toEqual(
+      [
+        "manage_contacts",
+        "manage_groups",
+        "manage_members",
+        "manage_owners",
+        "manage_rules",
+        "view",
+      ].sort(),
+    );
+  });
+
+  test("admin gets every system permission except manage_owners", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const adminUser = { type: "user" as const, id: "admin1" };
+    await zbar.addRelation(ctx, adminUser, "admin", sys);
+
+    const perms = await zbar.getPermissions(ctx, adminUser, sys);
+    expect([...perms].sort()).toEqual(
+      [
+        "manage_contacts",
+        "manage_groups",
+        "manage_members",
+        "manage_rules",
+        "view",
+      ].sort(),
+    );
+    expect(perms).not.toContain("manage_owners");
+  });
+
+  test("viewer gets only 'view' on a system", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const viewerUser = { type: "user" as const, id: "viewer1" };
+    await zbar.addRelation(ctx, viewerUser, "viewer", sys);
+
+    const perms = await zbar.getPermissions(ctx, viewerUser, sys);
+    expect(perms).toEqual(["view"]);
+  });
+
+  test("subject with no access gets []", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const stranger = { type: "user" as const, id: "stranger" };
+
+    const perms = await zbar.getPermissions(ctx, stranger, sys);
+    expect(perms).toEqual([]);
+  });
+
+  test("entity type with no permissions declared returns []", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    // `user` defines no permissions in the schema — even a connected subject
+    // should get an empty array.
+    const alice = { type: "user" as const, id: "alice" };
+    const contact = { type: "contact" as const, id: "alice-contact" };
+    await zbar.addRelation(ctx, contact, "primary_contact", alice);
+
+    const perms = await zbar.getPermissions(ctx, contact, alice);
+    expect(perms).toEqual([]);
+  });
+
+  test("returned permissions are a subset of the schema's declared permissions", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const admin = { type: "user" as const, id: "admin1" };
+    await zbar.addRelation(ctx, admin, "admin", sys);
+
+    const declared = new Set(Object.keys(iotSchema.entities.system.permissions));
+    const perms = await zbar.getPermissions(ctx, admin, sys);
+    for (const p of perms) {
+      expect(declared.has(p)).toBe(true);
+    }
+  });
+
+  test("RT: system viewer gets ['view'] on a primary-contact-derived contact", async () => {
+    // contact.viewer is RT only (owner.viewer / container.viewer). No
+    // materialised rows exist on the contact; getPermissions must resolve
+    // the view permission through the RT fallback.
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const alice = { type: "user" as const, id: "alice" };
+    const bob = { type: "user" as const, id: "bob" };
+    const bobContact = { type: "contact" as const, id: "bob-contact" };
+
+    await zbar.addRelation(ctx, alice, "viewer", sys);
+    await zbar.addRelation(ctx, bob, "viewer", sys);
+    await zbar.addRelation(ctx, bobContact, "primary_contact", bob);
+
+    const perms = await zbar.getPermissions(ctx, alice, bobContact);
+    expect(perms).toEqual(["view"]);
+
+    // Sanity: no materialised viewer row exists — RT did the work.
+    expect(await effectiveRowExists(t, alice, "viewer", bobContact)).toBe(false);
+  });
+
+  test("RT: system admin gets ['view', 'manage'] on a primary-contact-derived contact", async () => {
+    // Both contact.admin and contact.viewer are RT. A system admin should
+    // satisfy both — `manage` via admin RT on owner.admin, and `view` via
+    // viewer's admin rewrite (admin path reuse) or the viewer RT path.
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const adminUser = { type: "user" as const, id: "admin1" };
+    const viewer = { type: "user" as const, id: "viewer1" };
+    const viewerContact = {
+      type: "contact" as const,
+      id: "viewer1-contact",
+    };
+
+    await zbar.addRelation(ctx, adminUser, "admin", sys);
+    await zbar.addRelation(ctx, viewer, "viewer", sys);
+    await zbar.addRelation(ctx, viewerContact, "primary_contact", viewer);
+
+    const perms = await zbar.getPermissions(ctx, adminUser, viewerContact);
+    expect([...perms].sort()).toEqual(["manage", "view"]);
+  });
+
+  test("RT: a plain viewer on a primary-contact-derived contact gets ['view'] but not 'manage'", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const alice = { type: "user" as const, id: "alice" };
+    const bob = { type: "user" as const, id: "bob" };
+    const bobContact = { type: "contact" as const, id: "bob-contact" };
+
+    await zbar.addRelation(ctx, alice, "viewer", sys);
+    await zbar.addRelation(ctx, bob, "viewer", sys);
+    await zbar.addRelation(ctx, bobContact, "primary_contact", bob);
+
+    const perms = await zbar.getPermissions(ctx, alice, bobContact);
+    expect(perms).toEqual(["view"]);
+    expect(perms).not.toContain("manage");
+  });
+
+  test("RT: outsider gets [] on contact even with RT paths declared", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const insider = { type: "user" as const, id: "insider" };
+    const insiderContact = {
+      type: "contact" as const,
+      id: "insider-contact",
+    };
+    const outsider = { type: "user" as const, id: "outsider" };
+
+    await zbar.addRelation(ctx, insider, "viewer", sys);
+    await zbar.addRelation(ctx, insiderContact, "primary_contact", insider);
+
+    const perms = await zbar.getPermissions(ctx, outsider, insiderContact);
+    expect(perms).toEqual([]);
+  });
+
+  test("RT: notification_rule admin gets ['view', 'manage'] via source.admin", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const admin = { type: "user" as const, id: "admin1" };
+    const rule = { type: "notification_rule" as const, id: "rule1" };
+
+    await zbar.addRelation(ctx, admin, "admin", sys);
+    await zbar.addRelation(ctx, sys, "source", rule);
+
+    const perms = await zbar.getPermissions(ctx, admin, rule);
+    expect([...perms].sort()).toEqual(["manage", "view"]);
+
+    // No (admin, viewer, rule) or (admin, admin, rule) materialised.
+    expect(await effectiveRowExists(t, admin, "viewer", rule)).toBe(false);
+    expect(await effectiveRowExists(t, admin, "admin", rule)).toBe(false);
+  });
+
+  test("RT: notification_rule viewer gets only ['view']", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const viewer = { type: "user" as const, id: "viewer1" };
+    const rule = { type: "notification_rule" as const, id: "rule1" };
+
+    await zbar.addRelation(ctx, viewer, "viewer", sys);
+    await zbar.addRelation(ctx, sys, "source", rule);
+
+    const perms = await zbar.getPermissions(ctx, viewer, rule);
+    expect(perms).toEqual(["view"]);
+  });
+
+  test("RT chain: system viewer reaches a rule through contact recipient → owner → viewer", async () => {
+    // This exercises the full RT chain across two entities:
+    //   notification_rule.viewer (RT: recipient.viewer)
+    //     → contact.viewer (RT: owner.viewer)
+    //       → materialised (alice, viewer, sys)
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const alice = { type: "user" as const, id: "alice" };
+    const bob = { type: "user" as const, id: "bob" };
+    const bobContact = { type: "contact" as const, id: "bob-contact" };
+    const rule = { type: "notification_rule" as const, id: "rule1" };
+
+    await zbar.addRelation(ctx, alice, "viewer", sys);
+    await zbar.addRelation(ctx, bob, "viewer", sys);
+    await zbar.addRelation(ctx, bobContact, "primary_contact", bob);
+    await zbar.addRelation(ctx, bobContact, "recipient", rule);
+
+    const perms = await zbar.getPermissions(ctx, alice, rule);
+    expect(perms).toEqual(["view"]);
+  });
+
+  test("RT chain disabled (depth=0): getPermissions returns [] when only chained RT would satisfy", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar({ readTimeChainDepth: 0 });
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const alice = { type: "user" as const, id: "alice" };
+    const bob = { type: "user" as const, id: "bob" };
+    const bobContact = { type: "contact" as const, id: "bob-contact" };
+    const rule = { type: "notification_rule" as const, id: "rule1" };
+
+    await zbar.addRelation(ctx, alice, "viewer", sys);
+    await zbar.addRelation(ctx, bob, "viewer", sys);
+    await zbar.addRelation(ctx, bobContact, "primary_contact", bob);
+    await zbar.addRelation(ctx, bobContact, "recipient", rule);
+
+    const perms = await zbar.getPermissions(ctx, alice, rule);
+    expect(perms).toEqual([]);
+  });
+
+  test("getPermissions and can() agree across every permission on an object", async () => {
+    // Parity check: whatever getPermissions returns must match, one-for-one,
+    // the set of permissions for which can() returns true. Exercises the
+    // batched path + RT fallback against the per-permission fallback.
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const sys = { type: "system" as const, id: "sys1" };
+    const grp = { type: "group" as const, id: "grp1" };
+    const dev = { type: "device" as const, id: "dev1" };
+    const alice = { type: "user" as const, id: "alice" };
+    const bob = { type: "user" as const, id: "bob" };
+    const bobContact = { type: "contact" as const, id: "bob-contact" };
+    const rule = { type: "notification_rule" as const, id: "rule1" };
+
+    await zbar.addRelation(ctx, sys, "owner", grp);
+    await zbar.addRelation(ctx, grp, "container", dev);
+    await zbar.addRelation(ctx, alice, "admin", sys);
+    await zbar.addRelation(ctx, bob, "viewer", sys);
+    await zbar.addRelation(ctx, bobContact, "primary_contact", bob);
+    await zbar.addRelation(ctx, bobContact, "recipient", rule);
+    await zbar.addRelation(ctx, dev, "source", rule);
+
+    const targets: Array<{
+      subject: { type: "user"; id: string };
+      object: { type: any; id: string };
+    }> = [
+      { subject: alice, object: sys },
+      { subject: alice, object: grp },
+      { subject: alice, object: dev },
+      { subject: alice, object: bobContact },
+      { subject: alice, object: rule },
+      { subject: bob, object: sys },
+      { subject: bob, object: bobContact },
+      { subject: bob, object: rule },
+    ];
+
+    for (const { subject, object } of targets) {
+      const allPerms = Object.keys(
+        (iotSchema.entities as any)[object.type]?.permissions || {},
+      );
+      const viaCan: string[] = [];
+      for (const p of allPerms) {
+        if (await (zbar as any).can(ctx, subject, p, object)) {
+          viaCan.push(p);
+        }
+      }
+      const viaGet = await zbar.getPermissions(ctx, subject, object);
+      expect([...viaGet].sort()).toEqual(viaCan.sort());
+    }
+  });
 });
