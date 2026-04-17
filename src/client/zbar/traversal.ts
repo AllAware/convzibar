@@ -1,5 +1,11 @@
 import type { ActionCtx, QueryCtx, ZbarInternal } from "../internal";
 import { resolveRelationInheritance } from "./resolvers";
+import {
+  getEntityRelations,
+  getReverseStructuralRelations,
+  getStructuralRelations,
+  getViaRelevantRelations,
+} from "./structural";
 import { listWithValidation, validatePath } from "./validation";
 
 // ============================================================================
@@ -38,6 +44,13 @@ export interface Entity {
 }
 
 export interface Traversal {
+  /**
+   * Rough leaf count — one unit per `effectiveRelationships` query the
+   * worst-case traversal would issue. Used by `Union.of` to order children
+   * so narrowing probes the cheapest paths first.
+   */
+  readonly cost: number;
+
   check(
     ctx: QueryCtx | ActionCtx,
     subject: Entity,
@@ -73,6 +86,162 @@ export interface Traversal {
     object: Entity,
     subjectType: string,
   ): Promise<Set<string>>;
+
+  /**
+   * Batched forward expansion: union of `objectType` IDs reachable from any
+   * of `subjects`. Lets chained `Compose` operators collapse the forward
+   * fan-out to O(depth) queries instead of O(branching ^ depth).
+   */
+  expandObjectsFromMany(
+    ctx: QueryCtx | ActionCtx,
+    subjects: readonly Entity[],
+    objectType: string,
+  ): Promise<Set<string>>;
+
+  /**
+   * Batched reverse expansion: union of `subjectType` IDs reaching any of
+   * `objects`. The mirror of `expandObjectsFromMany`; lets chained `Compose`
+   * reverse walks stay linear in depth.
+   */
+  expandSubjectsFromMany(
+    ctx: QueryCtx | ActionCtx,
+    objects: readonly Entity[],
+    subjectType: string,
+  ): Promise<Set<string>>;
+}
+
+// ---------------------------------------------------------------------------
+// Materialised query primitives.
+//
+// Seven one-liner helpers map `(shape, direction)` onto a Convex query. Both
+// `Materialised` and `ValidatedMaterialised` dispatch through these — the
+// only difference between the classes is what they do with the rows.
+// ---------------------------------------------------------------------------
+
+async function fetchCheckPoint(
+  z: ZbarInternal,
+  ctx: QueryCtx | ActionCtx,
+  subject: Entity,
+  relations: readonly string[],
+  object: Entity,
+): Promise<any[]> {
+  return ctx.runQuery(z.component.queries.checkPermissionFast, {
+    tenantId: z.tenantId,
+    subject,
+    relations: [...relations],
+    object,
+  });
+}
+
+async function fetchBatchObjects(
+  z: ZbarInternal,
+  ctx: QueryCtx | ActionCtx,
+  subject: Entity,
+  relations: readonly string[],
+  objectType: string,
+  candidateIds: readonly string[],
+): Promise<any[]> {
+  return ctx.runQuery(z.component.queries.checkPermissionBatchObjects, {
+    tenantId: z.tenantId,
+    subject,
+    relations: [...relations],
+    objectType,
+    candidateObjectIds: [...candidateIds],
+  });
+}
+
+async function fetchBatchSubjects(
+  z: ZbarInternal,
+  ctx: QueryCtx | ActionCtx,
+  object: Entity,
+  relations: readonly string[],
+  subjectType: string,
+  candidateIds: readonly string[],
+): Promise<any[]> {
+  return ctx.runQuery(z.component.queries.checkPermissionBatchSubjects, {
+    tenantId: z.tenantId,
+    object,
+    relations: [...relations],
+    subjectType,
+    candidateSubjectIds: [...candidateIds],
+  });
+}
+
+async function fetchExpandObjects(
+  z: ZbarInternal,
+  ctx: QueryCtx | ActionCtx,
+  subject: Entity,
+  relations: readonly string[],
+  objectType: string,
+): Promise<any[]> {
+  return ctx.runQuery(z.component.queries.listAccessibleObjectsFast, {
+    tenantId: z.tenantId,
+    subject,
+    relations: [...relations],
+    objectType,
+  });
+}
+
+async function fetchExpandSubjects(
+  z: ZbarInternal,
+  ctx: QueryCtx | ActionCtx,
+  object: Entity,
+  relations: readonly string[],
+  subjectType: string,
+): Promise<any[]> {
+  return ctx.runQuery(z.component.queries.listSubjectsWithAccessFast, {
+    tenantId: z.tenantId,
+    object,
+    relations: [...relations],
+    subjectType,
+  });
+}
+
+async function fetchExpandObjectsFromMany(
+  z: ZbarInternal,
+  ctx: QueryCtx | ActionCtx,
+  subjects: readonly Entity[],
+  relations: readonly string[],
+  objectType: string,
+): Promise<any[]> {
+  return ctx.runQuery(z.component.queries.listAccessibleObjectsBatch, {
+    tenantId: z.tenantId,
+    subjects: [...subjects],
+    relations: [...relations],
+    objectType,
+  });
+}
+
+async function fetchExpandSubjectsFromMany(
+  z: ZbarInternal,
+  ctx: QueryCtx | ActionCtx,
+  objects: readonly Entity[],
+  relations: readonly string[],
+  subjectType: string,
+): Promise<any[]> {
+  return ctx.runQuery(z.component.queries.listSubjectsWithAccessBatch, {
+    tenantId: z.tenantId,
+    objects: [...objects],
+    relations: [...relations],
+    subjectType,
+  });
+}
+
+function entityFromKey(scopeKey: string): Entity {
+  const idx = scopeKey.indexOf(":");
+  return { type: scopeKey.slice(0, idx), id: scopeKey.slice(idx + 1) };
+}
+
+function objectIds(rows: readonly any[]): Set<string> {
+  const ids = new Set<string>();
+  for (const r of rows) ids.add((r.objectKey as string).split(":")[1]);
+  return ids;
+}
+
+function subjectIds(rows: readonly any[]): Set<string> {
+  const ids = new Set<string>();
+  for (const r of rows) ids.add((r.subjectKey as string).split(":")[1]);
+  return ids;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +253,8 @@ export interface Traversal {
  * a union — operations succeed if any of them apply.
  */
 export class Materialised implements Traversal {
+  readonly cost = 1;
+
   constructor(
     private readonly z: ZbarInternal,
     public readonly relations: readonly string[],
@@ -95,16 +266,14 @@ export class Materialised implements Traversal {
     object: Entity,
   ): Promise<boolean> {
     if (this.relations.length === 0) return false;
-    const hits: any[] = await ctx.runQuery(
-      this.z.component.queries.checkPermissionFast,
-      {
-        tenantId: this.z.tenantId,
-        subject,
-        relations: [...this.relations],
-        object,
-      },
+    const rows = await fetchCheckPoint(
+      this.z,
+      ctx,
+      subject,
+      this.relations,
+      object,
     );
-    return hits.length > 0;
+    return rows.length > 0;
   }
 
   async checkBatch(
@@ -116,19 +285,16 @@ export class Materialised implements Traversal {
     if (this.relations.length === 0 || candidateIds.length === 0) {
       return new Set();
     }
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.checkPermissionBatchObjects,
-      {
-        tenantId: this.z.tenantId,
+    return objectIds(
+      await fetchBatchObjects(
+        this.z,
+        ctx,
         subject,
-        relations: [...this.relations],
+        this.relations,
         objectType,
-        candidateObjectIds: [...candidateIds],
-      },
+        candidateIds,
+      ),
     );
-    const hits = new Set<string>();
-    for (const r of rows) hits.add((r.objectKey as string).split(":")[1]);
-    return hits;
   }
 
   async checkBatchSubjects(
@@ -140,19 +306,16 @@ export class Materialised implements Traversal {
     if (this.relations.length === 0 || candidateIds.length === 0) {
       return new Set();
     }
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.checkPermissionBatchSubjects,
-      {
-        tenantId: this.z.tenantId,
+    return subjectIds(
+      await fetchBatchSubjects(
+        this.z,
+        ctx,
         object,
-        relations: [...this.relations],
+        this.relations,
         subjectType,
-        candidateSubjectIds: [...candidateIds],
-      },
+        candidateIds,
+      ),
     );
-    const hits = new Set<string>();
-    for (const r of rows) hits.add((r.subjectKey as string).split(":")[1]);
-    return hits;
   }
 
   async expandObjects(
@@ -161,18 +324,15 @@ export class Materialised implements Traversal {
     objectType: string,
   ): Promise<Set<string>> {
     if (this.relations.length === 0) return new Set();
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.listAccessibleObjectsFast,
-      {
-        tenantId: this.z.tenantId,
+    return objectIds(
+      await fetchExpandObjects(
+        this.z,
+        ctx,
         subject,
-        relations: [...this.relations],
+        this.relations,
         objectType,
-      },
+      ),
     );
-    const ids = new Set<string>();
-    for (const r of rows) ids.add((r.objectKey as string).split(":")[1]);
-    return ids;
   }
 
   async expandSubjects(
@@ -181,23 +341,21 @@ export class Materialised implements Traversal {
     subjectType: string,
   ): Promise<Set<string>> {
     if (this.relations.length === 0) return new Set();
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.listSubjectsWithAccessFast,
-      {
-        tenantId: this.z.tenantId,
+    return subjectIds(
+      await fetchExpandSubjects(
+        this.z,
+        ctx,
         object,
-        relations: [...this.relations],
+        this.relations,
         subjectType,
-      },
+      ),
     );
-    const ids = new Set<string>();
-    for (const r of rows) ids.add((r.subjectKey as string).split(":")[1]);
-    return ids;
   }
 
   /**
    * Batched forward expansion: union of objects of `objectType` reachable
-   * from any of `subjects`. One round-trip instead of N.
+   * from any of `subjects`. One round-trip instead of N. Falls through to
+   * the cheaper singleton query when only one subject is supplied.
    */
   async expandObjectsFromMany(
     ctx: QueryCtx | ActionCtx,
@@ -205,23 +363,24 @@ export class Materialised implements Traversal {
     objectType: string,
   ): Promise<Set<string>> {
     if (this.relations.length === 0 || subjects.length === 0) return new Set();
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.listAccessibleObjectsBatch,
-      {
-        tenantId: this.z.tenantId,
-        subjects: [...subjects],
-        relations: [...this.relations],
+    if (subjects.length === 1) {
+      return this.expandObjects(ctx, subjects[0], objectType);
+    }
+    return objectIds(
+      await fetchExpandObjectsFromMany(
+        this.z,
+        ctx,
+        subjects,
+        this.relations,
         objectType,
-      },
+      ),
     );
-    const ids = new Set<string>();
-    for (const r of rows) ids.add((r.objectKey as string).split(":")[1]);
-    return ids;
   }
 
   /**
    * Batched reverse expansion: union of subjects of `subjectType` reaching
-   * any of `objects`. One round-trip instead of N.
+   * any of `objects`. One round-trip instead of N. Falls through to the
+   * cheaper singleton query when only one object is supplied.
    */
   async expandSubjectsFromMany(
     ctx: QueryCtx | ActionCtx,
@@ -229,18 +388,18 @@ export class Materialised implements Traversal {
     subjectType: string,
   ): Promise<Set<string>> {
     if (this.relations.length === 0 || objects.length === 0) return new Set();
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.listSubjectsWithAccessBatch,
-      {
-        tenantId: this.z.tenantId,
-        objects: [...objects],
-        relations: [...this.relations],
+    if (objects.length === 1) {
+      return this.expandSubjects(ctx, objects[0], subjectType);
+    }
+    return subjectIds(
+      await fetchExpandSubjectsFromMany(
+        this.z,
+        ctx,
+        objects,
+        this.relations,
         subjectType,
-      },
+      ),
     );
-    const ids = new Set<string>();
-    for (const r of rows) ids.add((r.subjectKey as string).split(":")[1]);
-    return ids;
   }
 }
 
@@ -273,12 +432,36 @@ export class EdgeExpand {
     return [...ids].map((id) => ({ type: this.subjectType, id }));
   }
 
-  /** Forward fan-out across many intermediates — the step-B batch fix. */
+  /**
+   * Gather all intermediates reaching any of `objects`. One batched query
+   * instead of one per object — keeps reverse fan-in collapsed when a
+   * chained `Compose` walks the subject side backward. The singleton case
+   * still uses the non-batch query so it reads the cheaper index path.
+   */
+  async listMany(
+    ctx: QueryCtx | ActionCtx,
+    objects: readonly Entity[],
+  ): Promise<Entity[]> {
+    if (objects.length === 0) return [];
+    if (objects.length === 1) return this.list(ctx, objects[0]);
+    const ids = await this.mat.expandSubjectsFromMany(
+      ctx,
+      objects,
+      this.subjectType,
+    );
+    return [...ids].map((id) => ({ type: this.subjectType, id }));
+  }
+
+  /** Forward fan-out across many intermediates. */
   async listObjectsBatch(
     ctx: QueryCtx | ActionCtx,
     subjects: readonly Entity[],
     objectType: string,
   ): Promise<Set<string>> {
+    if (subjects.length === 0) return new Set();
+    if (subjects.length === 1) {
+      return this.mat.expandObjects(ctx, subjects[0], objectType);
+    }
     return this.mat.expandObjectsFromMany(ctx, subjects, objectType);
   }
 }
@@ -309,10 +492,14 @@ export class EdgeExpand {
  * step 2 takes the cheaper fixes.
  */
 export class Compose implements Traversal {
+  readonly cost: number;
+
   constructor(
     public readonly sourceSide: EdgeExpand,
     public readonly subjectSide: Traversal,
-  ) {}
+  ) {
+    this.cost = 1 + subjectSide.cost;
+  }
 
   async check(
     ctx: QueryCtx | ActionCtx,
@@ -362,9 +549,26 @@ export class Compose implements Traversal {
     subject: Entity,
     objectType: string,
   ): Promise<Set<string>> {
-    const midIds = await this.subjectSide.expandObjects(
+    return this.expandObjectsFromMany(ctx, [subject], objectType);
+  }
+
+  async expandSubjects(
+    ctx: QueryCtx | ActionCtx,
+    object: Entity,
+    subjectType: string,
+  ): Promise<Set<string>> {
+    return this.expandSubjectsFromMany(ctx, [object], subjectType);
+  }
+
+  async expandObjectsFromMany(
+    ctx: QueryCtx | ActionCtx,
+    subjects: readonly Entity[],
+    objectType: string,
+  ): Promise<Set<string>> {
+    if (subjects.length === 0) return new Set();
+    const midIds = await this.subjectSide.expandObjectsFromMany(
       ctx,
-      subject,
+      subjects,
       this.sourceSide.subjectType,
     );
     if (midIds.size === 0) return new Set();
@@ -375,19 +579,15 @@ export class Compose implements Traversal {
     return this.sourceSide.listObjectsBatch(ctx, midRefs, objectType);
   }
 
-  async expandSubjects(
+  async expandSubjectsFromMany(
     ctx: QueryCtx | ActionCtx,
-    object: Entity,
+    objects: readonly Entity[],
     subjectType: string,
   ): Promise<Set<string>> {
-    const mids = await this.sourceSide.list(ctx, object);
+    if (objects.length === 0) return new Set();
+    const mids = await this.sourceSide.listMany(ctx, objects);
     if (mids.length === 0) return new Set();
-    const perMid = await Promise.all(
-      mids.map((m) => this.subjectSide.expandSubjects(ctx, m, subjectType)),
-    );
-    const out = new Set<string>();
-    for (const s of perMid) for (const id of s) out.add(id);
-    return out;
+    return this.subjectSide.expandSubjectsFromMany(ctx, mids, subjectType);
   }
 }
 
@@ -403,7 +603,38 @@ export class Compose implements Traversal {
  * what wasn't already covered. `expand*` union the children's full results.
  */
 export class Union implements Traversal {
-  constructor(public readonly children: readonly Traversal[]) {}
+  readonly cost: number;
+
+  constructor(public readonly children: readonly Traversal[]) {
+    this.cost =
+      children.length === 0
+        ? 0
+        : children.reduce((m, c) => Math.min(m, c.cost), Infinity);
+  }
+
+  /**
+   * Build a Union from an argument list, applying the algebraic identities
+   * that keep plan trees tight:
+   *
+   *   • `EMPTY` children are dropped.
+   *   • Nested `Union`s are flattened one level.
+   *   • Zero children collapse to `EMPTY`.
+   *   • One child collapses to that child (no `Union` wrapper).
+   *   • Surviving children are sorted ascending by `cost`, so later
+   *     `checkBatch` narrowing probes the cheapest paths first.
+   */
+  static of(...children: readonly Traversal[]): Traversal {
+    const flat: Traversal[] = [];
+    for (const c of children) {
+      if (c === EMPTY) continue;
+      if (c instanceof Union) flat.push(...c.children);
+      else flat.push(c);
+    }
+    if (flat.length === 0) return EMPTY;
+    if (flat.length === 1) return flat[0];
+    flat.sort((a, b) => a.cost - b.cost);
+    return new Union(flat);
+  }
 
   async check(
     ctx: QueryCtx | ActionCtx,
@@ -444,13 +675,7 @@ export class Union implements Traversal {
     subject: Entity,
     objectType: string,
   ): Promise<Set<string>> {
-    if (this.children.length === 0) return new Set();
-    const perChild = await Promise.all(
-      this.children.map((c) => c.expandObjects(ctx, subject, objectType)),
-    );
-    const out = new Set<string>();
-    for (const s of perChild) for (const id of s) out.add(id);
-    return out;
+    return this.expandObjectsFromMany(ctx, [subject], objectType);
   }
 
   async expandSubjects(
@@ -458,9 +683,35 @@ export class Union implements Traversal {
     object: Entity,
     subjectType: string,
   ): Promise<Set<string>> {
-    if (this.children.length === 0) return new Set();
+    return this.expandSubjectsFromMany(ctx, [object], subjectType);
+  }
+
+  async expandObjectsFromMany(
+    ctx: QueryCtx | ActionCtx,
+    subjects: readonly Entity[],
+    objectType: string,
+  ): Promise<Set<string>> {
+    if (this.children.length === 0 || subjects.length === 0) return new Set();
     const perChild = await Promise.all(
-      this.children.map((c) => c.expandSubjects(ctx, object, subjectType)),
+      this.children.map((c) =>
+        c.expandObjectsFromMany(ctx, subjects, objectType),
+      ),
+    );
+    const out = new Set<string>();
+    for (const s of perChild) for (const id of s) out.add(id);
+    return out;
+  }
+
+  async expandSubjectsFromMany(
+    ctx: QueryCtx | ActionCtx,
+    objects: readonly Entity[],
+    subjectType: string,
+  ): Promise<Set<string>> {
+    if (this.children.length === 0 || objects.length === 0) return new Set();
+    const perChild = await Promise.all(
+      this.children.map((c) =>
+        c.expandSubjectsFromMany(ctx, objects, subjectType),
+      ),
     );
     const out = new Set<string>();
     for (const s of perChild) for (const id of s) out.add(id);
@@ -500,6 +751,7 @@ export class Union implements Traversal {
 // ---------------------------------------------------------------------------
 
 export const EMPTY: Traversal = {
+  cost: 0,
   async check() {
     return false;
   },
@@ -513,6 +765,12 @@ export const EMPTY: Traversal = {
     return new Set<string>();
   },
   async expandSubjects() {
+    return new Set<string>();
+  },
+  async expandObjectsFromMany() {
+    return new Set<string>();
+  },
+  async expandSubjectsFromMany() {
     return new Set<string>();
   },
 };
@@ -537,6 +795,7 @@ export const EMPTY: Traversal = {
  * branch no longer has to live as hand-rolled code outside the algebra.
  */
 export class ValidatedMaterialised<Data = unknown> implements Traversal {
+  readonly cost = 1;
   public readonly relations: string[];
 
   constructor(
@@ -557,17 +816,15 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     object: Entity,
   ): Promise<boolean> {
     if (this.relations.length === 0) return false;
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.checkPermissionFast,
-      {
-        tenantId: this.z.tenantId,
-        subject,
-        relations: this.relations,
-        object,
-      },
+    const rows = await fetchCheckPoint(
+      this.z,
+      ctx,
+      subject,
+      this.relations,
+      object,
     );
     for (const eff of rows) {
-      const targetDef = this._targetFor(eff.relation);
+      const targetDef = this.targets.find((t) => t.relation === eff.relation);
       for (const path of eff.paths) {
         if (
           await validatePath(
@@ -597,15 +854,13 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     if (this.relations.length === 0 || candidateIds.length === 0) {
       return new Set();
     }
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.checkPermissionBatchObjects,
-      {
-        tenantId: this.z.tenantId,
-        subject,
-        relations: this.relations,
-        objectType,
-        candidateObjectIds: [...candidateIds],
-      },
+    const rows = await fetchBatchObjects(
+      this.z,
+      ctx,
+      subject,
+      this.relations,
+      objectType,
+      candidateIds,
     );
     return this._validateRows(
       ctx,
@@ -625,15 +880,13 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     if (this.relations.length === 0 || candidateIds.length === 0) {
       return new Set();
     }
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.checkPermissionBatchSubjects,
-      {
-        tenantId: this.z.tenantId,
-        object,
-        relations: this.relations,
-        subjectType,
-        candidateSubjectIds: [...candidateIds],
-      },
+    const rows = await fetchBatchSubjects(
+      this.z,
+      ctx,
+      object,
+      this.relations,
+      subjectType,
+      candidateIds,
     );
     return this._validateRows(
       ctx,
@@ -650,14 +903,12 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     objectType: string,
   ): Promise<Set<string>> {
     if (this.relations.length === 0) return new Set();
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.listAccessibleObjectsFast,
-      {
-        tenantId: this.z.tenantId,
-        subject,
-        relations: this.relations,
-        objectType,
-      },
+    const rows = await fetchExpandObjects(
+      this.z,
+      ctx,
+      subject,
+      this.relations,
+      objectType,
     );
     return this._validateRows(
       ctx,
@@ -674,14 +925,12 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     subjectType: string,
   ): Promise<Set<string>> {
     if (this.relations.length === 0) return new Set();
-    const rows: any[] = await ctx.runQuery(
-      this.z.component.queries.listSubjectsWithAccessFast,
-      {
-        tenantId: this.z.tenantId,
-        object,
-        relations: this.relations,
-        subjectType,
-      },
+    const rows = await fetchExpandSubjects(
+      this.z,
+      ctx,
+      object,
+      this.relations,
+      subjectType,
     );
     return this._validateRows(
       ctx,
@@ -692,13 +941,55 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     );
   }
 
-  private _targetFor(relation: string) {
-    return this.targets.find((t) => t.relation === relation);
+  async expandObjectsFromMany(
+    ctx: QueryCtx | ActionCtx,
+    subjects: readonly Entity[],
+    objectType: string,
+  ): Promise<Set<string>> {
+    if (this.relations.length === 0 || subjects.length === 0) return new Set();
+    const rows = await fetchExpandObjectsFromMany(
+      this.z,
+      ctx,
+      subjects,
+      this.relations,
+      objectType,
+    );
+    // Rows from the batched query mix subjects; decode each row's own subject
+    // key so condition validation sees the right pair.
+    return this._validateRows(
+      ctx,
+      rows,
+      (eff) => eff.objectKey.split(":")[1],
+      (eff) => entityFromKey(eff.subjectKey),
+      (_eff, id) => ({ type: objectType, id }),
+    );
+  }
+
+  async expandSubjectsFromMany(
+    ctx: QueryCtx | ActionCtx,
+    objects: readonly Entity[],
+    subjectType: string,
+  ): Promise<Set<string>> {
+    if (this.relations.length === 0 || objects.length === 0) return new Set();
+    const rows = await fetchExpandSubjectsFromMany(
+      this.z,
+      ctx,
+      objects,
+      this.relations,
+      subjectType,
+    );
+    return this._validateRows(
+      ctx,
+      rows,
+      (eff) => eff.subjectKey.split(":")[1],
+      (_eff, id) => ({ type: subjectType, id }),
+      (eff) => entityFromKey(eff.objectKey),
+    );
   }
 
   private async _validateRows(
     ctx: QueryCtx | ActionCtx,
-    rows: any[],
+    rows: readonly any[],
     getId: (eff: any) => string,
     subjectResolver: (eff: any, id: string) => Entity,
     objectResolver: (eff: any, id: string) => Entity,
@@ -706,7 +997,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     const validated = await listWithValidation(
       this.z,
       ctx,
-      rows,
+      [...rows],
       [...this.targets],
       getId,
       subjectResolver,
@@ -845,8 +1136,7 @@ export function planRelation<Data = unknown>(
     : new Materialised(z, relations);
 
   const rts = rtBranches(z, objectType, new Set(relations), depth);
-  if (rts.length === 0) return direct;
-  return new Union([direct, ...rts]);
+  return Union.of(direct, ...rts);
 }
 
 // ============================================================================
@@ -854,13 +1144,14 @@ export function planRelation<Data = unknown>(
 //
 // `planRelation` gives each permission its own plan, which is clean but
 // costs one materialised query per permission. A `getPermissions` call asks
-// about many permissions at once on a shared (subject, object), so the
+// about many permissions at once on a shared `(subject, object)`, so the
 // minimum-work evaluator is:
 //
-//   1. ONE materialised query for the union of every target relation.
+//   1. ONE materialised batch covering the union of every target relation.
 //   2. Per-permission CPU-side validation of the pre-fetched rows.
-//   3. Per-permission RT fallback through `rtBranches` for whatever the
-//      materialised branch didn't resolve — all in parallel.
+//   3. Shared RT fallback: each `(derivedRelation, sourceType)` branch runs
+//      at most once. A branch that fires grants every still-pending
+//      permission whose targets include its `derivedRelation`.
 // ============================================================================
 
 /**
@@ -885,15 +1176,13 @@ export async function evaluateManyPermissions<Data = unknown>(
   for (const p of perms) for (const t of p.targets) allRelations.add(t.relation);
   if (allRelations.size === 0) return [];
 
-  // Single materialised batch — one round-trip covers every permission.
-  const rows: any[] = await ctx.runQuery(
-    z.component.queries.checkPermissionFast,
-    {
-      tenantId: z.tenantId,
-      subject,
-      relations: [...allRelations],
-      object,
-    },
+  // ── 1. Single materialised batch — one round-trip covers every permission.
+  const rows = await fetchCheckPoint(
+    z,
+    ctx,
+    subject,
+    [...allRelations],
+    object,
   );
   const rowsByRelation = new Map<string, any[]>();
   for (const r of rows) {
@@ -902,10 +1191,12 @@ export async function evaluateManyPermissions<Data = unknown>(
     else rowsByRelation.set(r.relation, [r]);
   }
 
-  // Per-permission CPU-side validation, then RT fallback (parallel).
-  const results = await Promise.all(
+  // ── 2. Per-permission CPU-side validation of pre-fetched rows.
+  const granted = new Set<string>();
+  const pending: typeof perms = [];
+  const matValidations = await Promise.all(
     perms.map(async ({ permission, targets }) => {
-      if (targets.length === 0) return null;
+      if (targets.length === 0) return { permission, targets, hit: false };
       for (const target of targets) {
         const matched = rowsByRelation.get(target.relation);
         if (!matched) continue;
@@ -923,22 +1214,317 @@ export async function evaluateManyPermissions<Data = unknown>(
                 requestContext,
               )
             ) {
-              return permission;
+              return { permission, targets, hit: true };
             }
           }
         }
       }
-      const rts = rtBranches(
-        z,
-        object.type,
-        new Set(targets.map((t) => t.relation)),
-        0,
-      );
-      if (rts.length === 0) return null;
-      const rt: Traversal = rts.length === 1 ? rts[0] : new Union(rts);
-      return (await rt.check(ctx, subject, object)) ? permission : null;
+      return { permission, targets, hit: false };
     }),
   );
+  for (const r of matValidations) {
+    if (r.hit) granted.add(r.permission);
+    else if (r.targets.length > 0) (pending as any).push(r);
+  }
 
-  return results.filter((p): p is string => p !== null);
+  // ── 3. Shared RT fallback — each branch evaluated once, results reused.
+  if (pending.length > 0) {
+    const pendingRelations = new Set<string>();
+    for (const p of pending) for (const t of p.targets) pendingRelations.add(t.relation);
+
+    // Build unique (derivedRelation, sourceType) branches across all pending
+    // permissions. Permissions that share an RT dot-path see one Compose,
+    // not one per permission.
+    const uniqueBranches: Array<{
+      derivedRelation: string;
+      branch: Traversal;
+    }> = [];
+    for (const rt of z.graphConfig.readTimePaths ?? []) {
+      if (rt.objectType !== object.type) continue;
+      if (!pendingRelations.has(rt.derivedRelation)) continue;
+      for (const sourceType of rt.sourceTypes) {
+        const targetRelations = resolveRelationInheritance(
+          z,
+          sourceType,
+          rt.targetRelation,
+        ).map((t) => t.relation);
+        if (targetRelations.length === 0) continue;
+        const sourceSide = new EdgeExpand(z, sourceType, [rt.sourceRelation]);
+        const canChain = 1 < z.readTimeChainDepth;
+        const subjectSide: Traversal = canChain
+          ? planRelation(
+              z,
+              sourceType,
+              targetRelations.map((r) => ({ relation: r })),
+              undefined,
+              undefined,
+              1,
+            )
+          : new Materialised(z, targetRelations);
+        uniqueBranches.push({
+          derivedRelation: rt.derivedRelation,
+          branch: new Compose(sourceSide, subjectSide),
+        });
+      }
+    }
+
+    if (uniqueBranches.length > 0) {
+      const branchHits = await Promise.all(
+        uniqueBranches.map((b) => b.branch.check(ctx, subject, object)),
+      );
+      const firedRelations = new Set<string>();
+      for (let i = 0; i < uniqueBranches.length; i++) {
+        if (branchHits[i]) firedRelations.add(uniqueBranches[i].derivedRelation);
+      }
+      for (const p of pending) {
+        for (const t of p.targets) {
+          if (firedRelations.has(t.relation)) {
+            granted.add(p.permission);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return perms.map((p) => p.permission).filter((p) => granted.has(p));
+}
+
+// ============================================================================
+// Via-chain planners.
+//
+// `.via()` pins one or more intermediate entities between the query's
+// subject and object. The runtime shape is always the same:
+//
+//   gate   — connectivity of the first boundary (subject → via[0] forward,
+//            or via[last] → object reverse).
+//   chain  — connectivity of each interior link (via[i] → via[i+1]).
+//   expand — range scan at the other boundary producing candidate IDs.
+//   verify — the permission-aware `plan.checkBatch(Subjects)` applied to
+//            the candidates. Skipped when the gate relations are tight AND
+//            the schema declares no conditions: write-time materialisation
+//            guarantees transitivity of every pinned hop, so reaching the
+//            candidate from the final via means reaching it from the
+//            subject.
+//
+// Both helpers run gate + chain + expand in parallel; the verify step
+// is serialised on the candidate set. `planRelation` is reused for every
+// connectivity check, so `.readTimeRelation()` declarations on the via
+// entities compose through the chain exactly as they do outside it.
+// ============================================================================
+
+/**
+ * Forward via: `subject → via[0] → … → via[last] → objects` where objects
+ * are enumerated and narrowed to the subjects the permission plan actually
+ * grants. Returns the final object-ID set.
+ */
+export async function collectViaObjects<Data = unknown>(
+  z: ZbarInternal,
+  ctx: QueryCtx | ActionCtx,
+  plan: Traversal,
+  subject: Entity,
+  via: readonly Entity[],
+  objectType: string,
+  acceptableRelations: readonly string[],
+  schemaHasConditions: boolean,
+  _requestContext?: Data,
+): Promise<Set<string>> {
+  if (via.length === 0) return new Set();
+  const firstVia = via[0];
+  const lastVia = via[via.length - 1];
+
+  // Gate: subject → firstVia. Prefer tight relations derived from userset
+  // rewrites on the object type; fall back to every relation on firstVia.
+  const tightGateRelations = getViaRelevantRelations(
+    z,
+    objectType,
+    [...acceptableRelations],
+    firstVia.type,
+  );
+  const isTightGate = tightGateRelations.length > 0;
+  const gateRelations = isTightGate
+    ? tightGateRelations
+    : getEntityRelations(z, firstVia.type);
+
+  const gatePromise = planRelation(
+    z,
+    firstVia.type,
+    gateRelations.map((r) => ({ relation: r })),
+  ).check(ctx, subject, firstVia);
+
+  // Chain: via[i] → via[i+1] using all relations on the target type. Uses
+  // `planRelation` so read-time declarations on via entities compose.
+  const chainPromises: Array<Promise<boolean>> = [];
+  for (let i = 0; i < via.length - 1; i++) {
+    const next = via[i + 1];
+    chainPromises.push(
+      planRelation(
+        z,
+        next.type,
+        getEntityRelations(z, next.type).map((r) => ({ relation: r })),
+      ).check(ctx, via[i], next),
+    );
+  }
+
+  // Expand: lastVia → objects. Structural typed relations preferred (either
+  // direction); acceptable relations as a last resort.
+  const structuralFwdRels = getStructuralRelations(z, objectType, lastVia.type);
+  const structuralRevRels = getReverseStructuralRelations(
+    z,
+    objectType,
+    lastVia.type,
+  );
+  const hasStructural =
+    structuralFwdRels.length > 0 || structuralRevRels.length > 0;
+
+  const expandPromises: Array<Promise<Set<string>>> = [];
+  if (hasStructural) {
+    if (structuralFwdRels.length > 0) {
+      expandPromises.push(
+        new Materialised(z, structuralFwdRels).expandObjects(
+          ctx,
+          lastVia,
+          objectType,
+        ),
+      );
+    }
+    if (structuralRevRels.length > 0) {
+      expandPromises.push(
+        new Materialised(z, structuralRevRels).expandSubjects(
+          ctx,
+          lastVia,
+          objectType,
+        ),
+      );
+    }
+  } else {
+    expandPromises.push(
+      new Materialised(z, [...acceptableRelations]).expandObjects(
+        ctx,
+        lastVia,
+        objectType,
+      ),
+    );
+  }
+
+  const [gatePassed, chainPassed, expandSets] = await Promise.all([
+    gatePromise,
+    Promise.all(chainPromises),
+    Promise.all(expandPromises),
+  ]);
+
+  if (!gatePassed) return new Set();
+  for (const c of chainPassed) if (!c) return new Set();
+
+  const candidateIds = new Set<string>();
+  for (const s of expandSets) for (const id of s) candidateIds.add(id);
+  if (candidateIds.size === 0) return new Set();
+
+  // Fast path: tight gate + no conditions → write-time transitivity
+  // guarantees the candidates already satisfy subject→object.
+  if (!schemaHasConditions && isTightGate) return candidateIds;
+
+  return plan.checkBatch(ctx, subject, objectType, [...candidateIds]);
+}
+
+/**
+ * Reverse via: `subjects → via[0] → … → via[last] → object`. Returns the
+ * subject-ID set narrowed to what the permission plan grants on the pinned
+ * `object`.
+ */
+export async function collectViaSubjects<Data = unknown>(
+  z: ZbarInternal,
+  ctx: QueryCtx | ActionCtx,
+  plan: Traversal,
+  object: Entity,
+  via: readonly Entity[],
+  subjectType: string,
+  acceptableRelations: readonly string[],
+  schemaHasConditions: boolean,
+  _requestContext?: Data,
+): Promise<Set<string>> {
+  if (via.length === 0) return new Set();
+  const firstVia = via[0];
+  const lastVia = via[via.length - 1];
+  const objectType = object.type;
+
+  // Expand: firstVia ← subjects. Tight relations (userset-rewrite-derived
+  // relations on firstVia.type) if any; otherwise every relation on the type.
+  const tightExpandRelations = getViaRelevantRelations(
+    z,
+    objectType,
+    [...acceptableRelations],
+    firstVia.type,
+  );
+  const isTightExpand = tightExpandRelations.length > 0;
+  const expandRelations = isTightExpand
+    ? tightExpandRelations
+    : getEntityRelations(z, firstVia.type);
+
+  const expandPromise = new Materialised(z, expandRelations).expandSubjects(
+    ctx,
+    firstVia,
+    subjectType,
+  );
+
+  // Gate: lastVia → object. Structural typed relations preferred; otherwise
+  // fall back to the permission-derived acceptable relations (composes with
+  // RT via `planRelation`).
+  const structuralFwdRels = getStructuralRelations(z, objectType, lastVia.type);
+  const structuralRevRels = getReverseStructuralRelations(
+    z,
+    objectType,
+    lastVia.type,
+  );
+  const hasStructural =
+    structuralFwdRels.length > 0 || structuralRevRels.length > 0;
+
+  let gatePromise: Promise<boolean>;
+  if (hasStructural) {
+    const checks: Array<Promise<boolean>> = [];
+    if (structuralFwdRels.length > 0) {
+      checks.push(
+        new Materialised(z, structuralFwdRels).check(ctx, lastVia, object),
+      );
+    }
+    if (structuralRevRels.length > 0) {
+      checks.push(
+        new Materialised(z, structuralRevRels).check(ctx, object, lastVia),
+      );
+    }
+    gatePromise = Promise.all(checks).then((rs) => rs.some(Boolean));
+  } else {
+    gatePromise = planRelation(
+      z,
+      objectType,
+      acceptableRelations.map((r) => ({ relation: r })),
+    ).check(ctx, lastVia, object);
+  }
+
+  // Chain: via[i] → via[i+1].
+  const chainPromises: Array<Promise<boolean>> = [];
+  for (let i = 0; i < via.length - 1; i++) {
+    const next = via[i + 1];
+    chainPromises.push(
+      planRelation(
+        z,
+        next.type,
+        getEntityRelations(z, next.type).map((r) => ({ relation: r })),
+      ).check(ctx, via[i], next),
+    );
+  }
+
+  const [gatePassed, chainPassed, candidateIds] = await Promise.all([
+    gatePromise,
+    Promise.all(chainPromises),
+    expandPromise,
+  ]);
+
+  if (!gatePassed) return new Set();
+  for (const c of chainPassed) if (!c) return new Set();
+  if (candidateIds.size === 0) return new Set();
+
+  if (!schemaHasConditions && isTightExpand) return candidateIds;
+
+  return plan.checkBatchSubjects(ctx, object, subjectType, [...candidateIds]);
 }

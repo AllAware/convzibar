@@ -189,36 +189,57 @@ export class EntityBuilder<
   }
 
   /**
-   * Declare a dot-path that should be evaluated at **read time** rather than
-   * materialised at write time. Unlike regular dot-paths passed to
-   * `.relation()` (which fan out across the entire subject population and
-   * write one effective edge per pair), read-time paths produce **no**
-   * traversal rules. `can()` and `list()` evaluate them on demand using 2–3
-   * indexed queries.
+   * Declare a path that should be evaluated at **read time** rather than
+   * materialised at write time. Unlike targets passed to `.relation()` (which
+   * fan out across the entire subject population and write one effective
+   * edge per pair), read-time paths produce **no** traversal rules. `can()`
+   * and `list()` evaluate them on demand using 2–3 indexed queries.
+   *
+   * Two path forms are supported:
+   *
+   *   1. Dot-path `'source.target'` — follow the local `source` relation to
+   *      an intermediate entity, then pick up its `target` relation:
+   *
+   *      ```ts
+   *      .entity('contact', e => e
+   *        .relation('owner', { type: 'system' })
+   *        .relation('viewer', 'user')
+   *        .readTimeRelation('viewer', 'owner.viewer')
+   *      )
+   *      ```
+   *
+   *   2. Userset `'type#target'` — when a subject of `type` is assigned to
+   *      the derived relation, expand through that entity's `target` relation
+   *      at read time. The derived relation must declare `type` as a typed
+   *      target (either `{ type: 'X' }` or the bare string `'X'`).
+   *
+   *      ```ts
+   *      .entity('device', e => e
+   *        .relation('viewer', 'user', { type: 'group' })
+   *        .readTimeRelation('viewer', 'group#viewer')
+   *      )
+   *      ```
    *
    * Use this for relationships that would be prohibitively expensive to
    * materialise — e.g. paths that traverse high-fan-out memberships — while
-   * still keeping the permission model concise.
-   *
-   * The `derivedRelation` must already exist on the current entity (declared
-   * via `.relation()`). The results of the read-time path are **unioned**
-   * with any materialised results when evaluating `can()` / `list()`.
-   *
-   * ```ts
-   * .entity('contact', e => e
-   *   .relation('viewer', 'user', 'admin')
-   *   .readTimeRelation('viewer', 'owner.user_member')
-   * )
-   * ```
+   * still keeping the permission model concise. The `derivedRelation` must
+   * already exist on the current entity (declared via `.relation()`). The
+   * results of the read-time path are **unioned** with any materialised
+   * results when evaluating `can()` / `list()`.
    */
   readTimeRelation(
     derivedRelation: keyof Relations & string,
-    ...dotPaths: string[]
+    ...paths: string[]
   ): this {
-    for (const path of dotPaths) {
-      if (!path.includes(".")) {
+    for (const path of paths) {
+      if (!path.includes(".") && !path.includes("#")) {
         throw new Error(
-          `Zbar Schema Error: readTimeRelation requires a dot-path (got '${path}').`,
+          `Zbar Schema Error: readTimeRelation requires a dot-path ('source.target') or a userset ('type#target'). Got '${path}'.`,
+        );
+      }
+      if (path.includes(".") && path.includes("#")) {
+        throw new Error(
+          `Zbar Schema Error: readTimeRelation path '${path}' mixes '.' and '#'; use exactly one.`,
         );
       }
       this.def.readTimeRelations = this.def.readTimeRelations ?? [];

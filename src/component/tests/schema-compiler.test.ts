@@ -288,3 +288,148 @@ describe("Schema Compiler Deduplication (Integration)", () => {
     await assertDbState(t, 2, 3);
   });
 });
+
+describe("Read-time cycle detection", () => {
+  test("accepts an acyclic RT chain", () => {
+    const schema = {
+      entities: {
+        user: { relations: {} },
+        system: {
+          relations: { member: [{ type: "user" }] },
+        },
+        org: {
+          relations: { owner: [{ type: "system" }] },
+          readTimeRelations: [{ derivedRelation: "viewer", dotPath: "owner.member" }],
+        },
+      },
+    } as any;
+    expect(() => parseSchemaToGraphConfig(schema)).not.toThrow();
+  });
+
+  test("rejects a direct self-cycle (A#x → A#x)", () => {
+    const schema = {
+      entities: {
+        a: {
+          relations: { self: [{ type: "a" }] },
+          readTimeRelations: [{ derivedRelation: "viewer", dotPath: "self.viewer" }],
+        },
+      },
+    } as any;
+    expect(() => parseSchemaToGraphConfig(schema)).toThrow(
+      /cycle/i,
+    );
+  });
+
+  test("rejects a two-entity cycle (A → B → A)", () => {
+    const schema = {
+      entities: {
+        a: {
+          relations: { to_b: [{ type: "b" }] },
+          readTimeRelations: [{ derivedRelation: "x", dotPath: "to_b.y" }],
+        },
+        b: {
+          relations: { to_a: [{ type: "a" }] },
+          readTimeRelations: [{ derivedRelation: "y", dotPath: "to_a.x" }],
+        },
+      },
+    } as any;
+    expect(() => parseSchemaToGraphConfig(schema)).toThrow(
+      /cycle/i,
+    );
+  });
+});
+
+// ============================================================================
+// Userset read-time paths.
+//
+// `.readTimeRelation('viewer', 'group#viewer')` on `device` means: at read
+// time, any `group` written to `device.viewer` is expanded via the group's
+// `viewer` relation. It produces the same Compose shape as a dot-path RT
+// but sourced from the derived relation itself rather than a structural
+// navigation relation.
+// ============================================================================
+
+describe("Userset read-time relations", () => {
+  test("compiles to the expected ReadTimePath", () => {
+    const schema = {
+      entities: {
+        user: { relations: {} },
+        group: { relations: { viewer: [{ type: "user" }] } },
+        device: {
+          relations: { viewer: ["user", { type: "group" }] },
+          readTimeRelations: [
+            { derivedRelation: "viewer", dotPath: "group#viewer" },
+          ],
+        },
+      },
+    } as any;
+
+    const config = parseSchemaToGraphConfig(schema);
+    expect(config.readTimePaths).toEqual([
+      {
+        objectType: "device",
+        derivedRelation: "viewer",
+        sourceRelation: "viewer",
+        targetRelation: "viewer",
+        sourceTypes: ["group"],
+      },
+    ]);
+  });
+
+  test("produces no traversal rules — the whole point is to skip materialisation", () => {
+    const schema = {
+      entities: {
+        user: { relations: {} },
+        group: { relations: { viewer: [{ type: "user" }] } },
+        device: {
+          relations: { viewer: [{ type: "group" }] },
+          readTimeRelations: [
+            { derivedRelation: "viewer", dotPath: "group#viewer" },
+          ],
+        },
+      },
+    } as any;
+
+    const config = parseSchemaToGraphConfig(schema);
+    // No userset rewrite → BFS generates no traversal rules for this
+    // declaration. Base-edge writes remain, but the fan-out is avoided.
+    expect(config.traversalRules).toEqual([]);
+  });
+
+  test("throws when the derived relation does not declare the userset type as a target", () => {
+    const schema = {
+      entities: {
+        user: { relations: {} },
+        group: { relations: { viewer: [{ type: "user" }] } },
+        device: {
+          // viewer only accepts 'user' — adding a group to viewer is
+          // impossible, so the 'group#viewer' RT declaration is dead weight.
+          relations: { viewer: ["user"] },
+          readTimeRelations: [
+            { derivedRelation: "viewer", dotPath: "group#viewer" },
+          ],
+        },
+      },
+    } as any;
+
+    expect(() => parseSchemaToGraphConfig(schema)).toThrow(
+      /declare 'group' as a typed target/i,
+    );
+  });
+
+  test("cycle detection follows userset edges (A#x → B#y → A#x)", () => {
+    const schema = {
+      entities: {
+        a: {
+          relations: { x: [{ type: "b" }] },
+          readTimeRelations: [{ derivedRelation: "x", dotPath: "b#y" }],
+        },
+        b: {
+          relations: { y: [{ type: "a" }] },
+          readTimeRelations: [{ derivedRelation: "y", dotPath: "a#x" }],
+        },
+      },
+    } as any;
+    expect(() => parseSchemaToGraphConfig(schema)).toThrow(/cycle/i);
+  });
+});

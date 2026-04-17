@@ -1365,3 +1365,177 @@ describe("evaluateManyPermissions (getPermissions' minimum-work evaluator)", () 
     expect(counts.checkPermissionFast).toBe(0);
   });
 });
+
+// ============================================================================
+// Userset read-time relations.
+//
+// `device.readTimeRelation('viewer', 'group#viewer')` should behave as if
+// membership in a group that is (directly) a viewer of the device grants
+// viewer access transitively — but without materialising a per-user edge.
+//
+// The RT compiler already maps userset paths onto the same Compose shape
+// that dot-paths use, so these tests pin three guarantees:
+//   1. The compiled plan is `Union(direct, Compose(EdgeExpand, …))` and the
+//      edge's subject type is the userset type (not the dot-path source).
+//   2. End-to-end access via the group membership grants the permission.
+//   3. No effective `user → device` row is written; the fan-out is zero.
+// ============================================================================
+
+const usersetSchema = createZbarSchema<any>()
+  .entity("user", (e) => e)
+  .entity("group", (e) =>
+    e
+      // admins inherit viewer (admin is a sub-relation of viewer) — the
+      // conventional role-hierarchy shape where higher roles imply lower.
+      .relation("admin", "user")
+      .relation("viewer", "user", "admin"),
+  )
+  .entity("device", (e) =>
+    e
+      .relation("viewer", "user", { type: "group" })
+      .readTimeRelation("viewer", "group#viewer")
+      .permission("view", "viewer"),
+  )
+  .build();
+
+const mkUsersetZbar = () =>
+  new Zbar(api, {
+    schema: usersetSchema,
+    tenantId: TENANT,
+    asyncWrites: false,
+  });
+
+describe("userset readTimeRelation", () => {
+  test("compiles to Union(direct, Compose(EdgeExpand(group, [viewer]), …))", () => {
+    const zbar = mkUsersetZbar();
+    const z = (zbar as any)._internal as ZbarInternal;
+    const plan = planRelation(
+      z,
+      "device",
+      [{ relation: "viewer" }],
+      undefined,
+    ) as Union;
+    expect(plan).toBeInstanceOf(Union);
+    expect(plan.children[0]).toBeInstanceOf(Materialised);
+    const compose = plan.children[1] as Compose;
+    expect(compose).toBeInstanceOf(Compose);
+    // The subject type walked first is the userset type ('group').
+    expect(compose.sourceSide.subjectType).toBe("group");
+    // The edge relation is the derived relation itself — that's how the
+    // userset semantics differ from a dot-path (where the edge relation is
+    // the source of the dot).
+    expect(compose.sourceSide.relations).toEqual(["viewer"]);
+  });
+
+  test("grants access through a group viewer membership", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkUsersetZbar();
+
+    const user = { type: "user" as const, id: "alice" };
+    const group = { type: "group" as const, id: "g1" };
+    const device = { type: "device" as const, id: "d1" };
+
+    await zbar.addRelation(ctx, user, "viewer", group);
+    await zbar.addRelation(ctx, group, "viewer", device);
+
+    expect(await zbar.can(ctx, user, "view", device)).toBe(true);
+  });
+
+  test("grants access via the inheritance chain on the userset side (group.admin ⇒ group.viewer)", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkUsersetZbar();
+
+    const user = { type: "user" as const, id: "alice" };
+    const group = { type: "group" as const, id: "g1" };
+    const device = { type: "device" as const, id: "d1" };
+
+    // admin inherits viewer on group; since group is a viewer of device, a
+    // group-admin user should also be granted device.view at read time.
+    await zbar.addRelation(ctx, user, "admin", group);
+    await zbar.addRelation(ctx, group, "viewer", device);
+
+    expect(await zbar.can(ctx, user, "view", device)).toBe(true);
+  });
+
+  test("denies users who are not members of any viewer group", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkUsersetZbar();
+
+    const user = { type: "user" as const, id: "alice" };
+    const group = { type: "group" as const, id: "g1" };
+    const device = { type: "device" as const, id: "d1" };
+
+    // Group is a viewer of device but alice is not a member.
+    await zbar.addRelation(ctx, group, "viewer", device);
+
+    expect(await zbar.can(ctx, user, "view", device)).toBe(false);
+  });
+
+  test("writes no user→device effective row — fan-out stays zero", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkUsersetZbar();
+
+    const user = { type: "user" as const, id: "alice" };
+    const group = { type: "group" as const, id: "g1" };
+    const device = { type: "device" as const, id: "d1" };
+
+    await zbar.addRelation(ctx, user, "viewer", group);
+    await zbar.addRelation(ctx, group, "viewer", device);
+
+    // Access is granted at read time; no materialised user→device row.
+    expect(await zbar.can(ctx, user, "view", device)).toBe(true);
+    expect(await effectiveRowExists(t, user, "viewer", device)).toBe(false);
+  });
+
+  test("list().object('device').subject(user) enumerates RT-derived devices", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkUsersetZbar();
+
+    const user = { type: "user" as const, id: "alice" };
+    const group = { type: "group" as const, id: "g1" };
+    const d1 = { type: "device" as const, id: "d1" };
+    const d2 = { type: "device" as const, id: "d2" };
+
+    await zbar.addRelation(ctx, user, "viewer", group);
+    await zbar.addRelation(ctx, group, "viewer", d1);
+    await zbar.addRelation(ctx, group, "viewer", d2);
+
+    const rows = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(user)
+      .collect(ctx);
+    expect(rows.map((r: any) => r.objectId).sort()).toEqual(["d1", "d2"]);
+  });
+
+  test("list().object(device).subject('user') enumerates RT-derived subjects", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkUsersetZbar();
+
+    const alice = { type: "user" as const, id: "alice" };
+    const bob = { type: "user" as const, id: "bob" };
+    const outsider = { type: "user" as const, id: "outsider" };
+    const group = { type: "group" as const, id: "g1" };
+    const device = { type: "device" as const, id: "d1" };
+
+    await zbar.addRelation(ctx, alice, "viewer", group);
+    await zbar.addRelation(ctx, bob, "viewer", group);
+    await zbar.addRelation(ctx, group, "viewer", device);
+    void outsider; // not a group member → must not appear.
+
+    const rows = await zbar
+      .list()
+      .object(device)
+      .permission("view")
+      .subject("user")
+      .collect(ctx);
+    expect(rows.map((r: any) => r.subjectId).sort()).toEqual(["alice", "bob"]);
+  });
+});

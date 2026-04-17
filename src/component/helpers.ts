@@ -345,9 +345,14 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
   // traversal rules — the BFS ignores them at write time. `can()` and
   // `list()` evaluate them on demand.
   //
-  // `sourceTypes` is resolved from the (now placeholder-filled) schema so
-  // the client can walk the first hop without re-running schema resolution
-  // at read time.
+  // Two path shapes land here:
+  //   • dot-path `source.target` → sourceRelation=source, sourceTypes
+  //     resolved from the (placeholder-filled) schema, targetRelation=target.
+  //   • userset  `type#target`   → sourceRelation=derivedRelation (the
+  //     relation subjects of `type` are written into), sourceTypes=[type],
+  //     targetRelation=target. Validated against the derivedRelation's
+  //     declared typed targets so a broken declaration fails at schema load
+  //     instead of silently returning empty at read time.
   const readTimePaths: ReadTimePath[] = [];
   for (const [entityType, def] of Object.entries(schema.entities || {})) {
     const rtRels = (def as any).readTimeRelations as
@@ -355,22 +360,57 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
       | undefined;
     if (!rtRels) continue;
     for (const rt of rtRels) {
-      const parts = rt.dotPath.split(".");
-      if (parts.length !== 2) continue;
-      const [sourceRelation, targetRelation] = parts;
-      const sourceTypes = getTargetEntityTypes(
-        schema,
-        entityType,
-        sourceRelation,
-      );
-      readTimePaths.push({
-        objectType: entityType,
-        derivedRelation: rt.derivedRelation,
-        sourceRelation,
-        targetRelation,
-        sourceTypes,
-      });
+      if (rt.dotPath.includes("#")) {
+        const [sourceType, targetRelation] = rt.dotPath.split("#");
+        if (!sourceType || !targetRelation) continue;
+        // Validation: the derived relation must declare `sourceType` as a
+        // typed target — otherwise there's no way to write a subject of
+        // that type to the relation, and the RT declaration is dead weight.
+        const derivedTargetTypes = getTargetEntityTypes(
+          schema,
+          entityType,
+          rt.derivedRelation,
+        );
+        if (!derivedTargetTypes.includes(sourceType)) {
+          throw new Error(
+            `Zbar Schema Error: readTimeRelation('${rt.derivedRelation}', '${rt.dotPath}') on '${entityType}' requires '${rt.derivedRelation}' to declare '${sourceType}' as a typed target. Add it to the .relation('${rt.derivedRelation}', ...) declaration.`,
+          );
+        }
+        readTimePaths.push({
+          objectType: entityType,
+          derivedRelation: rt.derivedRelation,
+          sourceRelation: rt.derivedRelation,
+          targetRelation,
+          sourceTypes: [sourceType],
+        });
+      } else {
+        const parts = rt.dotPath.split(".");
+        if (parts.length !== 2) continue;
+        const [sourceRelation, targetRelation] = parts;
+        const sourceTypes = getTargetEntityTypes(
+          schema,
+          entityType,
+          sourceRelation,
+        );
+        readTimePaths.push({
+          objectType: entityType,
+          derivedRelation: rt.derivedRelation,
+          sourceRelation,
+          targetRelation,
+          sourceTypes,
+        });
+      }
     }
+  }
+
+  // Reject schemas whose read-time declarations form a cycle. A cyclic RT
+  // path at runtime would either loop forever or — with the
+  // `readTimeChainDepth` cap — silently return false when the cap is hit,
+  // which is a denies-when-should-grant correctness bug. Rejecting at
+  // schema load makes the problem surface at enableComponent time, long
+  // before any request would see the wrong answer.
+  if (readTimePaths.length > 0) {
+    detectReadTimePathCycle(readTimePaths);
   }
 
   return {
@@ -378,4 +418,48 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
     reverseEdges: Object.keys(reverseEdges).length > 0 ? reverseEdges : undefined,
     readTimePaths: readTimePaths.length > 0 ? readTimePaths : undefined,
   };
+}
+
+/**
+ * 3-color DFS over the read-time-path graph. Nodes are `(entityType,
+ * relation)` pairs; edges run from a derived relation to the target
+ * relation on each of its declared source types. Throws on the first
+ * cycle encountered, with the full loop in the error message.
+ */
+function detectReadTimePathCycle(paths: readonly ReadTimePath[]): void {
+  const edges = new Map<string, string[]>();
+  const keyOf = (type: string, rel: string) => `${type}#${rel}`;
+  for (const rt of paths) {
+    const from = keyOf(rt.objectType, rt.derivedRelation);
+    const bucket = edges.get(from) ?? [];
+    for (const sourceType of rt.sourceTypes) {
+      bucket.push(keyOf(sourceType, rt.targetRelation));
+    }
+    edges.set(from, bucket);
+  }
+
+  const WHITE = 0;
+  const GRAY = 1;
+  const BLACK = 2;
+  const color = new Map<string, number>();
+  const stack: string[] = [];
+
+  const visit = (node: string): void => {
+    const c = color.get(node) ?? WHITE;
+    if (c === BLACK) return;
+    if (c === GRAY) {
+      const loopStart = stack.indexOf(node);
+      const loop = [...stack.slice(loopStart), node].join(" → ");
+      throw new Error(
+        `Read-time relation declarations form a cycle: ${loop}. Break the loop by removing or restructuring one of the readTimeRelation() declarations on this chain.`,
+      );
+    }
+    color.set(node, GRAY);
+    stack.push(node);
+    for (const next of edges.get(node) ?? []) visit(next);
+    stack.pop();
+    color.set(node, BLACK);
+  };
+
+  for (const node of edges.keys()) visit(node);
 }

@@ -4,14 +4,11 @@ import {
   resolvePermissionRelations,
   resolveRelationInheritance,
 } from "../zbar/resolvers";
-import { hasAccessOrRT } from "../zbar/read-time";
-import { planRelation } from "../zbar/traversal";
 import {
-  getEntityRelations,
-  getReverseStructuralRelations,
-  getStructuralRelations,
-  getViaRelevantRelations,
-} from "../zbar/structural";
+  collectViaObjects,
+  collectViaSubjects,
+  planRelation,
+} from "../zbar/traversal";
 
 /**
  * Internal implementation of the fluent list query builder.
@@ -121,329 +118,37 @@ export class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
     if (this._mode === "listObjects") {
       const subject = { type: this._subjectType!, id: this._subjectId! };
       const objectType = this._objectType;
-
-      if (hasVia) {
-        // ── Chained gate-check + expand ───────────────────────────
-        // Chain: subject → via[0] → via[1] → … → via[N-1] → objects
-        //
-        // 1. Gate: subject → via[0] using permission-relevant
-        //    relations (derived from userset rewrites).
-        // 2. Chain links: via[i] → via[i+1] connectivity checks.
-        // 3. Expand: via[N-1] → objects (the only range scan).
-        //
-        // All queries fire in parallel; any failure → return [].
-
-        const viaChain = this._via;
-        const firstVia = viaChain[0];
-        const lastVia = viaChain[viaChain.length - 1];
-
-        // Tight gate relations: only the relations on firstVia's type
-        // that are referenced by userset rewrites in the acceptable
-        // relations (e.g. device.admin ← system#admin → "admin" on system).
-        const tightGateRelations = getViaRelevantRelations(
-          z,
-          objectType,
-          acceptableRelations,
-          firstVia.type,
-        );
-        const gateRelations =
-          tightGateRelations.length > 0
-            ? tightGateRelations
-            : getEntityRelations(z, firstVia.type);
-        const isTightGate = tightGateRelations.length > 0;
-
-        // — Fire gate + chain + expand in parallel —
-        // Gate and chain go through `hasAccessOrRT` so they compose with
-        // `.readTimeRelation()` declarations on the via entities. Expand
-        // stays materialised-only: it reads structural schema relations
-        // (e.g. contact.owner, system#contact_member) which are not RT-able.
-
-        const gatePromise: Promise<boolean> = hasAccessOrRT(
-          z,
-          ctx,
-          subject,
-          gateRelations,
-          firstVia,
-        );
-
-        const chainPromises: Array<Promise<boolean>> = [];
-        for (let i = 0; i < viaChain.length - 1; i++) {
-          const next = viaChain[i + 1];
-          chainPromises.push(
-            hasAccessOrRT(
-              z,
-              ctx,
-              viaChain[i],
-              getEntityRelations(z, next.type),
-              next,
-            ),
-          );
-        }
-
-        // Expand: via[N-1] → objects.
-        // Use structural relations (e.g. device.owner → system) when the
-        // via entity connects to the object type via a typed relation,
-        // otherwise fall back to acceptable (permission-derived) relations.
-        //
-        // Two directions must be checked:
-        //   Forward: via entity is the subject (e.g. device#owner@system)
-        //   Reverse: via entity is the object (e.g. system#device_member has
-        //            device as subject — used for transitive membership like
-        //            system.device_member = has_group.device_member)
-        const structuralExpandRels = getStructuralRelations(
-          z,
-          objectType,
-          lastVia.type,
-        );
-        const reverseStructuralRels = getReverseStructuralRelations(
-          z,
-          objectType,
-          lastVia.type,
-        );
-        const hasStructural =
-          structuralExpandRels.length > 0 || reverseStructuralRels.length > 0;
-
-        const expandPromises: Array<Promise<any>> = [];
-        if (hasStructural) {
-          if (structuralExpandRels.length > 0) {
-            expandPromises.push(
-              ctx.runQuery(z.component.queries.listAccessibleObjectsFast, {
-                tenantId: z.tenantId,
-                subject: lastVia,
-                relations: structuralExpandRels,
-                objectType,
-              }),
-            );
-          }
-          if (reverseStructuralRels.length > 0) {
-            expandPromises.push(
-              ctx.runQuery(z.component.queries.listSubjectsWithAccessFast, {
-                tenantId: z.tenantId,
-                object: lastVia,
-                relations: reverseStructuralRels,
-                subjectType: objectType,
-              }),
-            );
-          }
-        } else {
-          expandPromises.push(
-            ctx.runQuery(z.component.queries.listAccessibleObjectsFast, {
-              tenantId: z.tenantId,
-              subject: lastVia,
-              relations: acceptableRelations,
-              objectType,
-            }),
-          );
-        }
-
-        const [gatePassed, chainPassed, expandResults] = await Promise.all([
-          gatePromise,
-          Promise.all(chainPromises),
-          Promise.all(expandPromises),
-        ]);
-
-        if (!gatePassed) return [];
-        for (const hit of chainPassed) {
-          if (!hit) return [];
-        }
-
-        // Collect expand results — may come from multiple expand queries
-        // (forward structural + reverse structural)
-        const candidateIds = new Set<string>();
-        let expandIdx = 0;
-
-        if (hasStructural) {
-          if (structuralExpandRels.length > 0) {
-            // Forward: via is subject, objects are the candidates
-            const fwdRows = expandResults[expandIdx] as any[];
-            for (const eff of fwdRows) {
-              candidateIds.add(eff.objectKey.split(":")[1]);
-            }
-            expandIdx++;
-          }
-          if (reverseStructuralRels.length > 0) {
-            // Reverse: objects are subjects, via is the object
-            const revRows = expandResults[expandIdx] as any[];
-            for (const eff of revRows) {
-              candidateIds.add(eff.subjectKey.split(":")[1]);
-            }
-            expandIdx++;
-          }
-        } else {
-          const fallbackRows = expandResults[expandIdx] as any[];
-          for (const eff of fallbackRows) {
-            candidateIds.add(eff.objectKey.split(":")[1]);
-          }
-        }
-        if (candidateIds.size === 0) return [];
-
-        // Fast path: tight gate + no conditions → materialisation
-        // guarantees subject→object, return IDs directly.
-        if (!schemaHasConditions && isTightGate) {
-          return this._finalize(
-            [...candidateIds].map((id) => ({ objectId: id })),
-          );
-        }
-
-        // Slow path: one plan.checkBatch covers materialised validation
-        // AND RT fallback in a single narrowing pass.
-        const hits = await plan.checkBatch(
-          ctx,
-          subject,
-          objectType,
-          [...candidateIds],
-        );
-        return this._finalize([...hits].map((id) => ({ objectId: id })));
-      }
-
-      // ── No via: plan-driven full enumeration ──────────────────────
-      const ids = await plan.expandObjects(ctx, subject, objectType);
+      const ids = hasVia
+        ? await collectViaObjects(
+            z,
+            ctx,
+            plan,
+            subject,
+            this._via,
+            objectType,
+            acceptableRelations,
+            schemaHasConditions,
+            requestContext,
+          )
+        : await plan.expandObjects(ctx, subject, objectType);
       return this._finalize([...ids].map((id) => ({ objectId: id })));
-    } else {
-      // listSubjects mode
-      const object = { type: this._objectType, id: this._objectId! };
-      const subjectType = this._subjectType!;
-
-      if (hasVia) {
-        // ── Chained gate-check + expand (subjects) ───────────────
-        // Chain: subjects → via[0] → … → via[N-1] → object
-        //
-        // 1. Gate: via[N-1] → object using acceptable relations.
-        // 2. Chain links: via[i] → via[i+1] connectivity checks.
-        // 3. Expand: via[0] ← subjects (range scan for subject type).
-
-        const viaChain = this._via;
-        const firstVia = viaChain[0];
-        const lastVia = viaChain[viaChain.length - 1];
-
-        // Tight expand: only relations on firstVia's type that are
-        // referenced by the object type's userset rewrites.
-        const tightExpandRelations = getViaRelevantRelations(
-          z,
-          this._objectType,
-          acceptableRelations,
-          firstVia.type,
-        );
-        const expandRelations =
-          tightExpandRelations.length > 0
-            ? tightExpandRelations
-            : getEntityRelations(z, firstVia.type);
-        const isTightExpand = tightExpandRelations.length > 0;
-
-        // Gate: via[N-1] → object.
-        // Check connectivity between the via entity and the object.
-        // Must check both directions:
-        //   Forward: via is subject of a relation on objectType
-        //   Reverse: objectType is subject of a relation on viaType
-        // Structural gates are always materialised (they read schema-declared
-        // typed relations); the fallback branch uses permission relations
-        // and so gets RT fallback via `hasAccessOrRT`.
-        const structuralGateRels = getStructuralRelations(
-          z,
-          this._objectType,
-          lastVia.type,
-        );
-        const reverseGateRels = getReverseStructuralRelations(
-          z,
-          this._objectType,
-          lastVia.type,
-        );
-        const hasStructuralGate =
-          structuralGateRels.length > 0 || reverseGateRels.length > 0;
-
-        const gatePromise: Promise<boolean> = (async () => {
-          if (hasStructuralGate) {
-            const gatePromises: Array<Promise<any[]>> = [];
-            if (structuralGateRels.length > 0) {
-              gatePromises.push(
-                ctx.runQuery(z.component.queries.checkPermissionFast, {
-                  tenantId: z.tenantId,
-                  subject: lastVia,
-                  relations: structuralGateRels,
-                  object,
-                }),
-              );
-            }
-            if (reverseGateRels.length > 0) {
-              gatePromises.push(
-                ctx.runQuery(z.component.queries.checkPermissionFast, {
-                  tenantId: z.tenantId,
-                  subject: object,
-                  relations: reverseGateRels,
-                  object: lastVia,
-                }),
-              );
-            }
-            const gateResults = await Promise.all(gatePromises);
-            return gateResults.some((rs) => rs.length > 0);
-          }
-          return hasAccessOrRT(z, ctx, lastVia, acceptableRelations, object);
-        })();
-
-        // Chain links: via[i] → via[i+1]. Permission-like — gets RT fallback.
-        const chainPromises: Array<Promise<boolean>> = [];
-        for (let i = 0; i < viaChain.length - 1; i++) {
-          const next = viaChain[i + 1];
-          chainPromises.push(
-            hasAccessOrRT(
-              z,
-              ctx,
-              viaChain[i],
-              getEntityRelations(z, next.type),
-              next,
-            ),
-          );
-        }
-
-        // Expand: via[0] ← subjects (using tight relations). Materialised.
-        const expandPromise: Promise<any[]> = ctx.runQuery(
-          z.component.queries.listSubjectsWithAccessFast,
-          {
-            tenantId: z.tenantId,
-            object: firstVia,
-            relations: expandRelations,
-            subjectType,
-          },
-        );
-
-        const [gatePassed, chainPassed, expandRows] = await Promise.all([
-          gatePromise,
-          Promise.all(chainPromises),
-          expandPromise,
-        ]);
-
-        if (!gatePassed) return [];
-        for (const hit of chainPassed) {
-          if (!hit) return [];
-        }
-
-        const candidateIds = new Set<string>();
-        for (const eff of expandRows) {
-          candidateIds.add(eff.subjectKey.split(":")[1]);
-        }
-        if (candidateIds.size === 0) return [];
-
-        // Fast path: tight expand + no conditions
-        if (!schemaHasConditions && isTightExpand) {
-          return this._finalize(
-            [...candidateIds].map((id) => ({ subjectId: id })),
-          );
-        }
-
-        // Slow path: plan.checkBatchSubjects covers materialised validation
-        // AND RT fallback in a single narrowing pass.
-        const hits = await plan.checkBatchSubjects(
-          ctx,
-          object,
-          subjectType,
-          [...candidateIds],
-        );
-        return this._finalize([...hits].map((id) => ({ subjectId: id })));
-      }
-
-      // ── No via: plan-driven full enumeration ──────────────────────
-      const ids = await plan.expandSubjects(ctx, object, subjectType);
-      return this._finalize([...ids].map((id) => ({ subjectId: id })));
     }
+
+    const object = { type: this._objectType, id: this._objectId! };
+    const subjectType = this._subjectType!;
+    const ids = hasVia
+      ? await collectViaSubjects(
+          z,
+          ctx,
+          plan,
+          object,
+          this._via,
+          subjectType,
+          acceptableRelations,
+          schemaHasConditions,
+          requestContext,
+        )
+      : await plan.expandSubjects(ctx, object, subjectType);
+    return this._finalize([...ids].map((id) => ({ subjectId: id })));
   }
 }
