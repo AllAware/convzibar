@@ -5,6 +5,19 @@ import type { PolicyContext, SubjectOrObject } from "../types";
 /**
  * Verify that the (subject.type, relation, object.type) triple is consistent
  * with what the schema declares. Throws a descriptive error otherwise.
+ *
+ * "Valid subject types" are collected from every declaration on the relation:
+ *   • bare entity-type strings (`'user'`)
+ *   • typed-target objects (`{ type: 'user' }`, `{ type: 'group', reverse: ... }`)
+ *   • userset references (`'group#viewer'` → `'group'`)
+ *   • local-relation references (recursively expanded — a relation that
+ *     references another local relation inherits the latter's typed targets)
+ *
+ * Dot-path declarations (`'owner.viewer'`) contribute no direct subject
+ * types — they describe a derived/read-time path. If a relation has only
+ * dot-paths (and no other typed contribution), it is considered derived
+ * and cannot be written directly: throw rather than silently accepting any
+ * subject.
  */
 export function validateRelationParameter(
   z: ZbarInternal,
@@ -20,31 +33,82 @@ export function validateRelationParameter(
     );
   }
 
-  const relDef = objectEntity.relations[relation];
-  const defs = Array.isArray(relDef) ? relDef : [relDef];
-  const localRelations = objectEntity.relations;
-  const validSubjectTypes = new Set<string>();
+  const validSubjectTypes = collectDirectSubjectTypes(
+    z,
+    object.type,
+    relation,
+    new Set(),
+  );
 
-  for (const d of defs) {
-    if (typeof d === "string") {
-      if (d.includes("#")) {
-        validSubjectTypes.add(d.split("#")[0]);
-      } else if (d.includes(".")) {
-        // traversal dot-path — not a subject type
-      } else if (z.schema.entities[d] && !localRelations[d]) {
-        // entity type name (not a local relation reference)
-        validSubjectTypes.add(d);
-      }
-    } else if (typeof d === "object" && d !== null && "type" in d) {
-      validSubjectTypes.add((d as { type: string }).type);
-    }
+  if (validSubjectTypes.size === 0) {
+    throw new Error(
+      `Zbar Schema Error: Relation '${relation}' on '${object.type}' declares no direct typed subjects ` +
+        `(it is derived via dot-path or read-time declarations). Write the underlying base edge instead.`,
+    );
   }
 
-  if (validSubjectTypes.size > 0 && !validSubjectTypes.has(subject.type)) {
+  if (!validSubjectTypes.has(subject.type)) {
     throw new Error(
       `Zbar Schema Error: Subject type '${subject.type}' is not a valid subject for relation '${relation}' on object type '${object.type}'. Valid subject types: ${[...validSubjectTypes].join(", ")}.`,
     );
   }
+}
+
+/**
+ * Walk a relation's declarations to collect every entity type that may
+ * appear as a subject when an edge with this relation is written directly.
+ * Local-relation references are followed transitively (cycles broken via
+ * `visited`). Dot-paths and other derived constructs contribute nothing.
+ */
+function collectDirectSubjectTypes(
+  z: ZbarInternal,
+  objectType: string,
+  relation: string,
+  visited: Set<string>,
+): Set<string> {
+  if (visited.has(relation)) return new Set();
+  visited.add(relation);
+
+  const entity = z.schema.entities[objectType];
+  const localRelations = entity?.relations ?? {};
+  const relDef = localRelations[relation];
+  if (relDef === undefined) return new Set();
+
+  const defs = Array.isArray(relDef) ? relDef : [relDef];
+  const types = new Set<string>();
+
+  const consumeRelationRef = (ref: string) => {
+    if (ref.includes("#")) {
+      types.add(ref.split("#")[0]);
+    } else if (ref.includes(".")) {
+      // dot-path — derived, no direct subject contribution
+    } else if (localRelations[ref] !== undefined) {
+      // local relation reference — inherit its direct subject types
+      for (const t of collectDirectSubjectTypes(z, objectType, ref, visited)) {
+        types.add(t);
+      }
+    } else if (z.schema.entities[ref] !== undefined) {
+      // bare entity-type target
+      types.add(ref);
+    }
+  };
+
+  for (const d of defs) {
+    if (typeof d === "string") {
+      consumeRelationRef(d);
+    } else if (typeof d === "object" && d !== null) {
+      if ("type" in d && typeof (d as { type: unknown }).type === "string") {
+        types.add((d as { type: string }).type);
+      } else if (
+        "relation" in d &&
+        typeof (d as { relation: unknown }).relation === "string"
+      ) {
+        consumeRelationRef((d as { relation: string }).relation);
+      }
+    }
+  }
+
+  return types;
 }
 
 /**

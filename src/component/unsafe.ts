@@ -8,6 +8,16 @@ function buildScopeKey(type: string, id: string) {
   return `${type}:${id}`;
 }
 
+/**
+ * Decode `${type}:${id}` preserving any colons in `id`. The naive
+ * `split(":")` truncates ids that themselves contain a colon, silently
+ * matching the wrong row.
+ */
+function decodeScopeKey(scopeKey: string): [type: string, id: string] {
+  const idx = scopeKey.indexOf(":");
+  return [scopeKey.slice(0, idx), scopeKey.slice(idx + 1)];
+}
+
 // ============================================================================
 // Step 1: Read Primitives
 // ============================================================================
@@ -304,11 +314,11 @@ async function clearEffectiveRelationshipsInternal(ctx: any, args: any) {
     toDelete = allEffective.filter((eff: any) => {
       if (filter.relation && eff.relation !== filter.relation) return false;
       if (filter.subjectType) {
-        const sType = eff.subjectKey.split(":")[0];
+        const [sType] = decodeScopeKey(eff.subjectKey);
         if (sType !== filter.subjectType) return false;
       }
       if (filter.objectType) {
-        const oType = eff.objectKey.split(":")[0];
+        const [oType] = decodeScopeKey(eff.objectKey);
         if (oType !== filter.objectType) return false;
       }
       return true;
@@ -598,8 +608,9 @@ async function expandTraversalRules(ctx: any, args: any) {
           .collect();
 
         for (const match of matches) {
-          const [matchSubjectType, matchSubjectId] =
-            match.subjectKey.split(":");
+          const [matchSubjectType, matchSubjectId] = decodeScopeKey(
+            match.subjectKey,
+          );
 
           for (const matchPath of match.paths) {
             const hasCycle = current.path.baseIds.some((t: string) =>
@@ -654,7 +665,9 @@ async function expandTraversalRules(ctx: any, args: any) {
           .collect();
 
         for (const match of matches) {
-          const [matchObjectType, matchObjectId] = match.objectKey.split(":");
+          const [matchObjectType, matchObjectId] = decodeScopeKey(
+            match.objectKey,
+          );
           if (matchObjectType === rule.sourceObjectType) {
             for (const matchPath of match.paths) {
               const hasCycle = current.path.baseIds.some((t: string) =>

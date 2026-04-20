@@ -232,15 +232,20 @@ function entityFromKey(scopeKey: string): Entity {
   return { type: scopeKey.slice(0, idx), id: scopeKey.slice(idx + 1) };
 }
 
+function idFromKey(scopeKey: string): string {
+  const idx = scopeKey.indexOf(":");
+  return scopeKey.slice(idx + 1);
+}
+
 function objectIds(rows: readonly any[]): Set<string> {
   const ids = new Set<string>();
-  for (const r of rows) ids.add((r.objectKey as string).split(":")[1]);
+  for (const r of rows) ids.add(idFromKey(r.objectKey as string));
   return ids;
 }
 
 function subjectIds(rows: readonly any[]): Set<string> {
   const ids = new Set<string>();
-  for (const r of rows) ids.add((r.subjectKey as string).split(":")[1]);
+  for (const r of rows) ids.add(idFromKey(r.subjectKey as string));
   return ids;
 }
 
@@ -596,11 +601,21 @@ export class Compose implements Traversal {
 // ---------------------------------------------------------------------------
 
 /**
- * Disjunction. `check` parallelises across children — we can't meaningfully
- * cancel Convex queries inside a transaction. `checkBatch` / `checkBatchSubjects`
- * narrow sequentially: the first child (conventionally the cheapest
- * Materialised leaf) sees the full candidate set; later children only see
- * what wasn't already covered. `expand*` union the children's full results.
+ * Disjunction.
+ *
+ * `check` is hybrid: it probes the cheapest child sequentially first, then —
+ * only if that misses — races the remaining children in parallel with a
+ * first-true early exit. Since `Union.of` cost-sorts its children, the first
+ * probe is typically the direct materialised branch (cost 1) and the rest
+ * are RT Composes (cost 2+). The common direct-hit path therefore fires
+ * exactly one query; the miss path pays one extra round-trip vs pure
+ * Promise.all but saves every RT query fired by the current
+ * direct-hits-don't-short-circuit shape.
+ *
+ * `checkBatch` / `checkBatchSubjects` narrow sequentially: the first child
+ * sees the full candidate set; later children only see what wasn't already
+ * covered. `expand*` union every child's full results — they genuinely need
+ * everything.
  */
 export class Union implements Traversal {
   readonly cost: number;
@@ -642,10 +657,30 @@ export class Union implements Traversal {
     object: Entity,
   ): Promise<boolean> {
     if (this.children.length === 0) return false;
-    const results = await Promise.all(
-      this.children.map((c) => c.check(ctx, subject, object)),
-    );
-    return results.some(Boolean);
+
+    // Sequential probe of the cheapest child. `Union.of` sorts children
+    // ascending by cost, so children[0] is usually the direct materialised
+    // branch — a hit here skips every RT Compose, saving up to 2×(N−1)
+    // queries on the happy path.
+    if (await this.children[0].check(ctx, subject, object)) return true;
+    if (this.children.length === 1) return false;
+
+    // Miss path: race the remaining children with first-true early exit.
+    // Convex reads can't be cancelled, so all queries still fire — but we
+    // unblock the caller as soon as any branch reports a hit.
+    const rest = this.children.slice(1);
+    return new Promise<boolean>((resolve, reject) => {
+      let remaining = rest.length;
+      for (const c of rest) {
+        c.check(ctx, subject, object).then(
+          (r) => {
+            if (r) resolve(true);
+            else if (--remaining === 0) resolve(false);
+          },
+          reject,
+        );
+      }
+    });
   }
 
   async checkBatch(
@@ -865,7 +900,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     return this._validateRows(
       ctx,
       rows,
-      (eff) => eff.objectKey.split(":")[1],
+      (eff) => idFromKey(eff.objectKey),
       () => subject,
       (_eff, id) => ({ type: objectType, id }),
     );
@@ -891,7 +926,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     return this._validateRows(
       ctx,
       rows,
-      (eff) => eff.subjectKey.split(":")[1],
+      (eff) => idFromKey(eff.subjectKey),
       (_eff, id) => ({ type: subjectType, id }),
       () => object,
     );
@@ -913,7 +948,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     return this._validateRows(
       ctx,
       rows,
-      (eff) => eff.objectKey.split(":")[1],
+      (eff) => idFromKey(eff.objectKey),
       () => subject,
       (_eff, id) => ({ type: objectType, id }),
     );
@@ -935,7 +970,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     return this._validateRows(
       ctx,
       rows,
-      (eff) => eff.subjectKey.split(":")[1],
+      (eff) => idFromKey(eff.subjectKey),
       (_eff, id) => ({ type: subjectType, id }),
       () => object,
     );
@@ -959,7 +994,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     return this._validateRows(
       ctx,
       rows,
-      (eff) => eff.objectKey.split(":")[1],
+      (eff) => idFromKey(eff.objectKey),
       (eff) => entityFromKey(eff.subjectKey),
       (_eff, id) => ({ type: objectType, id }),
     );
@@ -981,7 +1016,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     return this._validateRows(
       ctx,
       rows,
-      (eff) => eff.subjectKey.split(":")[1],
+      (eff) => idFromKey(eff.subjectKey),
       (_eff, id) => ({ type: subjectType, id }),
       (eff) => entityFromKey(eff.objectKey),
     );
@@ -1038,18 +1073,25 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
  * one `Compose(EdgeExpand, planRelation(...))` per declared dot-path.
  *
  * Recursion is bounded by `z.readTimeChainDepth`. When the cap is reached
- * the inner hop collapses to a bare `Materialised` (no further chaining);
- * otherwise it's a recursive `planRelation` call on the source type, which
- * itself may produce further Compose branches.
+ * the inner hop collapses to a leaf — `ValidatedMaterialised` if the caller
+ * is doing a permission/relation check (so write-time-baked conditions and
+ * any target-level conditions are evaluated), or plain `Materialised` for
+ * structural connectivity (`.via()` gates).
  *
- * Inner hops always recurse with an undefined permission — RT paths are
- * schema-structural and don't carry condition validation.
+ * `permission` and `requestContext` propagate down the chain so every
+ * inner hop runs the same condition-validation as the top-level direct
+ * branch. Without this, conditions baked into intermediate relations'
+ * `path.conditions` would be silently bypassed when the path is walked
+ * via an RT chain — a permission that fails the direct evaluation could
+ * be granted via the RT route.
  */
-function rtBranches(
+function rtBranches<Data = unknown>(
   z: ZbarInternal,
   objectType: string,
   acceptable: ReadonlySet<string>,
   depth: number,
+  permission?: string,
+  requestContext?: Data,
 ): Traversal[] {
   const paths = z.graphConfig.readTimePaths;
   if (!paths || paths.length === 0) return [];
@@ -1061,24 +1103,36 @@ function rtBranches(
     if (rt.objectType !== objectType) continue;
     if (!acceptable.has(rt.derivedRelation)) continue;
     for (const sourceType of rt.sourceTypes) {
-      const targetRelations = resolveRelationInheritance(
+      // Preserve any inheritance-derived conditions on the inner targets —
+      // ValidatedMaterialised reads target.condition via validatePath.
+      const innerTargets = resolveRelationInheritance(
         z,
         sourceType,
         rt.targetRelation,
-      ).map((t) => t.relation);
-      if (targetRelations.length === 0) continue;
+      );
+      if (innerTargets.length === 0) continue;
 
       const sourceSide = new EdgeExpand(z, sourceType, [rt.sourceRelation]);
       const subjectSide: Traversal = canChain
         ? planRelation(
             z,
             sourceType,
-            targetRelations.map((r) => ({ relation: r })),
-            undefined,
-            undefined,
+            innerTargets,
+            permission,
+            requestContext,
             depth + 1,
           )
-        : new Materialised(z, targetRelations);
+        : permission !== undefined
+          ? new ValidatedMaterialised(
+              z,
+              innerTargets,
+              permission,
+              requestContext,
+            )
+          : new Materialised(
+              z,
+              innerTargets.map((t) => t.relation),
+            );
       branches.push(new Compose(sourceSide, subjectSide));
     }
   }
@@ -1135,7 +1189,14 @@ export function planRelation<Data = unknown>(
     ? new ValidatedMaterialised(z, targets, permission, requestContext)
     : new Materialised(z, relations);
 
-  const rts = rtBranches(z, objectType, new Set(relations), depth);
+  const rts = rtBranches(
+    z,
+    objectType,
+    new Set(relations),
+    depth,
+    permission,
+    requestContext,
+  );
   return Union.of(direct, ...rts);
 }
 
@@ -1227,64 +1288,29 @@ export async function evaluateManyPermissions<Data = unknown>(
     else if (r.targets.length > 0) (pending as any).push(r);
   }
 
-  // ── 3. Shared RT fallback — each branch evaluated once, results reused.
+  // ── 3. Per-pending-permission RT fallback. Each permission gets its own
+  // RT plan so the inner condition evaluation sees the correct `action`
+  // value — condition functions that branch on action would otherwise see
+  // whichever permission "won" a shared branch. We trade the previous
+  // cross-permission branch sharing for correctness.
   if (pending.length > 0) {
-    const pendingRelations = new Set<string>();
-    for (const p of pending) for (const t of p.targets) pendingRelations.add(t.relation);
-
-    // Build unique (derivedRelation, sourceType) branches across all pending
-    // permissions. Permissions that share an RT dot-path see one Compose,
-    // not one per permission.
-    const uniqueBranches: Array<{
-      derivedRelation: string;
-      branch: Traversal;
-    }> = [];
-    for (const rt of z.graphConfig.readTimePaths ?? []) {
-      if (rt.objectType !== object.type) continue;
-      if (!pendingRelations.has(rt.derivedRelation)) continue;
-      for (const sourceType of rt.sourceTypes) {
-        const targetRelations = resolveRelationInheritance(
+    const rtResults = await Promise.all(
+      pending.map(async ({ permission, targets }) => {
+        const branches = rtBranches(
           z,
-          sourceType,
-          rt.targetRelation,
-        ).map((t) => t.relation);
-        if (targetRelations.length === 0) continue;
-        const sourceSide = new EdgeExpand(z, sourceType, [rt.sourceRelation]);
-        const canChain = 1 < z.readTimeChainDepth;
-        const subjectSide: Traversal = canChain
-          ? planRelation(
-              z,
-              sourceType,
-              targetRelations.map((r) => ({ relation: r })),
-              undefined,
-              undefined,
-              1,
-            )
-          : new Materialised(z, targetRelations);
-        uniqueBranches.push({
-          derivedRelation: rt.derivedRelation,
-          branch: new Compose(sourceSide, subjectSide),
-        });
-      }
-    }
-
-    if (uniqueBranches.length > 0) {
-      const branchHits = await Promise.all(
-        uniqueBranches.map((b) => b.branch.check(ctx, subject, object)),
-      );
-      const firedRelations = new Set<string>();
-      for (let i = 0; i < uniqueBranches.length; i++) {
-        if (branchHits[i]) firedRelations.add(uniqueBranches[i].derivedRelation);
-      }
-      for (const p of pending) {
-        for (const t of p.targets) {
-          if (firedRelations.has(t.relation)) {
-            granted.add(p.permission);
-            break;
-          }
-        }
-      }
-    }
+          object.type,
+          new Set(targets.map((t) => t.relation)),
+          0,
+          permission,
+          requestContext,
+        );
+        if (branches.length === 0) return { permission, hit: false };
+        const plan = Union.of(...branches);
+        const hit = await plan.check(ctx, subject, object);
+        return { permission, hit };
+      }),
+    );
+    for (const r of rtResults) if (r.hit) granted.add(r.permission);
   }
 
   return perms.map((p) => p.permission).filter((p) => granted.has(p));

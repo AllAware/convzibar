@@ -31,6 +31,16 @@ function buildScopeKey(type: string, id: string) {
   return `${type}:${id}`;
 }
 
+/**
+ * Decode `${type}:${id}` preserving any colons in `id`. The naive
+ * `split(":")` truncates ids that themselves contain a colon, silently
+ * matching the wrong row.
+ */
+function decodeScopeKey(scopeKey: string): [type: string, id: string] {
+  const idx = scopeKey.indexOf(":");
+  return [scopeKey.slice(0, idx), scopeKey.slice(idx + 1)];
+}
+
 export const addRelation = mutation({
   args: {
     tenantId: v.optional(v.string()),
@@ -78,9 +88,46 @@ async function addRelationInternal(ctx: any, args: any) {
     .unique();
 
   if (existingRel) {
-    // If the relationship already exists, we don't need to do the Add graph expansion.
-    // However, if there are pending `onComplete` tasks (like cleaning up old relations in an update),
-    // we MUST execute them immediately, because we aren't going to fire off the processAddChunk job.
+    // Existing-row semantics:
+    //   • If the caller's condition (or conditionContext) differs, we cannot
+    //     silently keep the old one — every derived effective row baked the
+    //     prior condition into its `path.conditions`. Mutating only the base
+    //     row would leave stale baked conditions in the materialised view,
+    //     so we throw and direct the caller at updateRelation, which runs
+    //     a remove-cascade before the add.
+    //   • If only `properties` differ, patch in place — properties live on
+    //     the base edge only and are not replicated through the BFS.
+    //   • Otherwise, no-op and return the existing id.
+    //
+    // Either way, pending `onComplete` cleanups still fire because the
+    // caller's intent (typically "old relation removed by update/set") is
+    // independent of whether the new add was a no-op or a real insert.
+    const existingCondition = existingRel.condition ?? undefined;
+    const existingConditionContext = existingRel.conditionContext ?? undefined;
+    const newCondition = condition?.condition ?? undefined;
+    const newConditionContext = condition?.conditionContext ?? undefined;
+
+    const conditionChanged =
+      existingCondition !== newCondition ||
+      JSON.stringify(existingConditionContext) !==
+        JSON.stringify(newConditionContext);
+
+    if (conditionChanged) {
+      throw new Error(
+        `Zbar: addRelation cannot change the condition on an existing relationship ` +
+          `(${subject.type}:${subject.id} -[${relation}]-> ${object.type}:${object.id}). ` +
+          `Use updateRelation to replace the relation, or removeRelation followed by addRelation.`,
+      );
+    }
+
+    if (
+      properties !== undefined &&
+      JSON.stringify(existingRel.properties ?? null) !==
+        JSON.stringify(properties ?? null)
+    ) {
+      await ctx.db.patch(existingRel._id, { properties });
+    }
+
     if (onComplete) {
       await executeOnComplete(ctx, onComplete, args.asyncWrites);
     }
@@ -358,8 +405,9 @@ async function processAddChunkInternal(ctx: any, args: any) {
             .collect();
 
           for (const match of matches) {
-            const [matchSubjectType, matchSubjectId] =
-              match.subjectKey.split(":");
+            const [matchSubjectType, matchSubjectId] = decodeScopeKey(
+              match.subjectKey,
+            );
             const derivedSubject = {
               type: matchSubjectType,
               id: matchSubjectId,
@@ -414,7 +462,9 @@ async function processAddChunkInternal(ctx: any, args: any) {
             .collect();
 
           for (const match of matches) {
-            const [matchObjectType, matchObjectId] = match.objectKey.split(":");
+            const [matchObjectType, matchObjectId] = decodeScopeKey(
+              match.objectKey,
+            );
             if (matchObjectType === rule.sourceObjectType) {
               const derivedSubject = current.subject;
               const derivedObject = {
@@ -783,8 +833,9 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
               .collect();
 
             for (const match of matches) {
-              const [matchSubjectType, matchSubjectId] =
-                match.subjectKey.split(":");
+              const [matchSubjectType, matchSubjectId] = decodeScopeKey(
+                match.subjectKey,
+              );
               const derivedSubject = {
                 type: matchSubjectType,
                 id: matchSubjectId,
@@ -815,8 +866,9 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
               .collect();
 
             for (const match of matches) {
-              const [matchObjectType, matchObjectId] =
-                match.objectKey.split(":");
+              const [matchObjectType, matchObjectId] = decodeScopeKey(
+                match.objectKey,
+              );
               if (matchObjectType === rule.sourceObjectType) {
                 const derivedSubject = current.subject;
                 const derivedObject = {

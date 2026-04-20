@@ -3,41 +3,66 @@
 A high-performance, strictly typed ReBAC and ABAC authorization engine built
 specifically for Convex, heavily inspired by Google Zanzibar.
 
-This library provides **O(1) read-time authorization checks** by pre-computing
-cross-object relationship traversals at write-time, while inferring local
-(same-object) role inheritance dynamically at read-time to minimize database
-write amplification.
+Convzibar is a **hybrid engine**: you choose, per relation, whether cross-object
+paths are flattened at write-time (fast reads, larger writes) or joined at
+read-time (zero write amplification, bounded-depth reads). Every question —
+`can()`, `hasRelationship()`, `.list()`, `.via()`, `getPermissions()` — is
+answered by compiling the schema into a small operator tree and evaluating it
+against the materialized cache plus any read-time branches.
 
 ## Features
 
 - **Pure Zanzibar ReBAC:** Define relationships between entities (e.g.,
   `user -> owner -> org`, `folder -> parent -> project`) and traverse them
   safely.
-- **Leopard Indexing (O(1) Reads):** Cross-object graph traversals are expanded
-  at write-time and cached using a materialized path array, allowing `.can()`
-  checks to require just a single indexed B-tree database read.
-- **Local Inheritance Inference:** Inheritance on the same object (e.g., an
-  `admin` is implicitly a `viewer`) is computed at read-time in memory, keeping
-  your database writes incredibly lean.
+- **Hybrid materialization model:** Declare cross-object traversals with
+  `.relation('editor', 'user', 'parent_org.admin')` to flatten them at
+  write-time (one indexed lookup), or with `.readTimeRelation('editor',
+  'parent_org.admin')` to join them at read-time (zero write fan-out, 2–3
+  indexed queries). Local inheritance (e.g., `admin` implies `viewer`) is
+  always computed in memory.
+- **Unified planning algebra:** Every read is compiled into a typed operator
+  tree — `Materialised`, `ValidatedMaterialised`, `EdgeExpand`, `Compose`,
+  `Union` — with cost-ordered execution, sequential narrowing for batch
+  checks, and fan-out collapsing through batched Convex round-trips. There's
+  no hand-rolled "try cache, fall back to RT" ladder; both strategies are
+  branches of the same plan.
+- **Batched fan-outs:** `Compose.expandObjectsFromMany` and
+  `expandSubjectsFromMany` collapse multi-hop chains to **O(depth)** Convex
+  round-trips instead of O(branching<sup>depth</sup>), so deep read-time
+  chains stay fast.
+- **Multi-permission batching:** `getPermissions()` resolves every permission
+  on `(subject, object)` in **one** materialized query plus at most one
+  shared read-time branch per unique `(derivedRelation, sourceType)`.
 - **Unified ABAC + ReBAC:** Attach dynamic conditions to both relationships
-  (write-time edges) and permissions (read-time requirements). Conditions are
-  evaluated with injected runtime context.
+  (write-time edges) and permissions (read-time requirements). Conditions
+  evaluate in order along the path, and a condition that returns an object
+  merges its data into the context for downstream conditions (middleware).
 - **Userset Expansion:** Use `#` syntax (e.g., `group#admin`) to allow
-  non-user entities as subjects. When a group is made admin of a resource, all
-  admins of that group automatically inherit access via write-time expansion.
-- **Reverse Edges:** Declare `{ type: "group", reverse: "device_member" }` on
-  a relation to automatically insert a mirrored edge in the opposite direction
-  at write-time. Combined with traversals and usersets, this enables powerful
-  V-pattern lookups that resolve in a single indexed query.
-- **Fluent List Queries:** `.list()` for effective (materialized) relationship
-  queries with optional `.via()` intermediary filtering, and `.listDirect()` for
-  raw base-relationship queries. Both support `.map()` and `.collect()`.
+  non-user entities as subjects. When a group is made admin of a resource,
+  all admins of that group inherit access — materialized at write-time by
+  default, or read-time if declared via `.readTimeRelation()`.
+- **Reverse Edges:** Declare `{ type: "group", reverse: "device_member" }`
+  on a relation to automatically insert a mirrored edge in the opposite
+  direction at write-time. Combined with traversals and usersets, this
+  enables powerful V-pattern lookups that resolve in a single indexed query.
+- **Token-lineage cascade deletes:** Every materialized path carries the IDs
+  of the base edges that produced it. Removing a base edge surgically deletes
+  only the derived paths that depend on it, in **O(N)**, without recomputing
+  the graph.
+- **Schema-load cycle detection:** Read-time path declarations are checked
+  for cycles at `new Zbar()` time via a 3-color DFS. A cyclic RT chain would
+  silently return `false` once it hit the depth cap — catching it at schema
+  load prevents denies-when-should-grant bugs from ever reaching production.
+- **Fluent List Queries:** `.list()` for effective-relationship queries with
+  optional `.via()` intermediary filtering, and `.listDirect()` for raw
+  base-relationship queries. Both support `.map()` and `.collect()`.
 - **Runtime Validation:** Subject types are validated against the schema at
   runtime, preventing invalid entity combinations from being written to the
   graph.
-- **Perfect TypeScript Inference:** The `createZbarSchema` definition provides
-  100% strict type-checking and autocomplete for all subjects, objects,
-  relations, and permissions without any codegen steps.
+- **Perfect TypeScript Inference:** The `createZbarSchema` definition
+  provides 100% strict type-checking and autocomplete for all subjects,
+  objects, relations, and permissions without any codegen steps.
 
 ## Installation
 
@@ -125,7 +150,8 @@ export const zbarSchema = createZbarSchema<MyContext>()
       .relation("parent_org", "org")
 
       // Cross-Object Traversal (dot syntax):
-      // A project editor includes direct users AND any admin of the parent org
+      // A project editor includes direct users AND any admin of the parent org.
+      // This edge materializes at write-time — reads are a single indexed lookup.
       .relation("editor", "user", "parent_org.admin")
 
       // Permissions can require conditions
@@ -139,27 +165,30 @@ export const zbarSchema = createZbarSchema<MyContext>()
 // Export the strictly typed client instance
 export const zbar = new Zbar(components.convzibar, {
   schema: zbarSchema,
-  tenantId: "default", // Useful for multi-tenant isolation
+  tenantId: "default",    // Useful for multi-tenant isolation
+  readTimeChainDepth: 3,  // Max depth for chained read-time paths (default: 3)
 });
 ```
 
 #### Schema Syntax Reference
 
-Relations support four kinds of targets:
+Relations support these target kinds:
 
-| Syntax | Name | Meaning |
-|---|---|---|
-| `"user"` | Entity type | Direct subject type (e.g., a user can hold this relation) |
-| `"admin"` | Local inheritance | This relation includes all holders of `admin` on the same object |
-| `"parent_org.admin"` | Traversal (dot) | Follow the `parent_org` relation, inherit `admin` from the target |
-| `"group#admin"` | Userset (hash) | When a group is the subject, expand through that group's `admin` relation |
-| `{ type: "group", reverse: "device_member" }` | Reverse edge | Auto-insert a mirrored edge in the opposite direction at write-time |
+| Syntax | Name | When resolved | Meaning |
+|---|---|---|---|
+| `"user"` / `{ type: "user" }` | Entity type | Write-time | Direct subject type (e.g., a user can hold this relation) |
+| `"admin"` | Local inheritance | Read-time (in memory) | This relation includes all holders of `admin` on the same object |
+| `"parent_org.admin"` | Traversal (dot) | Write-time | Follow the `parent_org` relation, inherit `admin` from the target. Materialized into `effectiveRelationships` at write-time |
+| `"group#admin"` | Userset (hash) | Write-time | When a group is the subject, expand through that group's `admin` relation. Materialized at write-time |
+| `{ type: "group", reverse: "device_member" }` | Reverse edge | Write-time | Auto-insert a mirrored edge in the opposite direction at write-time |
+| `.readTimeRelation("editor", "parent_org.admin")` | Read-time path | Read-time (on demand) | Same shape as a dot-path or userset, but **no** traversal rule is generated — `can()` / `list()` join it at read-time in 2–3 queries |
 
 ### 2. Mutating the Graph (Write-Time)
 
-When you assign relationships, the engine automatically calculates cross-object
-traversals (like `project.editor` derived from `org.admin`) and caches them for
-lightning-fast reads.
+When you assign a relationship, the engine immediately enqueues a BFS that
+expands any **write-time** cross-object traversal rules (dot-paths and
+usersets declared via `.relation()`). Read-time declarations are skipped
+during this phase — they contribute nothing to `effectiveRelationships`.
 
 ```typescript
 import { mutation } from "./_generated/server";
@@ -238,8 +267,11 @@ await zbar.setRelation(ctx, { type: "user", id: userId }, "owner", {
 
 ### 3. Checking Permissions (Read-Time)
 
-Checking permissions takes a single, fast O(1) database query. The client engine
-infers local inheritance and evaluates conditions dynamically.
+A permission check compiles a plan once and evaluates it. For relations with
+no read-time branches, that's a single indexed lookup against the materialized
+cache. For relations with read-time dot-paths or usersets, the plan becomes a
+`Union` that short-circuits on the first hit — usually the direct materialized
+branch (cost 1) — and only runs RT branches on a miss.
 
 ```typescript
 import { query } from "./_generated/server";
@@ -247,7 +279,7 @@ import { zbar } from "./zbar";
 
 export const getProjectData = query({
   handler: async (ctx, args) => {
-    // Check permission (throws Error if denied)
+    // Check permission (throws PermissionError if denied)
     await zbar.require(
       ctx,
       { type: "user", id: userId },
@@ -265,6 +297,25 @@ export const getProjectData = query({
       { timezone: "EST" },
     );
 
+    // Check a specific relation (skips permission → relation expansion)
+    const isEditor = await zbar.hasRelationship(
+      ctx,
+      { type: "user", id: userId },
+      "editor",
+      { type: "project", id: projId },
+      { timezone: "EST" },
+    );
+
+    // Get every permission the subject holds — resolved in ONE materialized
+    // query plus at most one shared RT branch per unique derived relation.
+    const perms = await zbar.getPermissions(
+      ctx,
+      { type: "user", id: userId },
+      { type: "project", id: projId },
+      { timezone: "EST" },
+    );
+    // perms: Array<"edit" | "delete">  (typed from the schema)
+
     if (canEdit) {
       return "Secret Data";
     }
@@ -272,13 +323,64 @@ export const getProjectData = query({
 });
 ```
 
-### 4. Fluent List Queries
+### 4. Read-Time Relations
+
+For high-fan-out paths, materializing every transitive edge at write-time
+becomes expensive — assigning one group as a source can expand into thousands
+of per-member rows. `readTimeRelation()` lets you declare the same schema
+shape but defer the join to read-time:
+
+```typescript
+.entity("project", (e) =>
+  e
+    .relation("parent_org", "org")
+    // Must declare the typed target so subjects can be written to it.
+    .relation("editor", "user", "parent_org.admin")
+
+    // Write-time version (default): materialized into effectiveRelationships.
+    // Assigning a single user as 'admin' of a parent_org flashes an effective
+    // edge onto every project under that org.
+    //
+    // Read-time version: swap the `.relation()` traversal for
+    // `.readTimeRelation()` instead. No fan-out writes; reads cost 2 indexed
+    // queries (fetch parent_org, then check admin on it).
+    .readTimeRelation("editor", "parent_org.admin")
+)
+```
+
+Both path shapes are supported:
+
+- **Dot-path** `"source.target"` — follow the local `source` relation to an
+  intermediate, then pick up its `target` relation.
+- **Userset** `"type#target"` — when a subject of `type` is assigned to the
+  derived relation, expand through that entity's `target` relation at read
+  time. The derived relation must declare `type` as a typed target.
+
+#### Trade-offs
+
+| | Write-time (`.relation`) | Read-time (`.readTimeRelation`) |
+|---|---|---|
+| Write cost | O(fan-out × depth) effective rows | 0 |
+| Read cost | 1 indexed lookup | 2 queries per hop (capped at `readTimeChainDepth`) |
+| Best for | Hot-read paths, low fan-out | High fan-out, dynamic membership, low query volume |
+
+#### Chaining and cycle detection
+
+Read-time paths compose. If `contact.viewer = system.viewer` is declared
+read-time and `system.viewer` itself references another read-time path, the
+planner recurses — up to `readTimeChainDepth` hops (default: 3). Cycles in
+the read-time graph are detected at schema load via a 3-color DFS; if you
+accidentally declare a loop, `new Zbar()` throws with the full cycle path.
+
+### 5. Fluent List Queries
 
 #### Effective Relationships (`.list()`)
 
-Query the materialized effective-relationship graph with full write-time
-expansion. Supports listing objects or subjects, optional `.via()`
-intermediary filtering, and `.map()` transformation.
+Query the materialized effective-relationship graph. Under the hood, `.list()`
+compiles a plan identical in shape to the one `can()` uses — so read-time
+branches, usersets, and dot-paths are all transparent. Supports listing
+objects or subjects, optional `.via()` intermediary filtering, and `.map()`
+transformation.
 
 **List all objects a subject can access:**
 
@@ -321,6 +423,12 @@ const devices = await zbar.list()
   .via({ type: "group", id: groupId }, { type: "system", id: systemId })
   .collect(ctx);
 ```
+
+When the via entity is referenced by a userset rewrite or dot-path on the
+target relation, `.via()` uses a **tight gate** that scans only the relevant
+relations on that entity. Otherwise it falls back to a loose gate and runs a
+per-candidate verification pass. The engine makes this choice automatically
+from the schema.
 
 **Transform results with `.map()`:**
 
@@ -367,7 +475,7 @@ const rels = await zbar.listDirect()
   .collect(ctx);
 ```
 
-### 5. Reverse Edges
+### 6. Reverse Edges
 
 Reverse edges solve the **V-pattern problem**: when you need to query a
 relationship graph in both directions from a single write.
@@ -461,7 +569,7 @@ group  → container → device          ──► device → device_member → 
                                      ──► device → device_member → system   (traversal)
 ```
 
-**Event-time query (single indexed read):**
+**Read-time query (single indexed read):**
 
 ```typescript
 // "What notification rules is this device a source of?"
@@ -485,41 +593,38 @@ const configuredSources = await zbar.listDirect()
   .collect(ctx);
 ```
 
-### 6. Other Queries
+### 7. Multi-Tenancy
 
-**Check if a subject has a specific relationship:**
+A single `Zbar` instance is bound to one `tenantId`. To operate against a
+different tenant, derive a new instance with `.withTenant()`:
 
 ```typescript
-const isEditor = await zbar.hasRelationship(
-  ctx,
-  { type: "user", id: userId },
-  "editor",
-  { type: "project", id: projId },
-  { timezone: "EST" },
-);
+const tenantZbar = zbar.withTenant("tenant_abc");
+await tenantZbar.can(ctx, user, "edit", project);
 ```
 
-### 7. React Hooks
+All queries and mutations are tenant-scoped via indexed prefixes on the
+`relationships` and `effectiveRelationships` tables — tenants are fully
+isolated with no cross-tenant leaks.
 
-We provide a specialized hook to check permissions on the client, caching them
-using `useQuery` under the hood. To use `useCan`, you must expose a query
-handler using the `zbar.checkPermissionFast` query and wrap your application in
-the `ZbarProvider`.
+### 8. React Hooks
+
+A specialized hook checks permissions on the client, caching them under
+Convex's `useQuery`. Expose a server-side permission query and wrap your app
+in the provider:
 
 ```typescript
 // convex/queries.ts
 import { query } from "./_generated/server";
 import { zbar } from "./zbar";
 
-// Expose a public query to your frontend
 export const checkPermission = query({
   args: {
     permission: v.string(),
     resource: v.object({ type: v.string(), id: v.string() }),
-    requestContext: v.any(), // Important if using MyContext!
+    requestContext: v.any(),
   },
   handler: async (ctx, args) => {
-    // Determine subject from the auth context (e.g. convex auth)
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) return false;
 
@@ -534,19 +639,17 @@ export const checkPermission = query({
 });
 ```
 
-Then in your React app, you can generate fully type-safe hooks by passing
-`typeof zbarSchema` to `createReactZbar`:
+Then generate type-safe hooks by passing `typeof zbarSchema` to
+`createReactZbar`:
 
 ```tsx
 // lib/zbar.ts
 import { createReactZbar } from "@csilvas/convzibar/react";
-import type { zbarSchema } from "../convex/zbar"; // Import your schema type
+import type { zbarSchema } from "../convex/zbar";
 
 export const { ZbarProvider, useCan, usePermissions } =
   createReactZbar<typeof zbarSchema>();
 ```
-
-Now use your generated provider and hooks anywhere:
 
 ```tsx
 // app/providers.tsx
@@ -565,7 +668,6 @@ export function Providers({ children }: { children: React.ReactNode }) {
 import { useCan } from "../lib/zbar";
 
 export function MyComponent({ projectId }: { projectId: string }) {
-  // Pass runtime context that aligns with `MyContext`
   const canEdit = useCan(
     "edit",
     { type: "project", id: projectId },
@@ -577,35 +679,139 @@ export function MyComponent({ projectId }: { projectId: string }) {
 }
 ```
 
-### 8. Cleaning Up
+### 9. Cleaning Up
 
-When an entity is deleted from your application, you must remove it from the
+When an entity is deleted from your application, remove it from the
 authorization graph to prevent stale access and clean up the traversal cache.
 
 ```typescript
 export const deleteProject = mutation({
   handler: async (ctx, args) => {
     // Scours the graph for any incoming or outgoing relationships involving this project,
-    // deletes them, and safely cascade-deletes all derived paths in the cache.
+    // deletes them, and safely cascade-deletes all derived paths in the cache via
+    // token-lineage tracking — no full graph re-computation.
     await zbar.deleteEntity(ctx, { type: "project", id: projId });
   },
 });
 ```
 
-## Architecture Notes
+## Architecture
 
-- **`relationships` table:** Stores the ground-truth edges (including
-  auto-inserted reverse edges).
-- **`effectiveRelationships` table:** A materialized cache storing flattened
-  cross-object traversal paths. It heavily utilizes token lineage so that deeply
-  nested edge deletions can cascade securely and surgically in O(N) without full
-  graph re-computations.
-- **Storage Optimization:** Local inheritance (e.g., `admin` implicitly granting
-  `viewer`) is purposefully _not_ expanded in the cache. It is inferred entirely
-  in memory during the read step to prevent massive database write
-  amplification.
-- **Reverse Edges:** Declared via `{ type, reverse }` in the schema. At
-  write-time, the engine inserts the mirrored edge as a real base relationship
-  and queues it for graph expansion alongside the forward edge. On removal,
-  both edges are deleted atomically and their downstream derivations are
-  cascade-removed.
+### Storage
+
+- **`relationships` table:** Ground-truth base edges. Stores every
+  explicitly-written edge plus auto-inserted reverse edges. Indexed by
+  `(tenantId, objectType, objectId)` and by
+  `(tenantId, subjectType, subjectId, relation, objectType, objectId)` for
+  point lookups and range scans in both directions.
+- **`effectiveRelationships` table:** Materialized cache of cross-object
+  derivations produced by the write-time BFS. Each row stores one or more
+  `paths`, where each path carries the `baseIds` (lineage tokens) of the
+  edges that produced it and any conditions gated along the way. Removing a
+  base edge surgically deletes only the paths containing that ID — an O(N)
+  cascade instead of a full recomputation.
+- **Local inheritance is never stored.** The fact that `admin` implies
+  `viewer` is inferred at read time via `resolveRelationInheritance()` over
+  the schema — a pure CPU operation, no extra DB writes.
+- **Read-time paths are never stored.** Declaring
+  `.readTimeRelation('editor', 'parent_org.admin')` produces zero
+  traversal rules; the planner synthesizes the join at query time.
+
+### Planning Algebra
+
+Every read — `can`, `hasRelationship`, `.list()`, `.via()`, `getPermissions` —
+flows through [`planRelation`](src/client/zbar/traversal.ts) which compiles
+the schema into a `Traversal` tree built from these operators:
+
+- **`Materialised`** — one indexed query over `effectiveRelationships`
+  (cost 1). The structural-connectivity leaf.
+- **`ValidatedMaterialised`** — same as `Materialised`, plus per-target
+  condition validation. Used whenever a permission is in play.
+- **`EdgeExpand`** — the primitive enumeration of entities reachable via one
+  typed relation. The source side of `Compose`.
+- **`Compose(sourceSide, subjectSide)`** — two-hop join through an
+  intermediate (`subject --subjectSide--> M --sourceSide--> object`). Used
+  to express dot-paths and chained read-time paths.
+- **`Union.of(...children)`** — disjunction with algebraic identities
+  (flattens nested unions, drops `EMPTY`, collapses single-child unions)
+  and cost-ordered children so the cheapest branch probes first.
+
+Execution strategies:
+
+- **`check`** is a hybrid sequential-parallel probe: the cheapest child
+  fires first; only on a miss do remaining children race with first-true
+  early exit. Happy path fires exactly one query.
+- **`checkBatch` / `checkBatchSubjects`** narrow sequentially: each child
+  only sees the candidates the previous children didn't cover.
+- **`expandObjectsFromMany` / `expandSubjectsFromMany`** collapse
+  multi-subject fan-outs into **one** Convex round-trip per hop via the
+  component's batch queries — so `Compose` chains run in O(depth) queries
+  regardless of branching factor.
+
+The planner never distinguishes "materialised" from "read-time" at runtime;
+both are just encodings of the same schema declaration compiled into the
+same operator language.
+
+### Write-Time Expansion
+
+`addRelation` inserts the base edge, auto-inserts any declared reverse edge,
+and enqueues a BFS that walks `graphConfig.traversalRules`. Each rule
+derived from a `.relation()` dot-path or userset either:
+
+1. Finds the edge being added to be a **source** of the rule and materializes
+   downstream effective relationships, or
+2. Finds it to be a **target** and walks backward to materialize any
+   predecessor paths that now complete.
+
+Path expansion is cycle-safe (`baseIds` intersection) and depth-capped
+(`maxWriteDepth`, default 10). Large expansions are chunked through
+`@convex-dev/workpool` when `asyncWrites` is enabled (default).
+
+`updateRelation` and `setRelation` use Add-Before-Remove via an
+`onComplete` chain: the new edge is inserted and fully expanded first, then
+the old edge(s) are removed. Users never experience a transient loss of
+access.
+
+### Read-Time Depth Cap
+
+The `readTimeChainDepth` option caps recursion in `rtBranches`. When depth
++ 1 reaches the cap, the inner hop collapses to a bare `Materialised`
+(no further chaining). The default (3) is generous for typical schemas
+while small enough to stop accidental runaways. Cycles in the read-time
+graph are detected at schema load — not at runtime — via a 3-color DFS in
+`detectReadTimePathCycle`.
+
+### Multi-Permission Evaluator
+
+`getPermissions()` delegates to `evaluateManyPermissions`, which is the
+theoretical minimum-work shape for "every permission on (subject, object)":
+
+1. **One** materialized batch query covering the union of every target
+   relation across every permission.
+2. Per-permission CPU-side validation against the pre-fetched rows.
+3. Shared read-time fallback: each unique `(derivedRelation, sourceType)`
+   branch runs **at most once**; a single RT hit grants every still-pending
+   permission whose targets include that derived relation.
+
+### Escape Hatch: `@csilvas/convzibar/unsafe`
+
+For migrations, backfills, and raw inspection, the `unsafe` entry point
+exposes cursor-based `scanRelationships`, bulk `transformRelationships`,
+`insertRelationship` / `patchRelationship` / `deleteRelationship` (no
+effective-graph side effects), and `rebuildEffectiveRelationships` /
+`clearEffectiveRelationships`. Use these when you need to reshape the graph
+outside the normal API — e.g. renaming a relation across millions of
+rows — then rebuild the cache.
+
+```typescript
+import { transformRelationships, rebuildEffectiveRelationships }
+  from "@csilvas/convzibar/unsafe";
+
+// Rename a relation
+await transformRelationships(ctx, { relation: "viewer" }, (r) => ({
+  patch: { relation: "reader" },
+}));
+
+// Rebuild the effective-relationship cache
+await rebuildEffectiveRelationships(ctx);
+```

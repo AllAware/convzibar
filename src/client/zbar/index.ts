@@ -378,12 +378,8 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
   async updateRelation<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
-    OldRelation extends
-      | EntityRelations<Schema, ObjectType>
-      | EntityRelations<Schema, SubjectType>,
-    NewRelation extends
-      | EntityRelations<Schema, ObjectType>
-      | EntityRelations<Schema, SubjectType>,
+    OldRelation extends EntityRelations<Schema, ObjectType>,
+    NewRelation extends EntityRelations<Schema, ObjectType>,
   >(
     ctx: MutationCtx | ActionCtx,
     subject: { type: SubjectType; id: string },
@@ -433,9 +429,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
   async setRelation<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
-    Relation extends
-      | EntityRelations<Schema, ObjectType>
-      | EntityRelations<Schema, SubjectType>,
+    Relation extends EntityRelations<Schema, ObjectType>,
   >(
     ctx: MutationCtx | ActionCtx,
     subject: { type: SubjectType; id: string },
@@ -487,9 +481,7 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
   async removeRelation<
     SubjectType extends keyof Schema["entities"] & string,
     ObjectType extends keyof Schema["entities"] & string,
-    Relation extends
-      | EntityRelations<Schema, ObjectType>
-      | EntityRelations<Schema, SubjectType>,
+    Relation extends EntityRelations<Schema, ObjectType>,
   >(
     ctx: MutationCtx | ActionCtx,
     subject: { type: SubjectType; id: string },

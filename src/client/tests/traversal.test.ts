@@ -1539,3 +1539,110 @@ describe("userset readTimeRelation", () => {
     expect(rows.map((r: any) => r.subjectId).sort()).toEqual(["alice", "bob"]);
   });
 });
+
+// ============================================================================
+// Union.check query-count contract.
+//
+// The planner builds `Union(direct, ...RT composes)` with children sorted by
+// cost so `children[0]` is the cheapest branch (direct Materialised). The
+// hybrid check probes that branch sequentially and only fires the RT
+// composes when the direct probe misses. These tests pin the query-count
+// contract for all three outcomes: direct hit, RT hit, and all miss.
+// ============================================================================
+
+describe("Union.check hybrid (sequential direct, parallel RT on miss)", () => {
+  test("direct hit fires exactly one query — RT branches are skipped entirely", async () => {
+    const t = setup();
+    const { ctx, counts } = countingCtx(t);
+    const zbar = mkUsersetZbar();
+    const z = (zbar as any)._internal as ZbarInternal;
+
+    const alice = { type: "user" as const, id: "alice" };
+    const device = { type: "device" as const, id: "d1" };
+    await zbar.addRelation(ctx, alice, "viewer", device);
+
+    for (const k of Object.keys(counts) as Array<keyof typeof counts>) {
+      counts[k] = 0;
+    }
+    const plan = planRelation(z, "device", [{ relation: "viewer" }]);
+    expect(plan).toBeInstanceOf(Union);
+    expect(await plan.check(ctx, alice, device)).toBe(true);
+
+    // Direct branch hits on the first query → RT Compose never fires.
+    expect(counts.checkPermissionFast).toBe(1);
+    expect(counts.listSubjectsWithAccessFast).toBe(0);
+    expect(counts.checkPermissionBatchObjects).toBe(0);
+  });
+
+  test("direct miss + RT hit fires direct + every RT query (no cancellation)", async () => {
+    const t = setup();
+    const { ctx, counts } = countingCtx(t);
+    const zbar = mkUsersetZbar();
+    const z = (zbar as any)._internal as ZbarInternal;
+
+    const alice = { type: "user" as const, id: "alice" };
+    const group = { type: "group" as const, id: "g1" };
+    const device = { type: "device" as const, id: "d1" };
+    await zbar.addRelation(ctx, alice, "viewer", group);
+    await zbar.addRelation(ctx, group, "viewer", device);
+
+    for (const k of Object.keys(counts) as Array<keyof typeof counts>) {
+      counts[k] = 0;
+    }
+    const plan = planRelation(z, "device", [{ relation: "viewer" }]);
+    expect(await plan.check(ctx, alice, device)).toBe(true);
+
+    // Direct probe misses (1 query), then RT Compose fires its two hops.
+    expect(counts.checkPermissionFast).toBe(1);
+    expect(counts.listSubjectsWithAccessFast).toBe(1);
+    expect(counts.checkPermissionBatchObjects).toBe(1);
+  });
+
+  test("all miss fires direct + the RT source hop (no intermediates → Compose self-short-circuits)", async () => {
+    const t = setup();
+    const { ctx, counts } = countingCtx(t);
+    const zbar = mkUsersetZbar();
+    const z = (zbar as any)._internal as ZbarInternal;
+
+    const alice = { type: "user" as const, id: "alice" };
+    const device = { type: "device" as const, id: "d1" };
+    // No edges at all — alice has no access.
+
+    for (const k of Object.keys(counts) as Array<keyof typeof counts>) {
+      counts[k] = 0;
+    }
+    const plan = planRelation(z, "device", [{ relation: "viewer" }]);
+    expect(await plan.check(ctx, alice, device)).toBe(false);
+
+    // Direct probe misses (1), RT Compose fires its source hop (1) and
+    // bails on empty intermediates before firing the second hop.
+    expect(counts.checkPermissionFast).toBe(1);
+    expect(counts.listSubjectsWithAccessFast).toBe(1);
+    expect(counts.checkPermissionBatchObjects).toBe(0);
+  });
+
+  test("all miss with intermediates present fires every branch end-to-end", async () => {
+    const t = setup();
+    const { ctx, counts } = countingCtx(t);
+    const zbar = mkUsersetZbar();
+    const z = (zbar as any)._internal as ZbarInternal;
+
+    const alice = { type: "user" as const, id: "alice" };
+    const group = { type: "group" as const, id: "g1" };
+    const device = { type: "device" as const, id: "d1" };
+    // Group is on the device (intermediate exists) but alice is not in it.
+    await zbar.addRelation(ctx, group, "viewer", device);
+
+    for (const k of Object.keys(counts) as Array<keyof typeof counts>) {
+      counts[k] = 0;
+    }
+    const plan = planRelation(z, "device", [{ relation: "viewer" }]);
+    expect(await plan.check(ctx, alice, device)).toBe(false);
+
+    // Direct (1) + RT source hop finds the group (1) + RT subject-side
+    // batch check against that group (1) = 3 queries total.
+    expect(counts.checkPermissionFast).toBe(1);
+    expect(counts.listSubjectsWithAccessFast).toBe(1);
+    expect(counts.checkPermissionBatchObjects).toBe(1);
+  });
+});
