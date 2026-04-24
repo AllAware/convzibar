@@ -5,7 +5,7 @@ import { internalMutation, mutation } from "./_generated/server";
 import { writeAuditLog } from "./audit";
 import { applyTraversalRulesToItem } from "./expand";
 import { canonicalizePath, pathKey } from "./paths";
-import { runOrEnqueue } from "./run-or-enqueue";
+import { runOrEnqueue } from "./runOrEnqueue";
 import type { GraphConfig } from "./types";
 import {
   conditionValidator,

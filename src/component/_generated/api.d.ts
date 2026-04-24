@@ -8,9 +8,13 @@
  * @module
  */
 
+import type * as audit from "../audit.js";
+import type * as expand from "../expand.js";
 import type * as helpers from "../helpers.js";
 import type * as mutations from "../mutations.js";
+import type * as paths from "../paths.js";
 import type * as queries from "../queries.js";
+import type * as runOrEnqueue from "../runOrEnqueue.js";
 import type * as types from "../types.js";
 import type * as unsafe from "../unsafe.js";
 import type * as validators from "../validators.js";
@@ -23,9 +27,13 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  audit: typeof audit;
+  expand: typeof expand;
   helpers: typeof helpers;
   mutations: typeof mutations;
+  paths: typeof paths;
   queries: typeof queries;
+  runOrEnqueue: typeof runOrEnqueue;
   types: typeof types;
   unsafe: typeof unsafe;
   validators: typeof validators;
