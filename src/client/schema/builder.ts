@@ -362,41 +362,8 @@ export class SchemaBuilder<
   }
 
   build(): BuiltZbarSchema<Data, Conditions, Entities> {
-    const entities = this._schema.entities as Record<string, any>;
-
-    // ── Pass 1: Collect all reverse edge declarations ──
-    // reverseMap[targetEntity][reverseRelName] = { sourceEntity, via relation on targetEntity }
-    const reverseMap: Record<
-      string,
-      Record<string, { subjectType: string; relName: string }>
-    > = {};
-
-    for (const [entityType, entityDef] of Object.entries(entities)) {
-      const relations = entityDef.relations || {};
-      for (const [relName, relDef] of Object.entries(relations)) {
-        const defs = Array.isArray(relDef) ? relDef : [relDef];
-        for (const d of defs) {
-          if (
-            typeof d === "object" &&
-            d !== null &&
-            "type" in d &&
-            "reverse" in d &&
-            (d as any).reverse
-          ) {
-            const targetEntityName = (d as any).type as string;
-            const reverseRelName = (d as any).reverse as string;
-            if (!entities[targetEntityName]) continue;
-
-            reverseMap[targetEntityName] = reverseMap[targetEntityName] || {};
-            reverseMap[targetEntityName][reverseRelName] = {
-              subjectType: entityType,
-              relName,
-            };
-          }
-        }
-      }
-    }
-
+    // Reverse-edge wiring happens at runtime in `parseSchemaToGraphConfig`.
+    // `build()` just returns the raw schema — no pre-computation needed.
     return this._schema;
   }
 }

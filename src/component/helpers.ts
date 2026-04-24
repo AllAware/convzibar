@@ -1,3 +1,4 @@
+import { expandRelationTargets } from "../shared/relation-def";
 import type { GraphConfig, ReadTimePath, TraversalRule } from "./types";
 
 function expandRelation(
@@ -5,46 +6,9 @@ function expandRelation(
   objectType: string,
   relation: string,
 ): Array<{ relation: string; condition?: string }> {
-  const results: Array<{ relation: string; condition?: string }> = [];
-  const localRelations = schema.entities[objectType]?.relations || {};
-  const expand = (rel: string, currentCondition?: string) => {
-    if (
-      results.some(
-        (r) => r.relation === rel && r.condition === currentCondition,
-      )
-    )
-      return;
-    results.push({ relation: rel, condition: currentCondition });
-
-    const relDef = localRelations[rel];
-    if (relDef) {
-      const defs = Array.isArray(relDef) ? relDef : [relDef];
-      for (const d of defs) {
-        // Only recurse into local relation references (not entity type targets,
-        // dot-path traversals, or userset references).
-        if (
-          typeof d === "string" &&
-          !d.includes(".") &&
-          !d.includes("#") &&
-          localRelations[d] !== undefined
-        ) {
-          expand(d, currentCondition);
-        } else if (typeof d === "object" && d !== null && "relation" in d) {
-          const rel = (d as any).relation;
-          if (
-            typeof rel === "string" &&
-            !rel.includes(".") &&
-            !rel.includes("#") &&
-            localRelations[rel] !== undefined
-          ) {
-            expand(rel, (d as any).condition || currentCondition);
-          }
-        }
-      }
-    }
-  };
-  expand(relation, undefined);
-  return results;
+  return expandRelationTargets(schema, objectType, [relation], {
+    strictLocalRefs: true,
+  });
 }
 
 function getTargetEntityTypes(

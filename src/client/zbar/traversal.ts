@@ -1,3 +1,4 @@
+import { entityFromKey, idFromKey } from "../../shared/keys";
 import type { ActionCtx, QueryCtx, ZbarInternal } from "../internal";
 import { resolveRelationInheritance } from "./resolvers";
 import {
@@ -113,10 +114,26 @@ export interface Traversal {
 // ---------------------------------------------------------------------------
 // Materialised query primitives.
 //
-// Seven one-liner helpers map `(shape, direction)` onto a Convex query. Both
-// `Materialised` and `ValidatedMaterialised` dispatch through these — the
-// only difference between the classes is what they do with the rows.
+// Each public read operation maps onto one component query. `runComponentQuery`
+// is the shared thin wrapper — it spreads `tenantId` and `relations` into the
+// argument bag so the individual fetchers only specify the parts that actually
+// vary. Separate named functions are preserved (one per backend query) so the
+// test suite's per-query call counters still fire.
 // ---------------------------------------------------------------------------
+
+function runComponentQuery(
+  z: ZbarInternal,
+  ctx: QueryCtx | ActionCtx,
+  queryRef: any,
+  relations: readonly string[],
+  extra: Record<string, unknown>,
+): Promise<any[]> {
+  return ctx.runQuery(queryRef, {
+    tenantId: z.tenantId,
+    relations: [...relations],
+    ...extra,
+  });
+}
 
 async function fetchCheckPoint(
   z: ZbarInternal,
@@ -125,10 +142,8 @@ async function fetchCheckPoint(
   relations: readonly string[],
   object: Entity,
 ): Promise<any[]> {
-  return ctx.runQuery(z.component.queries.checkPermissionFast, {
-    tenantId: z.tenantId,
+  return runComponentQuery(z, ctx, z.component.queries.checkPermissionFast, relations, {
     subject,
-    relations: [...relations],
     object,
   });
 }
@@ -141,10 +156,8 @@ async function fetchBatchObjects(
   objectType: string,
   candidateIds: readonly string[],
 ): Promise<any[]> {
-  return ctx.runQuery(z.component.queries.checkPermissionBatchObjects, {
-    tenantId: z.tenantId,
+  return runComponentQuery(z, ctx, z.component.queries.checkPermissionBatchObjects, relations, {
     subject,
-    relations: [...relations],
     objectType,
     candidateObjectIds: [...candidateIds],
   });
@@ -158,10 +171,8 @@ async function fetchBatchSubjects(
   subjectType: string,
   candidateIds: readonly string[],
 ): Promise<any[]> {
-  return ctx.runQuery(z.component.queries.checkPermissionBatchSubjects, {
-    tenantId: z.tenantId,
+  return runComponentQuery(z, ctx, z.component.queries.checkPermissionBatchSubjects, relations, {
     object,
-    relations: [...relations],
     subjectType,
     candidateSubjectIds: [...candidateIds],
   });
@@ -174,10 +185,8 @@ async function fetchExpandObjects(
   relations: readonly string[],
   objectType: string,
 ): Promise<any[]> {
-  return ctx.runQuery(z.component.queries.listAccessibleObjectsFast, {
-    tenantId: z.tenantId,
+  return runComponentQuery(z, ctx, z.component.queries.listAccessibleObjectsFast, relations, {
     subject,
-    relations: [...relations],
     objectType,
   });
 }
@@ -189,10 +198,8 @@ async function fetchExpandSubjects(
   relations: readonly string[],
   subjectType: string,
 ): Promise<any[]> {
-  return ctx.runQuery(z.component.queries.listSubjectsWithAccessFast, {
-    tenantId: z.tenantId,
+  return runComponentQuery(z, ctx, z.component.queries.listSubjectsWithAccessFast, relations, {
     object,
-    relations: [...relations],
     subjectType,
   });
 }
@@ -204,10 +211,8 @@ async function fetchExpandObjectsFromMany(
   relations: readonly string[],
   objectType: string,
 ): Promise<any[]> {
-  return ctx.runQuery(z.component.queries.listAccessibleObjectsBatch, {
-    tenantId: z.tenantId,
+  return runComponentQuery(z, ctx, z.component.queries.listAccessibleObjectsBatch, relations, {
     subjects: [...subjects],
-    relations: [...relations],
     objectType,
   });
 }
@@ -219,22 +224,10 @@ async function fetchExpandSubjectsFromMany(
   relations: readonly string[],
   subjectType: string,
 ): Promise<any[]> {
-  return ctx.runQuery(z.component.queries.listSubjectsWithAccessBatch, {
-    tenantId: z.tenantId,
+  return runComponentQuery(z, ctx, z.component.queries.listSubjectsWithAccessBatch, relations, {
     objects: [...objects],
-    relations: [...relations],
     subjectType,
   });
-}
-
-function entityFromKey(scopeKey: string): Entity {
-  const idx = scopeKey.indexOf(":");
-  return { type: scopeKey.slice(0, idx), id: scopeKey.slice(idx + 1) };
-}
-
-function idFromKey(scopeKey: string): string {
-  const idx = scopeKey.indexOf(":");
-  return scopeKey.slice(idx + 1);
 }
 
 function objectIds(rows: readonly any[]): Set<string> {
@@ -897,13 +890,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
       objectType,
       candidateIds,
     );
-    return this._validateRows(
-      ctx,
-      rows,
-      (eff) => idFromKey(eff.objectKey),
-      () => subject,
-      (_eff, id) => ({ type: objectType, id }),
-    );
+    return this._validateForward(ctx, rows, objectType, () => subject);
   }
 
   async checkBatchSubjects(
@@ -923,13 +910,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
       subjectType,
       candidateIds,
     );
-    return this._validateRows(
-      ctx,
-      rows,
-      (eff) => idFromKey(eff.subjectKey),
-      (_eff, id) => ({ type: subjectType, id }),
-      () => object,
-    );
+    return this._validateReverse(ctx, rows, subjectType, () => object);
   }
 
   async expandObjects(
@@ -945,13 +926,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
       this.relations,
       objectType,
     );
-    return this._validateRows(
-      ctx,
-      rows,
-      (eff) => idFromKey(eff.objectKey),
-      () => subject,
-      (_eff, id) => ({ type: objectType, id }),
-    );
+    return this._validateForward(ctx, rows, objectType, () => subject);
   }
 
   async expandSubjects(
@@ -967,13 +942,7 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
       this.relations,
       subjectType,
     );
-    return this._validateRows(
-      ctx,
-      rows,
-      (eff) => idFromKey(eff.subjectKey),
-      (_eff, id) => ({ type: subjectType, id }),
-      () => object,
-    );
+    return this._validateReverse(ctx, rows, subjectType, () => object);
   }
 
   async expandObjectsFromMany(
@@ -991,12 +960,8 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
     );
     // Rows from the batched query mix subjects; decode each row's own subject
     // key so condition validation sees the right pair.
-    return this._validateRows(
-      ctx,
-      rows,
-      (eff) => idFromKey(eff.objectKey),
-      (eff) => entityFromKey(eff.subjectKey),
-      (_eff, id) => ({ type: objectType, id }),
+    return this._validateForward(ctx, rows, objectType, (eff) =>
+      entityFromKey(eff.subjectKey),
     );
   }
 
@@ -1013,12 +978,44 @@ export class ValidatedMaterialised<Data = unknown> implements Traversal {
       this.relations,
       subjectType,
     );
+    return this._validateReverse(ctx, rows, subjectType, (eff) =>
+      entityFromKey(eff.objectKey),
+    );
+  }
+
+  /**
+   * Forward validation: row objects decode from `objectKey` with the fixed
+   * `objectType`, row subjects supplied by `subjectForRow` (either a constant
+   * or a per-row decoder for the batched-fan-out case).
+   */
+  private async _validateForward(
+    ctx: QueryCtx | ActionCtx,
+    rows: readonly any[],
+    objectType: string,
+    subjectForRow: (eff: any) => Entity,
+  ): Promise<Set<string>> {
+    return this._validateRows(
+      ctx,
+      rows,
+      (eff) => idFromKey(eff.objectKey),
+      (eff) => subjectForRow(eff),
+      (_eff, id) => ({ type: objectType, id }),
+    );
+  }
+
+  /** Mirror of `_validateForward` for the reverse direction. */
+  private async _validateReverse(
+    ctx: QueryCtx | ActionCtx,
+    rows: readonly any[],
+    subjectType: string,
+    objectForRow: (eff: any) => Entity,
+  ): Promise<Set<string>> {
     return this._validateRows(
       ctx,
       rows,
       (eff) => idFromKey(eff.subjectKey),
       (_eff, id) => ({ type: subjectType, id }),
-      (eff) => entityFromKey(eff.objectKey),
+      (eff) => objectForRow(eff),
     );
   }
 

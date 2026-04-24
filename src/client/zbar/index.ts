@@ -315,6 +315,37 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     return new ListDirectQueryBuilder(this._internal) as any;
   }
 
+  /** Shared fields carried on every mutation payload. */
+  private _commonWriteArgs(actorOverride?: string) {
+    const z = this._internal;
+    return {
+      tenantId: z.tenantId,
+      createdBy: actorOverride ?? z.defaultActorId,
+      graphConfig: z.graphConfig,
+      enableAuditLog: z.enableAuditLog,
+      asyncWrites: z.asyncWrites,
+    };
+  }
+
+  /** Normalise the options object into a ready-to-ship write payload slice. */
+  private _optionsToArgs(options?: {
+    condition?: string;
+    conditionContext?: unknown;
+    createdBy?: string;
+    properties?: unknown;
+  }) {
+    return {
+      condition: options?.condition
+        ? {
+            condition: options.condition,
+            conditionContext: options.conditionContext,
+          }
+        : undefined,
+      properties: options?.properties,
+      ...this._commonWriteArgs(options?.createdBy),
+    };
+  }
+
   /**
    * Add a relationship between a subject and an object.
    *
@@ -354,21 +385,10 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     }
 
     return ctx.runMutation(this.component.mutations.addRelation, {
-      tenantId: z.tenantId,
       subject,
       relation,
       object,
-      condition: options?.condition
-        ? {
-            condition: options.condition,
-            conditionContext: options.conditionContext,
-          }
-        : undefined,
-      properties: options?.properties,
-      createdBy: options?.createdBy ?? z.defaultActorId,
-      graphConfig: z.graphConfig,
-      enableAuditLog: z.enableAuditLog,
-      asyncWrites: z.asyncWrites,
+      ...this._optionsToArgs(options as any),
     });
   }
 
@@ -404,22 +424,11 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     }
 
     return ctx.runMutation(this.component.mutations.updateRelation, {
-      tenantId: z.tenantId,
       subject,
       oldRelation,
       newRelation,
       object,
-      condition: options?.condition
-        ? {
-            condition: options.condition,
-            conditionContext: options.conditionContext,
-          }
-        : undefined,
-      properties: options?.properties,
-      createdBy: options?.createdBy ?? z.defaultActorId,
-      graphConfig: z.graphConfig,
-      enableAuditLog: z.enableAuditLog,
-      asyncWrites: z.asyncWrites,
+      ...this._optionsToArgs(options as any),
     });
   }
 
@@ -456,22 +465,11 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     );
 
     return ctx.runMutation(this.component.mutations.setRelation, {
-      tenantId: z.tenantId,
       subject,
       relation,
       object,
       objectRelations,
-      condition: options?.condition
-        ? {
-            condition: options.condition,
-            conditionContext: options.conditionContext,
-          }
-        : undefined,
-      properties: options?.properties,
-      createdBy: options?.createdBy ?? z.defaultActorId,
-      graphConfig: z.graphConfig,
-      enableAuditLog: z.enableAuditLog,
-      asyncWrites: z.asyncWrites,
+      ...this._optionsToArgs(options as any),
     });
   }
 
@@ -492,15 +490,17 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     const z = this._internal;
     validateRelationParameter(z, subject, relation, object);
 
+    const { tenantId, graphConfig, enableAuditLog, asyncWrites } =
+      this._commonWriteArgs();
     return ctx.runMutation(this.component.mutations.removeRelation, {
-      tenantId: z.tenantId,
+      tenantId,
       subject,
       relation,
       object,
       actorId: actorId ?? z.defaultActorId,
-      graphConfig: z.graphConfig,
-      enableAuditLog: z.enableAuditLog,
-      asyncWrites: z.asyncWrites,
+      graphConfig,
+      enableAuditLog,
+      asyncWrites,
     });
   }
 
@@ -516,13 +516,15 @@ export class Zbar<Schema extends ZbarSchema<Data>, Data = any> {
     effectiveRelationshipsRemoved: number;
   }> {
     const z = this._internal;
+    const { tenantId, graphConfig, enableAuditLog, asyncWrites } =
+      this._commonWriteArgs();
     return ctx.runMutation(this.component.mutations.deleteEntity, {
-      tenantId: z.tenantId,
+      tenantId,
       entity,
       actorId: actorId ?? z.defaultActorId,
-      graphConfig: z.graphConfig,
-      enableAuditLog: z.enableAuditLog,
-      asyncWrites: z.asyncWrites,
+      graphConfig,
+      enableAuditLog,
+      asyncWrites,
     });
   }
 }

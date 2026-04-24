@@ -1,4 +1,4 @@
-import type { ActionCtx, QueryCtx, ZbarInternal } from "../internal";
+import type { ActionCtx, QueryCtx } from "../internal";
 import type { ZbarSchema } from "../types";
 import {
   resolvePermissionRelations,
@@ -9,54 +9,30 @@ import {
   collectViaSubjects,
   planRelation,
 } from "../zbar/traversal";
+import { BaseListBuilder } from "./base";
+
+type ListResult = { objectId: string } | { subjectId: string };
 
 /**
  * Internal implementation of the fluent list query builder.
  * A single class implements all builder interfaces; the TypeScript interfaces
  * (in ./types.ts) restrict which methods are visible at each step.
  */
-export class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
-  private _objectType!: string;
-  private _objectId?: string;
-  private _subjectType?: string;
-  private _subjectId?: string;
-  private _relation?: string;
-  private _permission?: string;
+export class ListQueryBuilder<
+  Schema extends ZbarSchema<Data>,
+  Data,
+> extends BaseListBuilder<ListResult> {
   private _via: Array<{ type: string; id: string }> = [];
   private _mode!: "listObjects" | "listSubjects";
-  private _mapFn?: (item: any) => any;
 
-  constructor(private z: ZbarInternal) {}
-
-  object(objectOrType: string | { type: string; id: string }): this {
-    if (typeof objectOrType === "string") {
-      this._objectType = objectOrType;
-      this._mode = "listObjects";
-    } else {
-      this._objectType = objectOrType.type;
-      this._objectId = objectOrType.id;
-      this._mode = "listSubjects";
-    }
-    return this;
-  }
-
-  relation(relation: string): this {
-    this._relation = relation;
-    return this;
-  }
-
-  permission(permission: string): this {
-    this._permission = permission;
-    return this;
-  }
-
-  subject(subjectOrType: string | { type: string; id: string }): this {
-    if (typeof subjectOrType === "string") {
-      this._subjectType = subjectOrType;
-    } else {
-      this._subjectType = subjectOrType.type;
-      this._subjectId = subjectOrType.id;
-    }
+  /**
+   * Overridden to set `_mode` alongside the normal object/type assignment:
+   * `object(string)` is the "list objects" flavour, `object({type, id})` is
+   * the "list subjects" flavour.
+   */
+  override object(objectOrType: string | { type: string; id: string }): this {
+    super.object(objectOrType);
+    this._mode = typeof objectOrType === "string" ? "listObjects" : "listSubjects";
     return this;
   }
 
@@ -68,32 +44,20 @@ export class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
     return this;
   }
 
-  map(fn: (item: any) => any): this {
-    this._mapFn = fn;
-    return this;
-  }
-
-  private _finalize(results: any[]): Promise<any[]> {
-    if (this._mapFn) {
-      return Promise.all(results.map(this._mapFn));
-    }
-    return Promise.resolve(results);
-  }
-
   async collect(
     ctx: QueryCtx | ActionCtx,
     requestContext?: Data,
-  ): Promise<Array<{ objectId: string } | { subjectId: string }>> {
+  ): Promise<ListResult[]> {
     const z = this.z;
     const isPermission = this._permission != null;
     const relOrPerm = (this._relation ?? this._permission)!;
 
     // 1. Resolve which effective relations to query for
     const targets: Array<{ relation: string; condition?: string }> = isPermission
-      ? resolvePermissionRelations(z, this._objectType, relOrPerm)
-      : resolveRelationInheritance(z, this._objectType, relOrPerm);
+      ? resolvePermissionRelations(z, this._objectType!, relOrPerm)
+      : resolveRelationInheritance(z, this._objectType!, relOrPerm);
 
-    if (targets.length === 0) return [];
+    if (targets.length === 0) return this._applyMap([]);
     const acceptableRelations = targets.map((t) => t.relation);
     const hasVia = this._via.length > 0;
 
@@ -102,7 +66,7 @@ export class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
     // checkBatchSubjects. Conditions + RT fallback live inside the plan.
     const plan = planRelation(
       z,
-      this._objectType,
+      this._objectType!,
       targets,
       relOrPerm,
       requestContext,
@@ -117,7 +81,7 @@ export class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
 
     if (this._mode === "listObjects") {
       const subject = { type: this._subjectType!, id: this._subjectId! };
-      const objectType = this._objectType;
+      const objectType = this._objectType!;
       const ids = hasVia
         ? await collectViaObjects(
             z,
@@ -131,10 +95,10 @@ export class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
             requestContext,
           )
         : await plan.expandObjects(ctx, subject, objectType);
-      return this._finalize([...ids].map((id) => ({ objectId: id })));
+      return this._applyMap([...ids].map((id) => ({ objectId: id })));
     }
 
-    const object = { type: this._objectType, id: this._objectId! };
+    const object = { type: this._objectType!, id: this._objectId! };
     const subjectType = this._subjectType!;
     const ids = hasVia
       ? await collectViaSubjects(
@@ -149,6 +113,6 @@ export class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> {
           requestContext,
         )
       : await plan.expandSubjects(ctx, object, subjectType);
-    return this._finalize([...ids].map((id) => ({ subjectId: id })));
+    return this._applyMap([...ids].map((id) => ({ subjectId: id })));
   }
 }

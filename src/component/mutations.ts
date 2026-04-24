@@ -1,45 +1,18 @@
-import { internalMutation, mutation } from "./_generated/server";
-async function enqueueToWorkpool(
-  ctx: any,
-  mutationRef: any,
-  args: any,
-  graphConfig: any,
-) {
-  if (graphConfig?.mockWorkpool) {
-    const mutationName =
-      args.baseRelId !== undefined ? "processAddChunk" : "processRemoveChunk";
-    await ctx.db.insert("mockWorkpool", {
-      mutationName,
-      args,
-    });
-  } else {
-    await expansionPool.enqueueMutation(ctx, mutationRef, args);
-  }
-}
 import { v } from "convex/values";
+import { buildScopeKey, decodeScopeKey } from "../shared/keys";
+import { internal } from "./_generated/api";
+import { internalMutation, mutation } from "./_generated/server";
+import { writeAuditLog } from "./audit";
+import { applyTraversalRulesToItem } from "./expand";
+import { canonicalizePath, pathKey } from "./paths";
+import { runOrEnqueue } from "./run-or-enqueue";
+import type { GraphConfig } from "./types";
 import {
   conditionValidator,
   objectValidator,
   propertiesValidator,
   subjectValidator,
 } from "./validators";
-import type { GraphConfig } from "./types";
-import { expansionPool } from "./workpool";
-import { internal } from "./_generated/api";
-
-function buildScopeKey(type: string, id: string) {
-  return `${type}:${id}`;
-}
-
-/**
- * Decode `${type}:${id}` preserving any colons in `id`. The naive
- * `split(":")` truncates ids that themselves contain a colon, silently
- * matching the wrong row.
- */
-function decodeScopeKey(scopeKey: string): [type: string, id: string] {
-  const idx = scopeKey.indexOf(":");
-  return [scopeKey.slice(0, idx), scopeKey.slice(idx + 1)];
-}
 
 export const addRelation = mutation({
   args: {
@@ -146,20 +119,15 @@ async function addRelationInternal(ctx: any, args: any) {
     properties,
   });
 
-  if (enableAuditLog !== false) {
-    await ctx.db.insert("auditLog", {
-      tenantId,
-      timestamp: Date.now(),
-      action: "relation_added",
-      userId: subject.type === "user" ? subject.id : "system",
-      actorId: createdBy,
-      details: {
-        relation,
-        subject: `${subject.type}:${subject.id}`,
-        object: `${object.type}:${object.id}`,
-      },
-    });
-  }
+  await writeAuditLog(ctx, {
+    tenantId,
+    enableAuditLog,
+    action: "relation_added",
+    subject,
+    relation,
+    object,
+    actorId: createdBy,
+  });
 
   const pathItem = {
     baseIds: [relId],
@@ -228,30 +196,20 @@ async function addRelationInternal(ctx: any, args: any) {
     }
   }
 
-  if (args.asyncWrites) {
-    await enqueueToWorkpool(
-      ctx,
-      internal.mutations.processAddChunk,
-      {
-        tenantId,
-        baseRelId: relId,
-        queue,
-        graphConfig,
-        onComplete,
-        asyncWrites: true,
-      },
-      graphConfig,
-    );
-  } else {
-    await processAddChunkInternal(ctx, {
+  await runOrEnqueue(ctx, {
+    asyncWrites: args.asyncWrites,
+    graphConfig,
+    chunkRef: internal.mutations.processAddChunk,
+    payload: {
       tenantId,
       baseRelId: relId,
       queue,
       graphConfig,
       onComplete,
-      asyncWrites: false,
-    });
-  }
+      asyncWrites: args.asyncWrites ?? false,
+    },
+    inlineFn: processAddChunkInternal,
+  });
 
   return relId;
 }
@@ -274,43 +232,40 @@ async function executeOnComplete(
   ctx: any,
   onComplete: any,
   asyncWrites?: boolean,
-) {
+): Promise<void> {
   if (!onComplete) return;
 
-  if (onComplete.action === "removeRelation") {
-    await removeRelationInternal(ctx, { ...onComplete.args, asyncWrites });
-  } else if (onComplete.action === "removeRelationBatch") {
-    for (const args of onComplete.args) {
+  // Normalise single/batch variants to a uniform array so each action has
+  // one branch, not two.
+  const kind = onComplete.action === "removeRelationBatch"
+    ? "removeRelation"
+    : onComplete.action === "enqueueRemoveChunkBatch"
+      ? "enqueueRemoveChunk"
+      : onComplete.action;
+  const isBatch =
+    onComplete.action === "removeRelationBatch" ||
+    onComplete.action === "enqueueRemoveChunkBatch";
+  const argsList: any[] = isBatch ? onComplete.args : [onComplete.args];
+
+  for (const args of argsList) {
+    if (kind === "removeRelation") {
       await removeRelationInternal(ctx, { ...args, asyncWrites });
-    }
-  } else if (onComplete.action === "enqueueRemoveChunk") {
-    if (asyncWrites) {
-      await enqueueToWorkpool(
-        ctx,
-        internal.mutations.processRemoveChunk,
-        onComplete.args,
-        onComplete.args.graphConfig,
-      );
-    } else {
-      await processRemoveChunkInternal(ctx, onComplete.args);
-    }
-  } else if (onComplete.action === "enqueueRemoveChunkBatch") {
-    for (const args of onComplete.args) {
-      if (asyncWrites) {
-        await enqueueToWorkpool(
-          ctx,
-          internal.mutations.processRemoveChunk,
-          args,
-          args.graphConfig,
-        );
-      } else {
-        await processRemoveChunkInternal(ctx, args);
-      }
+    } else if (kind === "enqueueRemoveChunk") {
+      await runOrEnqueue(ctx, {
+        asyncWrites,
+        graphConfig: args.graphConfig,
+        chunkRef: internal.mutations.processRemoveChunk,
+        payload: args,
+        inlineFn: processRemoveChunkInternal,
+      });
     }
   }
 }
 
-async function processAddChunkInternal(ctx: any, args: any) {
+async function processAddChunkInternal(
+  ctx: any,
+  args: any,
+): Promise<void> {
   const { tenantId, baseRelId, queue, graphConfig, onComplete, asyncWrites } =
     args;
 
@@ -325,7 +280,6 @@ async function processAddChunkInternal(ctx: any, args: any) {
     return; // Base relation was deleted, abort expansion
   }
 
-  const maxWriteDepth = graphConfig.maxWriteDepth ?? 10;
   const CHUNK_SIZE = graphConfig.maxChunkSize ?? 50;
   let processed = 0;
 
@@ -348,22 +302,8 @@ async function processAddChunkInternal(ctx: any, args: any) {
 
     let isNewOrUpdated = false;
 
-    const getPathKey = (p: any) => {
-      const sortedBaseIds = [...new Set(p.baseIds || [])].sort();
-      const sortedConditions = [...(p.conditions || [])]
-        .map((c: any) => JSON.stringify(c))
-        .sort();
-      return JSON.stringify({
-        baseIds: sortedBaseIds,
-        conditions: sortedConditions,
-      });
-    };
-
-    const currentPathKey = getPathKey(current.path);
-    const canonicalCurrentPath = {
-      baseIds: [...new Set(current.path.baseIds || [])].sort(),
-      conditions: current.path.conditions,
-    };
+    const currentPathKey = pathKey(current.path);
+    const canonicalCurrentPath = canonicalizePath(current.path);
 
     if (!eff) {
       eff = {
@@ -378,7 +318,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
       isNewOrUpdated = true;
     } else {
       const pathExists = eff.paths.some(
-        (p: any) => getPathKey(p) === currentPathKey,
+        (p: any) => pathKey(p) === currentPathKey,
       );
 
       if (!pathExists) {
@@ -389,161 +329,22 @@ async function processAddChunkInternal(ctx: any, args: any) {
     }
 
     if (isNewOrUpdated) {
-      for (const rule of graphConfig.traversalRules) {
-        if (
-          current.object.type === rule.sourceObjectType &&
-          current.relation === rule.sourceRelation
-        ) {
-          const matches = await ctx.db
-            .query("effectiveRelationships")
-            .withIndex("by_tenant_object_relation_subject", (q: any) =>
-              q
-                .eq("tenantId", tenantId)
-                .eq("objectKey", sKey)
-                .eq("relation", rule.targetRelation),
-            )
-            .collect();
-
-          for (const match of matches) {
-            const [matchSubjectType, matchSubjectId] = decodeScopeKey(
-              match.subjectKey,
-            );
-            const derivedSubject = {
-              type: matchSubjectType,
-              id: matchSubjectId,
-            };
-            const derivedObject = current.object;
-
-            for (const matchPath of match.paths) {
-              const schemaCondition = rule.conditions
-                ? rule.conditions.map((c: string) => ({ condition: c }))
-                : [];
-              const combinedConditions = [
-                ...(matchPath.conditions || []),
-                ...(current.path.conditions || []),
-                ...schemaCondition,
-              ];
-
-              const hasCycle = current.path.baseIds.some((t: string) =>
-                matchPath.baseIds.includes(t),
-              );
-              if (hasCycle) continue;
-
-              if (current.depth >= maxWriteDepth) continue;
-
-              queue.push({
-                subject: derivedSubject,
-                relation: rule.derivedRelation,
-                object: derivedObject,
-                path: {
-                  baseIds: [
-                    ...new Set([...current.path.baseIds, ...matchPath.baseIds]),
-                  ].sort(),
-                  conditions:
-                    combinedConditions.length > 0
-                      ? combinedConditions
-                      : undefined,
-                },
-                depth: current.depth + 1,
-              });
-            }
-          }
-        }
-
-        if (current.relation === rule.targetRelation) {
-          const matches = await ctx.db
-            .query("effectiveRelationships")
-            .withIndex("by_tenant_subject_relation_object", (q: any) =>
-              q
-                .eq("tenantId", tenantId)
-                .eq("subjectKey", oKey)
-                .eq("relation", rule.sourceRelation),
-            )
-            .collect();
-
-          for (const match of matches) {
-            const [matchObjectType, matchObjectId] = decodeScopeKey(
-              match.objectKey,
-            );
-            if (matchObjectType === rule.sourceObjectType) {
-              const derivedSubject = current.subject;
-              const derivedObject = {
-                type: matchObjectType,
-                id: matchObjectId,
-              };
-
-              for (const matchPath of match.paths) {
-                const schemaCondition = rule.conditions
-                  ? rule.conditions.map((c: string) => ({ condition: c }))
-                  : [];
-                const combinedConditions = [
-                  ...(current.path.conditions || []),
-                  ...(matchPath.conditions || []),
-                  ...schemaCondition,
-                ];
-
-                const hasCycle = current.path.baseIds.some((t: string) =>
-                  matchPath.baseIds.includes(t),
-                );
-                if (hasCycle) continue;
-
-                if (current.depth >= maxWriteDepth) continue;
-
-                queue.push({
-                  subject: derivedSubject,
-                  relation: rule.derivedRelation,
-                  object: derivedObject,
-                  path: {
-                    baseIds: [
-                      ...new Set([
-                        ...current.path.baseIds,
-                        ...matchPath.baseIds,
-                      ]),
-                    ].sort(),
-                    conditions:
-                      combinedConditions.length > 0
-                        ? combinedConditions
-                        : undefined,
-                  },
-                  depth: current.depth + 1,
-                });
-              }
-            }
-          }
-        }
-      }
-
-      // Effective reverse edges: when the BFS materialises a derived
-      // relationship that corresponds to a declared `{ reverse: … }` side,
-      // also materialise the other side so the bidirectional semantics of
-      // the declaration apply to derivations — not just explicit writes.
-      // `skipReverse` is set by the producer (initial-add items and the
-      // push below) to prevent reverse-of-reverse loops.
-      if (graphConfig.reverseEdges && !current.skipReverse) {
-        const reverseRel =
-          graphConfig.reverseEdges?.[current.object.type]?.[current.relation]?.[
-            current.subject.type
-          ];
-        if (reverseRel && current.depth < maxWriteDepth) {
-          queue.push({
-            subject: current.object,
-            relation: reverseRel,
-            object: current.subject,
-            path: current.path,
-            depth: current.depth + 1,
-            skipReverse: true,
-          });
-        }
-      }
+      await applyTraversalRulesToItem(ctx, {
+        tenantId,
+        current,
+        queue,
+        graphConfig,
+      });
     }
   }
 
   if (queue.length > 0) {
     if (asyncWrites) {
-      await enqueueToWorkpool(
-        ctx,
-        internal.mutations.processAddChunk,
-        {
+      await runOrEnqueue(ctx, {
+        asyncWrites,
+        graphConfig,
+        chunkRef: internal.mutations.processAddChunk,
+        payload: {
           tenantId,
           baseRelId,
           queue,
@@ -551,8 +352,7 @@ async function processAddChunkInternal(ctx: any, args: any) {
           onComplete,
           asyncWrites,
         },
-        graphConfig,
-      );
+      });
     }
   } else if (onComplete) {
     await executeOnComplete(ctx, onComplete, asyncWrites);
@@ -572,20 +372,15 @@ async function deleteBaseRelationAndLog(ctx: any, args: any) {
 
   await ctx.db.delete(existingRel._id);
 
-  if (enableAuditLog !== false) {
-    await ctx.db.insert("auditLog", {
-      tenantId,
-      timestamp: Date.now(),
-      action: "relation_removed",
-      userId: subject.type === "user" ? subject.id : "system",
-      actorId,
-      details: {
-        relation,
-        subject: `${subject.type}:${subject.id}`,
-        object: `${object.type}:${object.id}`,
-      },
-    });
-  }
+  await writeAuditLog(ctx, {
+    tenantId,
+    enableAuditLog,
+    action: "relation_removed",
+    subject,
+    relation,
+    object,
+    actorId,
+  });
 
   const queue: Array<{
     subject: { type: string; id: string };
@@ -637,7 +432,10 @@ async function deleteBaseRelationAndLog(ctx: any, args: any) {
   };
 }
 
-async function removeRelationInternal(ctx: any, args: any) {
+async function removeRelationInternal(
+  ctx: any,
+  args: any,
+): Promise<false | { removed: true; effectiveRelationshipsRemoved: number }> {
   const {
     tenantId,
     subject,
@@ -674,20 +472,15 @@ async function removeRelationInternal(ctx: any, args: any) {
 
   await ctx.db.delete(existingRel._id);
 
-  if (enableAuditLog !== false) {
-    await ctx.db.insert("auditLog", {
-      tenantId,
-      timestamp: Date.now(),
-      action: "relation_removed",
-      userId: subject.type === "user" ? subject.id : "system",
-      actorId,
-      details: {
-        relation,
-        subject: `${subject.type}:${subject.id}`,
-        object: `${object.type}:${object.id}`,
-      },
-    });
-  }
+  await writeAuditLog(ctx, {
+    tenantId,
+    enableAuditLog,
+    action: "relation_removed",
+    subject,
+    relation,
+    object,
+    actorId,
+  });
 
   const queue: Array<{
     subject: { type: string; id: string };
@@ -731,28 +524,18 @@ async function removeRelationInternal(ctx: any, args: any) {
     }
   }
 
-  let effectiveRelationshipsRemoved = 0;
+  const inlineRemoved = await runOrEnqueue<number>(ctx, {
+    asyncWrites: args.asyncWrites,
+    graphConfig,
+    chunkRef: internal.mutations.processRemoveChunk,
+    payload: { tenantId, queue, graphConfig },
+    inlineFn: processRemoveChunkInternal,
+  });
 
-  if (args.asyncWrites) {
-    await enqueueToWorkpool(
-      ctx,
-      internal.mutations.processRemoveChunk,
-      {
-        tenantId,
-        queue,
-        graphConfig,
-      },
-      graphConfig,
-    );
-  } else {
-    effectiveRelationshipsRemoved = await processRemoveChunkInternal(ctx, {
-      tenantId,
-      queue,
-      graphConfig,
-    });
-  }
-
-  return { removed: true, effectiveRelationshipsRemoved };
+  return {
+    removed: true,
+    effectiveRelationshipsRemoved: inlineRemoved ?? 0,
+  };
 }
 
 export const processRemoveChunk = internalMutation({
@@ -767,7 +550,10 @@ export const processRemoveChunk = internalMutation({
   },
 });
 
-async function processRemoveChunkInternal(ctx: any, args: any) {
+async function processRemoveChunkInternal(
+  ctx: any,
+  args: any,
+): Promise<number> {
   const { tenantId, queue, graphConfig, asyncWrites } = args;
   let effectiveRelationshipsRemoved = 0;
   const CHUNK_SIZE = graphConfig.maxChunkSize ?? 50;
@@ -919,17 +705,17 @@ async function processRemoveChunkInternal(ctx: any, args: any) {
 
   if (queue.length > 0) {
     if (asyncWrites) {
-      await enqueueToWorkpool(
-        ctx,
-        internal.mutations.processRemoveChunk,
-        {
+      await runOrEnqueue(ctx, {
+        asyncWrites,
+        graphConfig,
+        chunkRef: internal.mutations.processRemoveChunk,
+        payload: {
           tenantId,
           queue,
           graphConfig,
           asyncWrites,
         },
-        graphConfig,
-      );
+      });
     }
   }
 

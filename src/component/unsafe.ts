@@ -1,22 +1,11 @@
-import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { buildScopeKey, decodeScopeKey } from "../shared/keys";
 import { api } from "./_generated/api";
-import { expansionPool } from "./workpool";
+import { internalMutation, mutation, query } from "./_generated/server";
+import { applyTraversalRulesToItem } from "./expand";
+import { canonicalizePath, pathKey } from "./paths";
 import type { GraphConfig } from "./types";
-
-function buildScopeKey(type: string, id: string) {
-  return `${type}:${id}`;
-}
-
-/**
- * Decode `${type}:${id}` preserving any colons in `id`. The naive
- * `split(":")` truncates ids that themselves contain a colon, silently
- * matching the wrong row.
- */
-function decodeScopeKey(scopeKey: string): [type: string, id: string] {
-  const idx = scopeKey.indexOf(":");
-  return [scopeKey.slice(0, idx), scopeKey.slice(idx + 1)];
-}
+import { expansionPool } from "./workpool";
 
 // ============================================================================
 // Step 1: Read Primitives
@@ -437,18 +426,8 @@ export const rebuildEffectiveChunk = mutation({
           paths: [pathItem],
         });
       } else {
-        // Add path if not already present
-        const pathKey = JSON.stringify({
-          baseIds: [...new Set(pathItem.baseIds)].sort(),
-          conditions: pathItem.conditions,
-        });
-        const existingPathKeys = existing.paths.map((p: any) =>
-          JSON.stringify({
-            baseIds: [...new Set(p.baseIds)].sort(),
-            conditions: p.conditions,
-          }),
-        );
-        if (!existingPathKeys.includes(pathKey)) {
+        const itemKey = pathKey(pathItem);
+        if (!existing.paths.some((p: any) => pathKey(p) === itemKey)) {
           await ctx.db.patch(existing._id, {
             paths: [...existing.paths, pathItem],
           });
@@ -505,7 +484,6 @@ export const rebuildEffectiveChunk = mutation({
 
 async function expandTraversalRules(ctx: any, args: any) {
   const { tenantId, subject, relation, object, path, graphConfig } = args;
-  const maxWriteDepth = graphConfig.maxWriteDepth ?? 10;
 
   const queue: Array<{
     subject: { type: string; id: string };
@@ -529,19 +507,17 @@ async function expandTraversalRules(ctx: any, args: any) {
     },
   ];
 
-  // We've already written the direct effective rel, so skip depth 1 expansion for the initial entry
-  // but do traverse rules
   while (queue.length > 0) {
     const current = queue.shift()!;
     const sKey = buildScopeKey(current.subject.type, current.subject.id);
     const oKey = buildScopeKey(current.object.type, current.object.id);
 
-    // For items beyond depth 1, upsert the effective relationship
+    // For items beyond depth 1, upsert the effective relationship. Depth 1
+    // was already written by the caller (rebuildEffectiveChunk) so we only
+    // need to check the dedup and short-circuit when nothing changes.
     if (current.depth > 1) {
-      const canonicalPath = {
-        baseIds: [...new Set(current.path.baseIds || [])].sort(),
-        conditions: current.path.conditions,
-      };
+      const canonicalPath = canonicalizePath(current.path);
+      const currentPathKey = pathKey(canonicalPath);
 
       const existing = await ctx.db
         .query("effectiveRelationships")
@@ -554,13 +530,6 @@ async function expandTraversalRules(ctx: any, args: any) {
         )
         .unique();
 
-      const pathKey = JSON.stringify({
-        baseIds: canonicalPath.baseIds,
-        conditions: canonicalPath.conditions
-          ? canonicalPath.conditions.map((c: any) => JSON.stringify(c)).sort()
-          : undefined,
-      });
-
       let isNew = false;
       if (!existing) {
         await ctx.db.insert("effectiveRelationships", {
@@ -571,166 +540,22 @@ async function expandTraversalRules(ctx: any, args: any) {
           paths: [canonicalPath],
         });
         isNew = true;
-      } else {
-        const existingKeys = existing.paths.map((p: any) =>
-          JSON.stringify({
-            baseIds: [...new Set(p.baseIds)].sort(),
-            conditions: p.conditions
-              ? p.conditions.map((c: any) => JSON.stringify(c)).sort()
-              : undefined,
-          }),
-        );
-        if (!existingKeys.includes(pathKey)) {
-          await ctx.db.patch(existing._id, {
-            paths: [...existing.paths, canonicalPath],
-          });
-          isNew = true;
-        }
-      }
-
-      if (!isNew) continue; // Already fully expanded
-    }
-
-    // Apply traversal rules
-    for (const rule of graphConfig.traversalRules) {
-      if (
-        current.object.type === rule.sourceObjectType &&
-        current.relation === rule.sourceRelation
-      ) {
-        const matches = await ctx.db
-          .query("effectiveRelationships")
-          .withIndex("by_tenant_object_relation_subject", (q: any) =>
-            q
-              .eq("tenantId", tenantId)
-              .eq("objectKey", sKey)
-              .eq("relation", rule.targetRelation),
-          )
-          .collect();
-
-        for (const match of matches) {
-          const [matchSubjectType, matchSubjectId] = decodeScopeKey(
-            match.subjectKey,
-          );
-
-          for (const matchPath of match.paths) {
-            const hasCycle = current.path.baseIds.some((t: string) =>
-              matchPath.baseIds.includes(t),
-            );
-            if (hasCycle) continue;
-            if (current.depth >= maxWriteDepth) continue;
-
-            const schemaCondition = rule.conditions
-              ? rule.conditions.map((c: string) => ({ condition: c }))
-              : [];
-
-            queue.push({
-              subject: { type: matchSubjectType, id: matchSubjectId },
-              relation: rule.derivedRelation,
-              object: current.object,
-              path: {
-                baseIds: [
-                  ...new Set([
-                    ...current.path.baseIds,
-                    ...matchPath.baseIds,
-                  ]),
-                ].sort(),
-                conditions:
-                  [
-                    ...(matchPath.conditions || []),
-                    ...(current.path.conditions || []),
-                    ...schemaCondition,
-                  ].length > 0
-                    ? [
-                        ...(matchPath.conditions || []),
-                        ...(current.path.conditions || []),
-                        ...schemaCondition,
-                      ]
-                    : undefined,
-              },
-              depth: current.depth + 1,
-            });
-          }
-        }
-      }
-
-      if (current.relation === rule.targetRelation) {
-        const matches = await ctx.db
-          .query("effectiveRelationships")
-          .withIndex("by_tenant_subject_relation_object", (q: any) =>
-            q
-              .eq("tenantId", tenantId)
-              .eq("subjectKey", oKey)
-              .eq("relation", rule.sourceRelation),
-          )
-          .collect();
-
-        for (const match of matches) {
-          const [matchObjectType, matchObjectId] = decodeScopeKey(
-            match.objectKey,
-          );
-          if (matchObjectType === rule.sourceObjectType) {
-            for (const matchPath of match.paths) {
-              const hasCycle = current.path.baseIds.some((t: string) =>
-                matchPath.baseIds.includes(t),
-              );
-              if (hasCycle) continue;
-              if (current.depth >= maxWriteDepth) continue;
-
-              const schemaCondition = rule.conditions
-                ? rule.conditions.map((c: string) => ({ condition: c }))
-                : [];
-
-              queue.push({
-                subject: current.subject,
-                relation: rule.derivedRelation,
-                object: { type: matchObjectType, id: matchObjectId },
-                path: {
-                  baseIds: [
-                    ...new Set([
-                      ...current.path.baseIds,
-                      ...matchPath.baseIds,
-                    ]),
-                  ].sort(),
-                  conditions:
-                    [
-                      ...(current.path.conditions || []),
-                      ...(matchPath.conditions || []),
-                      ...schemaCondition,
-                    ].length > 0
-                      ? [
-                          ...(current.path.conditions || []),
-                          ...(matchPath.conditions || []),
-                          ...schemaCondition,
-                        ]
-                      : undefined,
-                },
-                depth: current.depth + 1,
-              });
-            }
-          }
-        }
-      }
-    }
-
-    // Effective reverse edges — mirror production BFS at
-    // src/component/mutations.ts so derived edges with a declared reverse
-    // also materialise the reverse side during rebuild.
-    if (graphConfig.reverseEdges && !current.skipReverse) {
-      const reverseRel =
-        graphConfig.reverseEdges?.[current.object.type]?.[current.relation]?.[
-          current.subject.type
-        ];
-      if (reverseRel && current.depth < maxWriteDepth) {
-        queue.push({
-          subject: current.object,
-          relation: reverseRel,
-          object: current.subject,
-          path: current.path,
-          depth: current.depth + 1,
-          skipReverse: true,
+      } else if (!existing.paths.some((p: any) => pathKey(p) === currentPathKey)) {
+        await ctx.db.patch(existing._id, {
+          paths: [...existing.paths, canonicalPath],
         });
+        isNew = true;
       }
+
+      if (!isNew) continue;
     }
+
+    await applyTraversalRulesToItem(ctx, {
+      tenantId,
+      current,
+      queue,
+      graphConfig,
+    });
   }
 }
 

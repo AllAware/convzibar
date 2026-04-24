@@ -1,4 +1,5 @@
-import type { ActionCtx, QueryCtx, ZbarInternal } from "../internal";
+import type { ActionCtx, QueryCtx } from "../internal";
+import { BaseListBuilder } from "../list/base";
 import {
   resolvePermissionRelations,
   resolveRelationInheritance,
@@ -8,52 +9,7 @@ import type { DirectRelationship } from "./types";
 /**
  * Internal implementation of the fluent direct-relationship query builder.
  */
-export class ListDirectQueryBuilder {
-  private _objectType?: string;
-  private _objectId?: string;
-  private _subjectType?: string;
-  private _subjectId?: string;
-  private _relation?: string;
-  private _permission?: string;
-  private _mapFn?: (item: any) => any;
-
-  constructor(private z: ZbarInternal) {}
-
-  object(objectOrType: string | { type: string; id: string }): this {
-    if (typeof objectOrType === "string") {
-      this._objectType = objectOrType;
-    } else {
-      this._objectType = objectOrType.type;
-      this._objectId = objectOrType.id;
-    }
-    return this;
-  }
-
-  subject(subjectOrType: string | { type: string; id: string }): this {
-    if (typeof subjectOrType === "string") {
-      this._subjectType = subjectOrType;
-    } else {
-      this._subjectType = subjectOrType.type;
-      this._subjectId = subjectOrType.id;
-    }
-    return this;
-  }
-
-  relation(relation: string): this {
-    this._relation = relation;
-    return this;
-  }
-
-  permission(permission: string): this {
-    this._permission = permission;
-    return this;
-  }
-
-  map(fn: (item: any) => any): this {
-    this._mapFn = fn;
-    return this;
-  }
-
+export class ListDirectQueryBuilder extends BaseListBuilder<DirectRelationship> {
   async collect(
     ctx: QueryCtx | ActionCtx,
   ): Promise<DirectRelationship[]> {
@@ -105,7 +61,7 @@ export class ListDirectQueryBuilder {
     );
 
     // 4. Map to result shape.
-    const results = rows.map((r: any) => ({
+    const results: DirectRelationship[] = rows.map((r: any) => ({
       subject: { type: r.subjectType, id: r.subjectId },
       relation: r.relation,
       object: { type: r.objectType, id: r.objectId },
@@ -113,10 +69,6 @@ export class ListDirectQueryBuilder {
     }));
 
     // 5. Apply user-provided mapper in parallel if present.
-    if (this._mapFn) {
-      return Promise.all(results.map(this._mapFn));
-    }
-
-    return results;
+    return this._applyMap(results);
   }
 }

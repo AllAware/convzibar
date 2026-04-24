@@ -1,4 +1,5 @@
 import type { GenericValidator } from "convex/values";
+import { iterateRelationTargets } from "../../shared/relation-def";
 import type { ActionCtx, MutationCtx, QueryCtx, ZbarInternal } from "../internal";
 import type { PolicyContext, SubjectOrObject } from "../types";
 
@@ -74,37 +75,34 @@ function collectDirectSubjectTypes(
   const relDef = localRelations[relation];
   if (relDef === undefined) return new Set();
 
-  const defs = Array.isArray(relDef) ? relDef : [relDef];
+  const classifyCtx = {
+    localRelations: localRelations as Record<string, unknown>,
+    entities: z.schema.entities as Record<string, unknown>,
+  };
   const types = new Set<string>();
 
-  const consumeRelationRef = (ref: string) => {
-    if (ref.includes("#")) {
-      types.add(ref.split("#")[0]);
-    } else if (ref.includes(".")) {
-      // dot-path — derived, no direct subject contribution
-    } else if (localRelations[ref] !== undefined) {
-      // local relation reference — inherit its direct subject types
-      for (const t of collectDirectSubjectTypes(z, objectType, ref, visited)) {
-        types.add(t);
-      }
-    } else if (z.schema.entities[ref] !== undefined) {
-      // bare entity-type target
-      types.add(ref);
-    }
-  };
-
-  for (const d of defs) {
-    if (typeof d === "string") {
-      consumeRelationRef(d);
-    } else if (typeof d === "object" && d !== null) {
-      if ("type" in d && typeof (d as { type: unknown }).type === "string") {
-        types.add((d as { type: string }).type);
-      } else if (
-        "relation" in d &&
-        typeof (d as { relation: unknown }).relation === "string"
-      ) {
-        consumeRelationRef((d as { relation: string }).relation);
-      }
+  for (const target of iterateRelationTargets(relDef, classifyCtx)) {
+    switch (target.kind) {
+      case "typed":
+        types.add(target.entityType);
+        break;
+      case "userset":
+        types.add(target.entityType);
+        break;
+      case "entity":
+        types.add(target.entityType);
+        break;
+      case "localRef":
+        for (const t of collectDirectSubjectTypes(
+          z,
+          objectType,
+          target.relation,
+          visited,
+        )) {
+          types.add(t);
+        }
+        break;
+      // dotPath / unknown → no direct subject contribution
     }
   }
 
