@@ -1,10 +1,10 @@
 {
-  "name": "@csilvas/convzibar",
+  "name": "convzibar",
   "description": "A highly-optimized ReBAC and ABAC authorization engine tailored for Convex, inspired by Google Zanzibar.",
-  "repository": "github:csilvas/convzibar",
-  "homepage": "https://github.com/csilvas/convzibar#readme",
+  "repository": "github:AllAware/convzibar",
+  "homepage": "https://github.com/AllAware/convzibar#readme",
   "bugs": {
-    "url": "https://github.com/csilvas/convzibar/issues"
+    "url": "https://github.com/AllAware/convzibar/issues"
   },
   "version": "1.0.0",
   "license": "Apache-2.0",
@@ -33,7 +33,10 @@
     "prepublishOnly": "npm whoami || npm login",
     "alpha": "npm version prerelease --preid alpha && npm publish --tag alpha && git push --follow-tags",
     "release": "npm version patch && npm publish && git push --follow-tags",
-    "version": "vim -c 'normal o' -c 'normal o## '$npm_package_version CHANGELOG.md && prettier -w CHANGELOG.md && git add CHANGELOG.md"
+    "release:github": "npm version patch && git push --follow-tags",
+    "release:github:minor": "npm version minor && git push --follow-tags",
+    "release:github:major": "npm version major && git push --follow-tags",
+    "version": "vim -c 'normal o' -c 'normal o## '$npm_package_version CHANGELOG.md && prettier -w CHANGELOG.md && git add CHANGELOG.md dist"
   },
   "files": [
     "dist",

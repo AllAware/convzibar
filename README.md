@@ -66,15 +66,23 @@ against the materialized cache plus any read-time branches.
 
 ## Installation
 
+This package is distributed directly from GitHub (not the npm registry). Install
+a specific tagged version with bun or npm:
+
 ```bash
-npm install @csilvas/convzibar
+bun add github:AllAware/convzibar#v1.0.0
+# or
+npm install github:AllAware/convzibar#v1.0.0
 ```
+
+If the repo is private, see [PUBLISHING.md](./PUBLISHING.md) for how to give
+your CI/CD build access via a fine-grained PAT.
 
 Register the component in your `convex.config.ts`:
 
 ```typescript
 import { defineApp } from "convex/server";
-import zbar from "@csilvas/convzibar/convex.config";
+import zbar from "convzibar/convex.config";
 
 const app = defineApp();
 app.use(zbar);
@@ -89,7 +97,7 @@ Create a shared file (e.g., `convex/zbar.ts`) to define your schema. This serves
 as the single source of truth and powers the TypeScript inference.
 
 ```typescript
-import { createZbarSchema, Zbar } from "@csilvas/convzibar";
+import { createZbarSchema, Zbar } from "convzibar";
 import { components } from "./_generated/api";
 
 export type MyContext = {
@@ -644,7 +652,7 @@ Then generate type-safe hooks by passing `typeof zbarSchema` to
 
 ```tsx
 // lib/zbar.ts
-import { createReactZbar } from "@csilvas/convzibar/react";
+import { createReactZbar } from "convzibar/react";
 import type { zbarSchema } from "../convex/zbar";
 
 export const { ZbarProvider, useCan, usePermissions } =
@@ -793,7 +801,7 @@ theoretical minimum-work shape for "every permission on (subject, object)":
    branch runs **at most once**; a single RT hit grants every still-pending
    permission whose targets include that derived relation.
 
-### Escape Hatch: `@csilvas/convzibar/unsafe`
+### Escape Hatch: `convzibar/unsafe`
 
 For migrations, backfills, and raw inspection, the `unsafe` entry point
 exposes cursor-based `scanRelationships`, bulk `transformRelationships`,
@@ -805,7 +813,7 @@ rows — then rebuild the cache.
 
 ```typescript
 import { transformRelationships, rebuildEffectiveRelationships }
-  from "@csilvas/convzibar/unsafe";
+  from "convzibar/unsafe";
 
 // Rename a relation
 await transformRelationships(ctx, { relation: "viewer" }, (r) => ({

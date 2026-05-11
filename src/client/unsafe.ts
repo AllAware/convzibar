@@ -80,7 +80,7 @@ export type TransformResult =
  * validation. Import separately for tree-shaking:
  *
  * ```ts
- * import { ZbarUnsafe } from "@csilvas/convzibar/unsafe";
+ * import { ZbarUnsafe } from "convzibar/unsafe";
  * ```
  */
 export class ZbarUnsafe<Schema extends ZbarSchema = ZbarSchema> {
