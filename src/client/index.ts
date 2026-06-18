@@ -3,8 +3,6 @@
 
 // Core types & errors
 export type {
-  PolicyContext,
-  ConditionFunction,
   SchemaRelation,
   EntityDefinition,
   ZbarSchema,
@@ -12,7 +10,6 @@ export type {
   SubjectOrObject,
   EntityPermissions,
   EntityRelations,
-  SchemaConditions,
   EntityRelationProperties,
 } from "./types";
 export { PermissionError } from "./types";

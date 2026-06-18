@@ -54,7 +54,6 @@ describe("Edge Properties — Type Inference", () => {
 
     const zbar = new Zbar({} as any, {
       schema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -106,7 +105,6 @@ describe("Edge Properties — Type Inference", () => {
 
     const zbar = new Zbar({} as any, {
       schema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 

@@ -21,7 +21,7 @@ const mkCtx = (t: any) =>
 // Self-Referential Group Hierarchy (group#admin userset)
 // ============================================================================
 
-const groupSchema = createZbarSchema<any>()
+const groupSchema = createZbarSchema()
   .entity("user")
   .entity("group", (e) =>
     e
@@ -36,7 +36,7 @@ describe("Userset: Self-Referential Group Hierarchy", () => {
   test("group admins inherit through group-as-admin", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = new Zbar(api, { schema: groupSchema, tenantId: "t1", asyncWrites: false });
+    const zbar = new Zbar(api, { schema: groupSchema, asyncWrites: false });
 
     const alice = { type: "user" as const, id: "alice" };
     const bob = { type: "user" as const, id: "bob" };
@@ -53,7 +53,7 @@ describe("Userset: Self-Referential Group Hierarchy", () => {
   test("adding user after group link propagates correctly", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = new Zbar(api, { schema: groupSchema, tenantId: "t1", asyncWrites: false });
+    const zbar = new Zbar(api, { schema: groupSchema, asyncWrites: false });
 
     const alice = { type: "user" as const, id: "alice" };
     const groupA = { type: "group" as const, id: "a" };
@@ -68,7 +68,7 @@ describe("Userset: Self-Referential Group Hierarchy", () => {
   test("three-level group hierarchy: A -> B -> C", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = new Zbar(api, { schema: groupSchema, tenantId: "t1", asyncWrites: false });
+    const zbar = new Zbar(api, { schema: groupSchema, asyncWrites: false });
 
     const alice = { type: "user" as const, id: "alice" };
     const bob = { type: "user" as const, id: "bob" };
@@ -93,7 +93,7 @@ describe("Userset: Self-Referential Group Hierarchy", () => {
   test("removing group link cascades removal", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = new Zbar(api, { schema: groupSchema, tenantId: "t1", asyncWrites: false });
+    const zbar = new Zbar(api, { schema: groupSchema, asyncWrites: false });
 
     const alice = { type: "user" as const, id: "alice" };
     const groupA = { type: "group" as const, id: "a" };
@@ -111,7 +111,7 @@ describe("Userset: Self-Referential Group Hierarchy", () => {
   test("removing user from parent group cascades through hierarchy", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = new Zbar(api, { schema: groupSchema, tenantId: "t1", asyncWrites: false });
+    const zbar = new Zbar(api, { schema: groupSchema, asyncWrites: false });
 
     const alice = { type: "user" as const, id: "alice" };
     const groupA = { type: "group" as const, id: "a" };
@@ -129,7 +129,7 @@ describe("Userset: Self-Referential Group Hierarchy", () => {
   test("member relation inherits through group userset", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = new Zbar(api, { schema: groupSchema, tenantId: "t1", asyncWrites: false });
+    const zbar = new Zbar(api, { schema: groupSchema, asyncWrites: false });
 
     const alice = { type: "user" as const, id: "alice" };
     const bob = { type: "user" as const, id: "bob" };
@@ -150,7 +150,7 @@ describe("Userset: Self-Referential Group Hierarchy", () => {
 // Cross-Entity Userset (Group as Folder Editor)
 // ============================================================================
 
-const folderSchema = createZbarSchema<any>()
+const folderSchema = createZbarSchema()
   .entity("user")
   .entity("group", (e) =>
     e.relation("admin", "user").relation("member", "user", "admin"),
@@ -168,7 +168,7 @@ describe("Userset: Cross-Entity (Group as Folder Editor)", () => {
   test("group members become folder editors via userset", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = new Zbar(api, { schema: folderSchema, tenantId: "t1", asyncWrites: false });
+    const zbar = new Zbar(api, { schema: folderSchema, asyncWrites: false });
 
     const alice = { type: "user" as const, id: "alice" };
     const bob = { type: "user" as const, id: "bob" };
@@ -187,7 +187,7 @@ describe("Userset: Cross-Entity (Group as Folder Editor)", () => {
   test("adding member to group after folder link propagates", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = new Zbar(api, { schema: folderSchema, tenantId: "t1", asyncWrites: false });
+    const zbar = new Zbar(api, { schema: folderSchema, asyncWrites: false });
 
     const alice = { type: "user" as const, id: "alice" };
     const devTeam = { type: "group" as const, id: "dev" };
@@ -202,7 +202,7 @@ describe("Userset: Cross-Entity (Group as Folder Editor)", () => {
   test("removing group from folder removes member access", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = new Zbar(api, { schema: folderSchema, tenantId: "t1", asyncWrites: false });
+    const zbar = new Zbar(api, { schema: folderSchema, asyncWrites: false });
 
     const alice = { type: "user" as const, id: "alice" };
     const devTeam = { type: "group" as const, id: "dev" };
@@ -219,7 +219,7 @@ describe("Userset: Cross-Entity (Group as Folder Editor)", () => {
   test("group admin inherits member userset on folder", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = new Zbar(api, { schema: folderSchema, tenantId: "t1", asyncWrites: false });
+    const zbar = new Zbar(api, { schema: folderSchema, asyncWrites: false });
 
     const alice = { type: "user" as const, id: "alice" };
     const devTeam = { type: "group" as const, id: "dev" };
@@ -236,7 +236,7 @@ describe("Userset: Cross-Entity (Group as Folder Editor)", () => {
 // IoT Hierarchy: system → group → device (userset chains)
 // ============================================================================
 
-const iotSchema = createZbarSchema<any>()
+const iotSchema = createZbarSchema()
   .entity("user")
   .entity("system", (e) =>
     e
@@ -266,7 +266,7 @@ const iotSchema = createZbarSchema<any>()
 
 describe("Userset: IoT Hierarchy (system → group → device)", () => {
   const mkZbar = () =>
-    new Zbar(api, { schema: iotSchema, tenantId: "t1", asyncWrites: false });
+    new Zbar(api, { schema: iotSchema, asyncWrites: false });
 
   test("system admin becomes group admin via system#admin userset", async () => {
     const t = setup();

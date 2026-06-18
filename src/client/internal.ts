@@ -20,26 +20,20 @@ export type ActionCtx = Pick<
 
 // ============================================================================
 // ZbarInternal — the bundle of state that pure helpers operate on.
-// One per Zbar instance. Builders and helper modules receive this as their
-// first argument instead of reaching into a Zbar instance.
 // ============================================================================
 
 export interface ZbarInternal {
   component: any;
   schema: ZbarSchema;
-  tenantId: string;
-  defaultActorId?: string;
-  enableAuditLog: boolean;
   asyncWrites: boolean;
   graphConfig: GraphConfig;
+  /** Stable content hash of `graphConfig`; mutations ship this instead of the config. */
+  configHash: string;
   readTimeChainDepth: number;
   /**
    * Memoises both `permission → relations` and `relation → inherited relations`
    * lookups, keyed by `${objectType}:${name}` and `rel_inh:${objectType}:${name}`
    * respectively. Per-Zbar-instance.
    */
-  permissionRelationsCache: Map<
-    string,
-    Array<{ relation: string; condition?: string }>
-  >;
+  permissionRelationsCache: Map<string, string[]>;
 }

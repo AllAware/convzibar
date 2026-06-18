@@ -13,7 +13,6 @@ import {
   EMPTY,
   Materialised,
   Union,
-  ValidatedMaterialised,
   evaluateManyPermissions,
   planRelation,
 } from "../zbar/traversal.js";
@@ -40,7 +39,7 @@ const mkCtx = (t: any) =>
 // Slim schema with two RT declarations — same shape as the IoT one but
 // trimmed to only what these tests exercise. Using a local schema keeps
 // these tests isolated from iot-schema.test.ts changes.
-const trvSchema = createZbarSchema<any>()
+const trvSchema = createZbarSchema()
   .entity("user", (e) => e.relation("primary_contact"))
   .entity("system", (e) =>
     e
@@ -67,7 +66,6 @@ const trvSchema = createZbarSchema<any>()
 const mkZbar = (opts?: { readTimeChainDepth?: number }) =>
   new Zbar(api, {
     schema: trvSchema,
-    tenantId: TENANT,
     asyncWrites: false,
     readTimeChainDepth: opts?.readTimeChainDepth,
   });
@@ -122,34 +120,25 @@ function fakeInternal(overrides: Partial<ZbarInternal> = {}): ZbarInternal {
         contact: { relations: { viewer: [] } },
       },
     } as any,
-    tenantId: TENANT,
-    enableAuditLog: false,
     asyncWrites: false,
     graphConfig,
+    configHash: "test-config-hash",
     readTimeChainDepth: 3,
     permissionRelationsCache: new Map(),
     ...overrides,
   };
 }
 
-// Convenience for the shape tests: the fake schema declares no conditions,
-// so we always call `planRelation` with no permission — the direct leaf is
-// a plain `Materialised`, matching the tree every other caller would also
-// observe for an access-style query on the same schema.
+// Convenience for the shape tests: `planRelation` takes a plain `string[]`
+// of accepted relation names — the direct leaf is always a plain
+// `Materialised`, matching the tree every other caller would also observe
+// for an access-style query on the same schema.
 const planR = (
   z: ZbarInternal,
   objectType: string,
   relations: string[],
   opts?: { depth?: number },
-) =>
-  planRelation(
-    z,
-    objectType,
-    relations.map((r) => ({ relation: r })),
-    undefined,
-    undefined,
-    opts?.depth ?? 0,
-  );
+) => planRelation(z, objectType, relations, opts?.depth ?? 0);
 
 describe("planRelation (plan tree)", () => {
   test("returns EMPTY when targets is empty", () => {
@@ -198,20 +187,6 @@ describe("planRelation (plan tree)", () => {
     expect(plan).toBeInstanceOf(Union);
     const compose = plan.children[1] as Compose;
     expect(compose.subjectSide).toBeInstanceOf(Materialised);
-  });
-
-  test("with conditions: permission-aware plan uses ValidatedMaterialised for the direct branch", () => {
-    const z = fakeInternal();
-    const plan = planRelation(
-      z,
-      "contact",
-      [{ relation: "viewer" }, { relation: "admin", condition: "isApproved" }],
-      "view",
-      { approved: true },
-    ) as Union;
-    expect(plan).toBeInstanceOf(Union);
-    expect(plan.children[0]).toBeInstanceOf(ValidatedMaterialised);
-    expect(plan.children[1]).toBeInstanceOf(Compose);
   });
 
   test("with a deeper RT chain: recursion on the RT subject side becomes a nested Union", () => {
@@ -864,198 +839,47 @@ describe("plan-driven list paths", () => {
 });
 
 // ============================================================================
-// ValidatedMaterialised operator — condition-aware materialised leaf.
-//
-// Tests for the permission-check shape: materialised leaf + condition/path
-// validation, wrapped in the top-level Union(ValidatedMaterialised, RT) plan
-// that drives can / hasRelationship / getPermissions / list.
-//
-// We assemble a small schema that declares a condition so we can exercise
-// both the short-circuit-on-condition-fail branch and the plan-tree shape
-// change (bare ValidatedMaterialised when no RT applies).
+// No-RT schema — a plain inheritance-only schema used by the planner-shape,
+// getPermissions, and query-count tests that need a `doc` entity with NO
+// read-time paths declared, so every answer must come from the single
+// materialised branch.
 // ============================================================================
 
-const condSchema = createZbarSchema<{ approved?: boolean }>()
-  .condition(
-    "isApproved",
-    (_ctx: any, policy: { data?: { approved?: boolean } }) =>
-      policy.data?.approved === true,
-  )
+const docSchema = createZbarSchema()
   .entity("user", (e) => e)
   .entity("doc", (e) =>
     e
       .relation("owner", "user")
-      .relation("viewer", "user", { relation: "owner", condition: "isApproved" })
+      .relation("viewer", "user", "owner")
       .permission("read", "viewer"),
   )
   .build();
 
 const mkCondZbar = () =>
   new Zbar(api, {
-    schema: condSchema,
-    tenantId: TENANT,
+    schema: docSchema,
     asyncWrites: false,
   });
 
-describe("ValidatedMaterialised operator", () => {
-  test("check honours the target condition — denies when condition fails", async () => {
-    const t = setup();
-    const ctx = mkCtx(t);
-    const zbar = mkCondZbar();
-    const alice = { type: "user" as const, id: "alice" };
-    const doc = { type: "doc" as const, id: "doc1" };
-    await zbar.addRelation(ctx, alice, "owner", doc);
-
-    // `viewer` inherits from owner but is gated by isApproved. With no
-    // request context the condition returns false → plan must deny.
-    const z = (zbar as any)._internal as ZbarInternal;
-    const plan = new ValidatedMaterialised(
-      z,
-      [
-        { relation: "viewer" },
-        { relation: "owner", condition: "isApproved" },
-      ],
-      "read",
-      undefined,
-    );
-    expect(await plan.check(ctx, alice, doc)).toBe(false);
-
-    // Pass the condition → allow.
-    expect(await plan.check(ctx, alice, doc, undefined)).toBe(false);
-    const allowed = new ValidatedMaterialised(
-      z,
-      [
-        { relation: "viewer" },
-        { relation: "owner", condition: "isApproved" },
-      ],
-      "read",
-      { approved: true },
-    );
-    expect(await allowed.check(ctx, alice, doc)).toBe(true);
-  });
-
-  test("checkBatch respects conditions per candidate object", async () => {
-    const t = setup();
-    const ctx = mkCtx(t);
-    const zbar = mkCondZbar();
-    const alice = { type: "user" as const, id: "alice" };
-    const d1 = { type: "doc" as const, id: "doc1" };
-    const d2 = { type: "doc" as const, id: "doc2" };
-    const d3 = { type: "doc" as const, id: "doc3" };
-    await zbar.addRelation(ctx, alice, "owner", d1);
-    await zbar.addRelation(ctx, alice, "owner", d2);
-    await zbar.addRelation(ctx, alice, "viewer", d3); // direct, no condition
-
-    const z = (zbar as any)._internal as ZbarInternal;
-    const mat = new ValidatedMaterialised(
-      z,
-      [
-        { relation: "viewer" },
-        { relation: "owner", condition: "isApproved" },
-      ],
-      "read",
-      { approved: true },
-    );
-    const hits = await mat.checkBatch(ctx, alice, "doc", [
-      d1.id,
-      d2.id,
-      d3.id,
-      "missing",
-    ]);
-    expect([...hits].sort()).toEqual(["doc1", "doc2", "doc3"]);
-
-    // Without approval d1/d2 drop out (conditioned); d3 stays (direct).
-    const denied = new ValidatedMaterialised(
-      z,
-      [
-        { relation: "viewer" },
-        { relation: "owner", condition: "isApproved" },
-      ],
-      "read",
-      undefined,
-    );
-    const hits2 = await denied.checkBatch(ctx, alice, "doc", [
-      d1.id,
-      d2.id,
-      d3.id,
-    ]);
-    expect([...hits2]).toEqual(["doc3"]);
-  });
-
-  test("expandObjects enumerates only condition-validated objects", async () => {
-    const t = setup();
-    const ctx = mkCtx(t);
-    const zbar = mkCondZbar();
-    const alice = { type: "user" as const, id: "alice" };
-    const d1 = { type: "doc" as const, id: "doc1" };
-    const d2 = { type: "doc" as const, id: "doc2" };
-    await zbar.addRelation(ctx, alice, "owner", d1);
-    await zbar.addRelation(ctx, alice, "viewer", d2);
-
-    const z = (zbar as any)._internal as ZbarInternal;
-    const plan = new ValidatedMaterialised(
-      z,
-      [
-        { relation: "viewer" },
-        { relation: "owner", condition: "isApproved" },
-      ],
-      "read",
-      undefined,
-    );
-    // Without approval, owner-derived viewer (d1) is filtered; only the
-    // direct viewer edge to d2 survives.
-    expect([...(await plan.expandObjects(ctx, alice, "doc"))]).toEqual(["doc2"]);
-  });
-
-  test("expandSubjects drops subjects whose inheritance path is conditioned away", async () => {
-    const t = setup();
-    const ctx = mkCtx(t);
-    const zbar = mkCondZbar();
-    const alice = { type: "user" as const, id: "alice" };
-    const bob = { type: "user" as const, id: "bob" };
-    const doc = { type: "doc" as const, id: "doc1" };
-    // alice → owner (conditioned), bob → viewer (direct).
-    await zbar.addRelation(ctx, alice, "owner", doc);
-    await zbar.addRelation(ctx, bob, "viewer", doc);
-
-    const z = (zbar as any)._internal as ZbarInternal;
-    const plan = new ValidatedMaterialised(
-      z,
-      [
-        { relation: "viewer" },
-        { relation: "owner", condition: "isApproved" },
-      ],
-      "read",
-      undefined,
-    );
-    expect([...(await plan.expandSubjects(ctx, doc, "user"))]).toEqual(["bob"]);
-  });
-});
-
 describe("planRelation — real-schema shape + behaviour", () => {
-  test("permission-aware plan on a condition-carrying schema is a bare ValidatedMaterialised (no RT on `doc`)", () => {
+  test("plan on a no-RT schema is a bare Materialised (no RT on `doc`)", () => {
     const zbar = mkCondZbar();
     const z = (zbar as any)._internal as ZbarInternal;
-    const targets = [
-      { relation: "viewer" },
-      { relation: "owner", condition: "isApproved" },
-    ];
-    const plan = planRelation(z, "doc", targets, "read", undefined);
-    expect(plan).toBeInstanceOf(ValidatedMaterialised);
+    const plan = planRelation(z, "doc", ["viewer", "owner"]);
+    expect(plan).toBeInstanceOf(Materialised);
   });
 
-  test("permission-aware plan on an RT-carrying schema is Union(ValidatedMaterialised, …RT composes)", () => {
+  test("plan on an RT-carrying schema is Union(Materialised, …RT composes)", () => {
     const zbar = mkZbar();
     const z = (zbar as any)._internal as ZbarInternal;
-    const targets = [{ relation: "viewer" }, { relation: "admin" }];
-    const plan = planRelation(z, "contact", targets, "view", undefined);
+    const plan = planRelation(z, "contact", ["viewer", "admin"]);
     expect(plan).toBeInstanceOf(Union);
     const children = (plan as Union).children;
-    expect(children[0]).toBeInstanceOf(ValidatedMaterialised);
+    expect(children[0]).toBeInstanceOf(Materialised);
     for (const child of children.slice(1)) expect(child).toBeInstanceOf(Compose);
   });
 
-  test("end-to-end: plan.check agrees with zbar.can on a conditioned schema", async () => {
+  test("end-to-end: plan.check agrees with zbar.can on a no-RT schema", async () => {
     const t = setup();
     const ctx = mkCtx(t);
     const zbar = mkCondZbar();
@@ -1063,12 +887,8 @@ describe("planRelation — real-schema shape + behaviour", () => {
     const doc = { type: "doc" as const, id: "doc1" };
     await zbar.addRelation(ctx, alice, "owner", doc);
 
-    // Inheritance: read <- viewer <- owner (conditioned). Without approval,
-    // the plan's direct branch denies. With approval, it allows.
-    expect(await zbar.can(ctx, alice, "read", doc)).toBe(false);
-    expect(await zbar.can(ctx, alice, "read", doc, { approved: true })).toBe(
-      true,
-    );
+    // Inheritance: read <- viewer <- owner. An owner is granted read.
+    expect(await zbar.can(ctx, alice, "read", doc)).toBe(true);
   });
 });
 
@@ -1096,20 +916,6 @@ describe("getPermissions through the unified plan", () => {
     // Alice is a system viewer → gets the RT-derived contact.viewer path.
     const perms = await zbar.getPermissions(ctx, e.alice, e.bobContact);
     expect([...perms].sort()).toEqual(["view"]);
-  });
-
-  test("respects conditions in the materialised branch", async () => {
-    const t = setup();
-    const ctx = mkCtx(t);
-    const zbar = mkCondZbar();
-    const alice = { type: "user" as const, id: "alice" };
-    const doc = { type: "doc" as const, id: "doc1" };
-    await zbar.addRelation(ctx, alice, "owner", doc);
-
-    expect(await zbar.getPermissions(ctx, alice, doc)).toEqual([]);
-    expect(
-      await zbar.getPermissions(ctx, alice, doc, { approved: true }),
-    ).toEqual(["read"]);
   });
 });
 
@@ -1166,7 +972,7 @@ describe("planRelation with no permission (the .via() gate/chain shape)", () => 
     for (const k of Object.keys(counts) as Array<keyof typeof counts>) {
       counts[k] = 0;
     }
-    const plan = planRelation(z, "system", [{ relation: "viewer" }]);
+    const plan = planRelation(z, "system", ["viewer"]);
     expect(plan).toBeInstanceOf(Materialised);
     expect(await plan.check(ctx, alice, sys)).toBe(true);
     const bob = { type: "user" as const, id: "bob" };
@@ -1197,7 +1003,7 @@ describe("planRelation with no permission (the .via() gate/chain shape)", () => 
     // want exactly: 1 direct check + 1 edge expansion + 1 inner hop check.
     // (The direct branch runs regardless; the hop-2 Compose runs only
     // because direct missed.)
-    const plan = planRelation(z, "contact", [{ relation: "admin" }]);
+    const plan = planRelation(z, "contact", ["admin"]);
     expect(plan).toBeInstanceOf(Union); // direct + one Compose branch
 
     // Alice has no admin anywhere → everything denies.
@@ -1215,7 +1021,7 @@ describe("evaluateManyPermissions (getPermissions' minimum-work evaluator)", () 
   test("issues exactly one materialised query regardless of permission count", async () => {
     const t = setup();
     const { ctx, counts } = countingCtx(t);
-    // Use the conditioned schema so there are NO RT paths — every answer
+    // Use the no-RT schema so there are NO RT paths — every answer
     // must come from the single materialised batch.
     const zbar = mkCondZbar();
     const alice = { type: "user" as const, id: "alice" };
@@ -1226,7 +1032,7 @@ describe("evaluateManyPermissions (getPermissions' minimum-work evaluator)", () 
     for (const k of Object.keys(counts) as Array<keyof typeof counts>) {
       counts[k] = 0;
     }
-    await zbar.getPermissions(ctx, alice, doc, { approved: true });
+    await zbar.getPermissions(ctx, alice, doc);
 
     expect(counts.checkPermissionFast).toBe(1);
     // No RT paths declared on `doc` → no fallback queries needed.
@@ -1274,11 +1080,10 @@ describe("evaluateManyPermissions (getPermissions' minimum-work evaluator)", () 
       alice,
       doc,
       [
-        { permission: "read", targets: [{ relation: "viewer" }] },
+        { permission: "read", targets: ["viewer"] },
         // "phantom" has no declared targets → never granted.
         { permission: "phantom", targets: [] },
       ],
-      undefined,
     );
     // Neither passes (no viewer edge, phantom is empty). A non-trivial
     // assertion: add a direct viewer relation and re-check.
@@ -1291,58 +1096,11 @@ describe("evaluateManyPermissions (getPermissions' minimum-work evaluator)", () 
       alice,
       doc,
       [
-        { permission: "read", targets: [{ relation: "viewer" }] },
+        { permission: "read", targets: ["viewer"] },
         { permission: "phantom", targets: [] },
       ],
-      undefined,
     );
     expect(perms2).toEqual(["read"]);
-  });
-
-  test("applies condition validation per permission", async () => {
-    const t = setup();
-    const ctx = mkCtx(t);
-    const zbar = mkCondZbar();
-    const z = (zbar as any)._internal as ZbarInternal;
-    const alice = { type: "user" as const, id: "alice" };
-    const doc = { type: "doc" as const, id: "doc1" };
-    await zbar.addRelation(ctx, alice, "owner", doc);
-
-    const withoutCtx = await evaluateManyPermissions(
-      z,
-      ctx,
-      alice,
-      doc,
-      [
-        {
-          permission: "read",
-          targets: [
-            { relation: "viewer" },
-            { relation: "owner", condition: "isApproved" },
-          ],
-        },
-      ],
-      undefined,
-    );
-    expect(withoutCtx).toEqual([]);
-
-    const withCtx = await evaluateManyPermissions(
-      z,
-      ctx,
-      alice,
-      doc,
-      [
-        {
-          permission: "read",
-          targets: [
-            { relation: "viewer" },
-            { relation: "owner", condition: "isApproved" },
-          ],
-        },
-      ],
-      { approved: true },
-    );
-    expect(withCtx).toEqual(["read"]);
   });
 
   test("empty perms list returns [] without issuing any queries", async () => {
@@ -1353,14 +1111,7 @@ describe("evaluateManyPermissions (getPermissions' minimum-work evaluator)", () 
     const alice = { type: "user" as const, id: "alice" };
     const doc = { type: "doc" as const, id: "doc1" };
 
-    const result = await evaluateManyPermissions(
-      z,
-      ctx,
-      alice,
-      doc,
-      [],
-      undefined,
-    );
+    const result = await evaluateManyPermissions(z, ctx, alice, doc, []);
     expect(result).toEqual([]);
     expect(counts.checkPermissionFast).toBe(0);
   });
@@ -1381,7 +1132,7 @@ describe("evaluateManyPermissions (getPermissions' minimum-work evaluator)", () 
 //   3. No effective `user → device` row is written; the fan-out is zero.
 // ============================================================================
 
-const usersetSchema = createZbarSchema<any>()
+const usersetSchema = createZbarSchema()
   .entity("user", (e) => e)
   .entity("group", (e) =>
     e
@@ -1401,7 +1152,6 @@ const usersetSchema = createZbarSchema<any>()
 const mkUsersetZbar = () =>
   new Zbar(api, {
     schema: usersetSchema,
-    tenantId: TENANT,
     asyncWrites: false,
   });
 
@@ -1409,12 +1159,7 @@ describe("userset readTimeRelation", () => {
   test("compiles to Union(direct, Compose(EdgeExpand(group, [viewer]), …))", () => {
     const zbar = mkUsersetZbar();
     const z = (zbar as any)._internal as ZbarInternal;
-    const plan = planRelation(
-      z,
-      "device",
-      [{ relation: "viewer" }],
-      undefined,
-    ) as Union;
+    const plan = planRelation(z, "device", ["viewer"]) as Union;
     expect(plan).toBeInstanceOf(Union);
     expect(plan.children[0]).toBeInstanceOf(Materialised);
     const compose = plan.children[1] as Compose;
@@ -1564,7 +1309,7 @@ describe("Union.check hybrid (sequential direct, parallel RT on miss)", () => {
     for (const k of Object.keys(counts) as Array<keyof typeof counts>) {
       counts[k] = 0;
     }
-    const plan = planRelation(z, "device", [{ relation: "viewer" }]);
+    const plan = planRelation(z, "device", ["viewer"]);
     expect(plan).toBeInstanceOf(Union);
     expect(await plan.check(ctx, alice, device)).toBe(true);
 
@@ -1589,7 +1334,7 @@ describe("Union.check hybrid (sequential direct, parallel RT on miss)", () => {
     for (const k of Object.keys(counts) as Array<keyof typeof counts>) {
       counts[k] = 0;
     }
-    const plan = planRelation(z, "device", [{ relation: "viewer" }]);
+    const plan = planRelation(z, "device", ["viewer"]);
     expect(await plan.check(ctx, alice, device)).toBe(true);
 
     // Direct probe misses (1 query), then RT Compose fires its two hops.
@@ -1611,7 +1356,7 @@ describe("Union.check hybrid (sequential direct, parallel RT on miss)", () => {
     for (const k of Object.keys(counts) as Array<keyof typeof counts>) {
       counts[k] = 0;
     }
-    const plan = planRelation(z, "device", [{ relation: "viewer" }]);
+    const plan = planRelation(z, "device", ["viewer"]);
     expect(await plan.check(ctx, alice, device)).toBe(false);
 
     // Direct probe misses (1), RT Compose fires its source hop (1) and
@@ -1636,7 +1381,7 @@ describe("Union.check hybrid (sequential direct, parallel RT on miss)", () => {
     for (const k of Object.keys(counts) as Array<keyof typeof counts>) {
       counts[k] = 0;
     }
-    const plan = planRelation(z, "device", [{ relation: "viewer" }]);
+    const plan = planRelation(z, "device", ["viewer"]);
     expect(await plan.check(ctx, alice, device)).toBe(false);
 
     // Direct (1) + RT source hop finds the group (1) + RT subject-side

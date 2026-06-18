@@ -6,7 +6,6 @@ import { createZbarSchema, Zbar } from "../index.js";
 import { register as registerWorkpool } from "@convex-dev/workpool/test";
 
 const modules = import.meta.glob("../../component/**/*.ts");
-const TENANT = "test-tenant";
 
 const setup = () => {
   const t = convexTest(schema, modules);
@@ -41,7 +40,7 @@ async function assertDbState(
 // Scenario: Google Drive-style sharing (ReBAC + hierarchy propagation)
 // ============================================================================
 
-const driveSchema = createZbarSchema<any>()
+const driveSchema = createZbarSchema()
   .entity("user")
   .entity("account", (e) =>
     e.relation("admin", "user").relation("member", "user", "admin"),
@@ -76,7 +75,6 @@ describe("Scenario: Google Drive-style sharing", () => {
 
     const zbar = new Zbar(api, {
       schema: driveSchema,
-      tenantId: TENANT,
       asyncWrites: false,
     });
 
@@ -111,7 +109,7 @@ describe("Scenario: Google Drive-style sharing", () => {
 // Scenario: IoT platform (User → System → Device with role hierarchy)
 // ============================================================================
 
-const complexSchema = createZbarSchema<any>()
+const complexSchema = createZbarSchema()
   .entity("user")
   .entity("system", (e) =>
     e
@@ -140,7 +138,6 @@ describe("Scenario: IoT platform (User → System → Device)", () => {
 
     const zbar = new Zbar(api, {
       schema: complexSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -212,7 +209,7 @@ describe("Scenario: IoT platform (User → System → Device)", () => {
 // edge type resolution is lost, causing getTargetEntityTypes to return [].
 // ============================================================================
 
-const iotExtendSchema = createZbarSchema<any>()
+const iotExtendSchema = createZbarSchema()
   .entity("user", (e) => e.relation("primary_contact"))
   .entity("system", (e) =>
     e
@@ -275,7 +272,6 @@ describe("Scenario: extend overwrites reverse-edge placeholder", () => {
 
     const zbar = new Zbar(api, {
       schema: iotExtendSchema,
-      tenantId: TENANT,
       asyncWrites: false,
     });
 
@@ -332,7 +328,6 @@ describe("Scenario: extend overwrites reverse-edge placeholder", () => {
 
     const zbar = new Zbar(api, {
       schema: iotExtendSchema,
-      tenantId: TENANT,
       asyncWrites: false,
     });
 

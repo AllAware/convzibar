@@ -11,7 +11,7 @@ const setup = () => {
   return t;
 };
 
-const zbarSchema = createZbarSchema<any>()
+const zbarSchema = createZbarSchema()
   .entity("user")
   .entity("org", (e) =>
     e
@@ -30,7 +30,6 @@ const executeNextMockTask = async (t: any) => {
   const task = await t.mutation(internal.mutations.popMockWorkpool);
   if (!task) return false;
 
-  // Dynamically call the correct internal mutation
   if (task.mutationName === "processAddChunk") {
     await t.mutation(internal.mutations.processAddChunk, task.args);
   } else if (task.mutationName === "processRemoveChunk") {
@@ -58,7 +57,6 @@ describe("Asynchronous Race Conditions", () => {
 
     const zbar = new Zbar(api, {
       schema: zbarSchema,
-      tenantId: "t1",
       asyncWrites: true,
     });
 
@@ -68,40 +66,34 @@ describe("Asynchronous Race Conditions", () => {
     const user = { type: "user", id: "u_mock" } as const;
     const org = { type: "org", id: "org_mock" } as const;
 
-    // Initial explicit setup
     await zbar.addRelation(ctx, user, "viewer", org);
     await drainMockWorkpool(t);
 
     expect(
-      (await zbar.listDirect().object(org).subject(user).collect(ctx))
-        .map((r) => r.relation),
+      (await zbar.listDirect().object(org).subject(user).collect(ctx)).map(
+        (r) => r.relation,
+      ),
     ).toEqual(["viewer"]);
 
-    // 1. Call setRelation to "owner". This drops "viewer" and adds "owner".
-    // Because mockWorkpool is true, the `processAddChunk` tasks are safely queued in the mock table.
+    // setRelation to "owner" drops "viewer" and adds "owner"; the add chunks
+    // are trapped in the mock table.
     await zbar.setRelation(ctx, user, "owner", org);
 
-    // 2. Before we run ANY of those mock tasks, we synchronously delete the newly inserted "owner" relation.
-    // We can do this easily by turning off asyncWrites temporarily or calling removeRelation directly.
+    // Synchronously delete the newly inserted "owner" before any mock task runs.
     const zbarSync = new Zbar(api, {
       schema: zbarSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
     await zbarSync.removeRelation(ctx, user, "owner", org);
 
-    // 3. Now we execute the mock workpool tasks that were trapped from the `setRelation`.
-    // The `processAddChunk` for "owner" will run, see the base relation is gone, abort its expansion,
-    // but crucially STILL FIRE its batched cleanup for "viewer".
+    // Now run the trapped tasks: the "owner" add chunk sees its base gone,
+    // aborts expansion, but STILL fires the batched "viewer" cleanup.
     await drainMockWorkpool(t);
 
-    // The user should have NO direct relationships left (viewer was cleaned up, owner was deleted sync)
     const explicit = await zbar.listDirect().object(org).subject(user).collect(ctx);
-
     expect(explicit).toEqual([]);
   });
 
-  // Move the manual orchestration test here
   test("manual orchestration of background race condition (updateRelation)", async () => {
     const t = setup();
     const ctx = {
@@ -111,22 +103,18 @@ describe("Asynchronous Race Conditions", () => {
 
     const zbar = new Zbar(api, {
       schema: zbarSchema,
-      tenantId: "t1",
-      asyncWrites: false, // Run sync initially
+      asyncWrites: false,
     });
 
     const user = { type: "user", id: "u_manual" } as const;
     const org = { type: "org", id: "org_manual" } as const;
 
-    // 1. Initial Setup: the user is a viewer.
+    // Initial setup (also registers the compiled config with the component).
     await zbar.addRelation(ctx, user, "viewer", org);
     expect(await zbar.hasRelationship(ctx, user, "viewer", org)).toBe(true);
+    const configHash = (zbar as any).configHash as string;
 
-    // 2. We will manually orchestrate the exact background payload that `updateRelation` generates
-    // when upgrading "viewer" -> "admin".
-    const graphConfig = (zbar as any).graphConfig;
-
-    // Foreground step 1: delete the viewer base relation
+    // Foreground step 1: delete the viewer base relation.
     const viewerRel = await t.run(async (innerCtx) => {
       const rel = await innerCtx.db.query("relationships").first();
       if (!rel) throw new Error("No relation found");
@@ -137,7 +125,6 @@ describe("Asynchronous Race Conditions", () => {
     const onCompletePayload = {
       action: "enqueueRemoveChunk",
       args: {
-        tenantId: "t1",
         queue: [
           {
             subject: user,
@@ -146,14 +133,12 @@ describe("Asynchronous Race Conditions", () => {
             removedRelationId: viewerRel._id,
           },
         ],
-        graphConfig,
       },
     };
 
-    // Foreground step 2: insert the admin base relation
+    // Foreground step 2: insert the admin base relation.
     const adminRelId = await t.run(async (innerCtx) => {
       return await innerCtx.db.insert("relationships", {
-        tenantId: "t1",
         subjectType: "user",
         subjectId: "u_manual",
         relation: "admin",
@@ -162,28 +147,22 @@ describe("Asynchronous Race Conditions", () => {
       });
     });
 
-    // 3. THE RACE CONDITION: Before the background worker can process the `admin` AddChunk,
-    // a rapid subsequent update (admin -> owner) deletes the `admin` base row!
+    // THE RACE: a rapid subsequent update deletes the admin base row before
+    // the background AddChunk processes it.
     await t.run(async (innerCtx) => {
       await innerCtx.db.delete(adminRelId);
     });
 
-    // 4. Now, the background worker for the original `admin` AddChunk finally executes.
-    // It will look for `adminRelId`, realize it's missing (deleted by the race), and ABORT its expansion.
-    // We are testing to ensure it STILL executes `onCompletePayload` (cleaning up viewer) despite aborting.
+    // The aborted AddChunk must STILL fire onComplete (cleaning up viewer).
     await t.mutation(internal.mutations.processAddChunk, {
-      tenantId: "t1",
-      baseRelId: adminRelId, // The deleted ID!
-      queue: [], // Queue doesn't matter, it aborts on baseRelId
-      graphConfig,
+      baseRelId: adminRelId,
+      queue: [],
+      configHash,
       onComplete: onCompletePayload,
-      asyncWrites: false, // Force it to run the fallback synchronously
+      asyncWrites: false,
     });
 
-    // 5. Verification: Even though the `admin` worker aborted, the "viewer" cleanup should have cascaded!
     const explicit = await zbar.listDirect().object(org).subject(user).collect(ctx);
-
-    // No direct relationships should remain
     expect(explicit).toEqual([]);
   });
 
@@ -196,22 +175,18 @@ describe("Asynchronous Race Conditions", () => {
 
     const zbar = new Zbar(api, {
       schema: zbarSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
     const user = { type: "user", id: "u_batch" } as const;
     const org = { type: "org", id: "org_batch" } as const;
 
-    // 1. Initial Setup: the user is both a viewer AND an admin explicitly.
     await zbar.addRelation(ctx, user, "viewer", org);
     await zbar.addRelation(ctx, user, "admin", org);
+    const configHash = (zbar as any).configHash as string;
 
     let explicit = await zbar.listDirect().object(org).subject(user).collect(ctx);
     expect(explicit.map((r) => r.relation).sort()).toEqual(["admin", "viewer"]);
-
-    // 2. Manually orchestrate a setRelation("owner") payload
-    const graphConfig = (zbar as any).graphConfig;
 
     const relationsToDrop = await t.run(async (innerCtx) => {
       const rels = await innerCtx.db.query("relationships").collect();
@@ -222,7 +197,6 @@ describe("Asynchronous Race Conditions", () => {
     });
 
     const onCompleteArgs = relationsToDrop.map((r: any) => ({
-      tenantId: "t1",
       queue: [
         {
           subject: user,
@@ -231,7 +205,6 @@ describe("Asynchronous Race Conditions", () => {
           removedRelationId: r._id,
         },
       ],
-      graphConfig,
     }));
 
     const onCompletePayload = {
@@ -239,10 +212,8 @@ describe("Asynchronous Race Conditions", () => {
       args: onCompleteArgs,
     };
 
-    // Insert the new owner base relation
     const ownerRelId = await t.run(async (innerCtx) => {
       return await innerCtx.db.insert("relationships", {
-        tenantId: "t1",
         subjectType: "user",
         subjectId: "u_batch",
         relation: "owner",
@@ -251,22 +222,18 @@ describe("Asynchronous Race Conditions", () => {
       });
     });
 
-    // 3. THE RACE CONDITION: The owner base row is deleted before the worker runs
     await t.run(async (innerCtx) => {
       await innerCtx.db.delete(ownerRelId);
     });
 
-    // 4. Execute the aborted AddChunk
     await t.mutation(internal.mutations.processAddChunk, {
-      tenantId: "t1",
       baseRelId: ownerRelId,
       queue: [],
-      graphConfig,
+      configHash,
       onComplete: onCompletePayload,
       asyncWrites: false,
     });
 
-    // 5. Verification: The batched cleanup should have executed for BOTH viewer and admin
     explicit = await zbar.listDirect().object(org).subject(user).collect(ctx);
     expect(explicit).toEqual([]);
   });
@@ -280,22 +247,18 @@ describe("Asynchronous Race Conditions", () => {
 
     const zbar = new Zbar(api, {
       schema: zbarSchema,
-      tenantId: "t1",
-      asyncWrites: false, // Sync to orchestrate easily
+      asyncWrites: false,
     });
 
     const user = { type: "user", id: "u_phantom" } as const;
     const org = { type: "org", id: "org_phantom" } as const;
     const proj = { type: "project", id: "proj_phantom" } as const;
 
-    // Link the project to the org fully
     await zbar.addRelation(ctx, org, "parent_org", proj);
+    const configHash = (zbar as any).configHash as string;
 
-    // Add user as admin of org in the foreground
-    const graphConfig = (zbar as any).graphConfig;
     const adminRelId = await t.run(async (innerCtx) => {
       return await innerCtx.db.insert("relationships", {
-        tenantId: "t1",
         subjectType: "user",
         subjectId: "u_phantom",
         relation: "admin",
@@ -304,15 +267,12 @@ describe("Asynchronous Race Conditions", () => {
       });
     });
 
-    // Before the background worker expands admin -> project.editor, we remove the admin relation
     await t.run(async (innerCtx) => {
       await innerCtx.db.delete(adminRelId);
     });
 
-    // The background worker for the add fires
     await t.mutation(internal.mutations.processAddChunk, {
-      tenantId: "t1",
-      baseRelId: adminRelId, // Deleted!
+      baseRelId: adminRelId,
       queue: [
         {
           subject: user,
@@ -322,11 +282,10 @@ describe("Asynchronous Race Conditions", () => {
           depth: 1,
         },
       ],
-      graphConfig,
+      configHash,
       asyncWrites: false,
     });
 
-    // Verify the project editor path was never created because the root AddChunk aborted
     const isEditor = await zbar.hasRelationship(ctx, user, "editor", proj);
     expect(isEditor).toBe(false);
   });
@@ -338,10 +297,7 @@ describe("Asynchronous Race Conditions", () => {
       runMutation: t.mutation.bind(t),
     } as any;
 
-    // We configure the graph with an artificially tiny maxChunkSize of 2.
-    // This forces ANY deep expansion to split into multiple sequential
-    // chunks rather than processing everything in a single massive `processAddChunkInternal` loop.
-    const deepSchema = createZbarSchema<any>()
+    const deepSchema = createZbarSchema()
       .entity("user")
       .entity("level1", (e) => e.relation("r", "user"))
       .entity("level2", (e) =>
@@ -360,11 +316,10 @@ describe("Asynchronous Race Conditions", () => {
 
     const zbar = new Zbar(api, {
       schema: deepSchema,
-      tenantId: "t1",
-      asyncWrites: false, // Must be synchronous!
+      asyncWrites: false,
     });
 
-    // Override the chunk size to artificially force multiple chunk splits
+    // Force multiple chunk splits.
     (zbar as any).graphConfig.maxChunkSize = 2;
 
     const user = { type: "user", id: "u_deep" } as const;
@@ -374,30 +329,19 @@ describe("Asynchronous Race Conditions", () => {
     const l4 = { type: "level4", id: "4" } as const;
     const l5 = { type: "level5", id: "5" } as const;
 
-    // Link the graph backwards so the paths are ready to catch the expansion
     await zbar.addRelation(ctx, l4, "parent", l5);
     await zbar.addRelation(ctx, l3, "parent", l4);
     await zbar.addRelation(ctx, l2, "parent", l3);
     await zbar.addRelation(ctx, l1, "parent", l2);
 
-    // Trigger the deep expansion.
-    // This generates >2 nodes of expansion, forcing `processAddChunkInternal` to recurse synchronously.
     await zbar.addRelation(ctx, user, "r", l1);
 
-    // Because asyncWrites=false, it should have completely recursed and finished
-    // the entire multi-chunk sequence before resolving the promise above.
     const hasDeepAccess = await zbar.hasRelationship(ctx, user, "r", l5);
     expect(hasDeepAccess).toBe(true);
 
-    // Now trigger a multi-chunk synchronous REMOVE
     await zbar.removeRelation(ctx, user, "r", l1);
 
-    const hasDeepAccessAfterRemove = await zbar.hasRelationship(
-      ctx,
-      user,
-      "r",
-      l5,
-    );
+    const hasDeepAccessAfterRemove = await zbar.hasRelationship(ctx, user, "r", l5);
     expect(hasDeepAccessAfterRemove).toBe(false);
   });
 
@@ -408,7 +352,7 @@ describe("Asynchronous Race Conditions", () => {
       runMutation: t.mutation.bind(t),
     } as any;
 
-    const deepSchema = createZbarSchema<any>()
+    const deepSchema = createZbarSchema()
       .entity("user")
       .entity("org", (e) => e.relation("admin", "user"))
       .entity("project", (e) =>
@@ -423,8 +367,7 @@ describe("Asynchronous Race Conditions", () => {
 
     const zbar = new Zbar(api, {
       schema: deepSchema,
-      tenantId: "t1",
-      asyncWrites: false, // Run sync
+      asyncWrites: false,
     });
 
     const user = { type: "user", id: "u_bloat" } as const;
@@ -437,16 +380,13 @@ describe("Asynchronous Race Conditions", () => {
     await zbar.addRelation(ctx, org1, "parent", proj);
     await zbar.addRelation(ctx, org2, "parent", proj);
 
-    // Constant relation that keeps the effective nodes alive
     await zbar.addRelation(ctx, user, "admin", org2);
 
-    // Toggle the org1 admin relation 10 times!
     for (let i = 0; i < 10; i++) {
       await zbar.addRelation(ctx, user, "admin", org1);
       await zbar.removeRelation(ctx, user, "admin", org1);
     }
 
-    // Look at the DB state for User -> writer -> Doc
     const writerEff = await t.run(async (innerCtx) => {
       return await innerCtx.db
         .query("effectiveRelationships")
@@ -456,7 +396,6 @@ describe("Asynchronous Race Conditions", () => {
         .first();
     });
 
-    // If there is no bloat, there should only be exactly ONE path (the current valid "admin" path).
     expect(writerEff!.paths.length).toBe(1);
   });
 
@@ -469,44 +408,30 @@ describe("Asynchronous Race Conditions", () => {
 
     const zbar = new Zbar(api, {
       schema: zbarSchema,
-      tenantId: "t1",
-      asyncWrites: false, // Run sync
+      asyncWrites: false,
     });
 
     const user = { type: "user", id: "u_orphan" } as const;
     const org = { type: "org", id: "org_orphan" } as const;
     const proj = { type: "project", id: "proj_orphan" } as const;
 
-    // 1. Proj is a child of Org.
     await zbar.addRelation(ctx, org, "parent_org", proj);
 
-    // 2. User is BOTH owner AND admin of Org explicitly.
-    // owner grants admin and viewer. admin grants viewer.
-    // So admin on Org has 2 paths.
+    // User is BOTH owner AND admin of Org explicitly. owner→admin→viewer, so
+    // admin on Org has 2 lineage paths.
     await zbar.addRelation(ctx, user, "owner", org);
     await zbar.addRelation(ctx, user, "admin", org);
 
-    // Verify User has "editor" access to Proj (via admin -> editor)
     expect(await zbar.hasRelationship(ctx, user, "editor", proj)).toBe(true);
 
-    // 3. REMOVE the explicit "owner" relation.
-    // User is STILL an "admin" of Org, so they should theoretically STILL be an "editor" of Proj.
-    // But removing "owner" reduces the number of paths on "admin" from 2 to 1.
+    // Remove owner (admin drops from 2 paths to 1) then admin.
     await zbar.removeRelation(ctx, user, "owner", org);
-
-    // Now REMOVE the explicit "admin" relation.
-    // If the path was orphaned because processRemoveChunk failed to cascade on the partial removal,
-    // they might STILL have editor access!
     await zbar.removeRelation(ctx, user, "admin", org);
 
-    // After removing both owner and admin, they should have NO access to Org explicitly.
     const explicit = await zbar.listDirect().object(org).subject(user).collect(ctx);
     expect(explicit).toEqual([]);
 
-    // They should definitely NOT be an editor of the project anymore.
     const hasEditor = await zbar.hasRelationship(ctx, user, "editor", proj);
-
-    // THIS WILL FAIL IF THERE ARE ORPHANED PATHS!
     expect(hasEditor).toBe(false);
   });
 });

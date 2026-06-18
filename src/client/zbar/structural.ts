@@ -100,9 +100,8 @@ export function getViaRelevantRelations(
   // Expand with inheritance on the via entity type
   const expanded = new Set<string>();
   for (const rel of baseRelations) {
-    const inherited = resolveRelationInheritance(z, viaType, rel);
-    for (const t of inherited) {
-      expanded.add(t.relation);
+    for (const t of resolveRelationInheritance(z, viaType, rel)) {
+      expanded.add(t);
     }
   }
 

@@ -43,119 +43,6 @@ describe("Schema Compiler Deduplication (Unit)", () => {
     expect(adminTriggerRules[0].derivedRelation).toBe("manager");
   });
 
-  test("Condition compatibility: Strict rules do not dominate loose rules", () => {
-    const schema = {
-      entities: {
-        system: {
-          relations: {
-            admin: [],
-          },
-        },
-        device: {
-          relations: {
-            system: [{ type: "system" }],
-            manager: [{ relation: "system.admin", condition: "isActive" }],
-            viewer: ["manager", "system.admin"],
-          },
-        },
-      },
-    };
-
-    const config = parseSchemaToGraphConfig(schema);
-
-    const adminTriggerRules = config.traversalRules.filter(
-      (r) =>
-        r.sourceObjectType === "device" &&
-        r.sourceRelation === "system" &&
-        r.targetRelation === "admin",
-    );
-
-    expect(adminTriggerRules).toHaveLength(2);
-
-    const managerRule = adminTriggerRules.find(
-      (r) => r.derivedRelation === "manager",
-    );
-    const viewerRule = adminTriggerRules.find(
-      (r) => r.derivedRelation === "viewer",
-    );
-
-    expect(managerRule).toBeDefined();
-    expect(managerRule?.conditions).toEqual(["isActive"]);
-
-    expect(viewerRule).toBeDefined();
-    expect(viewerRule?.conditions).toBeUndefined();
-  });
-
-  test("Condition compatibility: Loose rules CAN dominate strict rules", () => {
-    const schema = {
-      entities: {
-        system: {
-          relations: {
-            admin: [],
-          },
-        },
-        device: {
-          relations: {
-            system: [{ type: "system" }],
-            manager: ["system.admin"],
-            viewer: [
-              "manager",
-              { relation: "system.admin", condition: "isGuest" },
-            ],
-          },
-        },
-      },
-    };
-
-    const config = parseSchemaToGraphConfig(schema);
-
-    const adminTriggerRules = config.traversalRules.filter(
-      (r) =>
-        r.sourceObjectType === "device" &&
-        r.sourceRelation === "system" &&
-        r.targetRelation === "admin",
-    );
-
-    expect(adminTriggerRules).toHaveLength(1);
-    expect(adminTriggerRules[0].derivedRelation).toBe("manager");
-    expect(adminTriggerRules[0].conditions).toBeUndefined();
-  });
-
-  test("Condition compatibility: Equal conditions can dominate", () => {
-    const schema = {
-      entities: {
-        system: {
-          relations: {
-            admin: [],
-          },
-        },
-        device: {
-          relations: {
-            system: [{ type: "system" }],
-            manager: [{ relation: "system.admin", condition: "isActive" }],
-            viewer: [
-              "manager",
-              { relation: "system.admin", condition: "isActive" },
-            ],
-          },
-        },
-      },
-    };
-
-    const config = parseSchemaToGraphConfig(schema);
-
-    const adminTriggerRules = config.traversalRules.filter(
-      (r) =>
-        r.sourceObjectType === "device" &&
-        r.sourceRelation === "system" &&
-        r.targetRelation === "admin",
-    );
-
-    expect(adminTriggerRules).toHaveLength(1);
-    expect(adminTriggerRules[0].derivedRelation).toBe("manager");
-    expect(adminTriggerRules[0].conditions).toEqual(["isActive"]);
-  });
-
   test("Non-domination: Independent relations are not pruned", () => {
     const schema = {
       entities: {
@@ -220,7 +107,7 @@ async function assertDbState(
   expect(effectiveRelationships.length).toBe(expectedEffectiveRelationships);
 }
 
-const dedupSchema = createZbarSchema<any>()
+const dedupSchema = createZbarSchema()
   .entity("user")
   .entity("org", (e) =>
     e
@@ -250,7 +137,6 @@ describe("Schema Compiler Deduplication (Integration)", () => {
 
     const zbar = new Zbar(api, {
       schema: dedupSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -268,7 +154,6 @@ describe("Schema Compiler Deduplication (Integration)", () => {
 
     // Only the dominant 'admin' row was propagated
     const allRels = await ctx.runQuery(api.queries.checkPermissionFast, {
-      tenantId: "t1",
       subject: user,
       object: project,
       relations: ["admin", "manager", "viewer"],

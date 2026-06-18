@@ -10,7 +10,6 @@ import { register as registerWorkpool } from "@convex-dev/workpool/test";
 // ============================================================================
 
 const modules = import.meta.glob("../../component/**/*.ts");
-const TENANT = "iot-tenant";
 
 const setup = () => {
   const t = convexTest(schema, modules);
@@ -84,7 +83,7 @@ async function effectiveRowExists(
 // group / system admin checks are the hot path for management permissions.
 // ============================================================================
 
-const iotSchema = createZbarSchema<any>()
+const iotSchema = createZbarSchema()
   .entity("user", (e) => e.relation("primary_contact"))
 
   .entity("system", (e) =>
@@ -199,7 +198,6 @@ const iotSchema = createZbarSchema<any>()
 const mkZbar = (opts?: { readTimeChainDepth?: number }) =>
   new Zbar(api, {
     schema: iotSchema,
-    tenantId: TENANT,
     asyncWrites: false,
     readTimeChainDepth: opts?.readTimeChainDepth,
   });
