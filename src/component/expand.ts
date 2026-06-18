@@ -211,7 +211,7 @@ function combinePath(
   const schemaCondition = rule.conditions
     ? rule.conditions.map((c: string) => ({ condition: c }))
     : [];
-  const combinedConditions =
+  const rawConditions =
     order === "matchFirst"
       ? [
           ...(matchPath.conditions || []),
@@ -223,6 +223,26 @@ function combinePath(
           ...(matchPath.conditions || []),
           ...schemaCondition,
         ];
+
+  // De-duplicate conditions by (name + static context), preserving first-seen
+  // order. A derived path can legitimately collect the same condition from
+  // more than one segment (e.g. the same condition is baked on both the
+  // matched path and the rule). Evaluating it twice re-runs context-returning
+  // ("middleware") conditions against already-augmented data, which can flip
+  // the final allow/deny — so the runtime BFS must dedupe just as the schema
+  // compiler already does for rule-level conditions.
+  const seenConditions = new Set<string>();
+  const combinedConditions = rawConditions.filter(
+    (c: { condition: string; conditionContext?: unknown }) => {
+      const key = JSON.stringify({
+        condition: c.condition,
+        conditionContext: c.conditionContext ?? null,
+      });
+      if (seenConditions.has(key)) return false;
+      seenConditions.add(key);
+      return true;
+    },
+  );
 
   return {
     baseIds: [

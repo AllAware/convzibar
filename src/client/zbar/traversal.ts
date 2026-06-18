@@ -1324,11 +1324,17 @@ export async function evaluateManyPermissions<Data = unknown>(
 //   chain  — connectivity of each interior link (via[i] → via[i+1]).
 //   expand — range scan at the other boundary producing candidate IDs.
 //   verify — the permission-aware `plan.checkBatch(Subjects)` applied to
-//            the candidates. Skipped when the gate relations are tight AND
-//            the schema declares no conditions: write-time materialisation
-//            guarantees transitivity of every pinned hop, so reaching the
-//            candidate from the final via means reaching it from the
-//            subject.
+//            the candidates. ALWAYS run. The gate/chain/expand steps only
+//            establish *structural connectivity*, and they admit relations
+//            that do not compose into the queried permission: the expand
+//            step enumerates every typed relation between the via and the
+//            object (e.g. a device merely `monitored_by` a system, not
+//            owned by it), and interior chain links are checked with
+//            *every* relation on the intermediate type. So a candidate
+//            reachable from the final via is NOT necessarily reachable
+//            from the subject *through the permission* — only the permission
+//            plan's checkBatch can decide that, and it is a single batched
+//            query, so there is no fast path worth the unsoundness.
 //
 // Both helpers run gate + chain + expand in parallel; the verify step
 // is serialised on the candidate set. `planRelation` is reused for every
@@ -1349,7 +1355,6 @@ export async function collectViaObjects<Data = unknown>(
   via: readonly Entity[],
   objectType: string,
   acceptableRelations: readonly string[],
-  schemaHasConditions: boolean,
   _requestContext?: Data,
 ): Promise<Set<string>> {
   if (via.length === 0) return new Set();
@@ -1443,10 +1448,11 @@ export async function collectViaObjects<Data = unknown>(
   for (const s of expandSets) for (const id of s) candidateIds.add(id);
   if (candidateIds.size === 0) return new Set();
 
-  // Fast path: tight gate + no conditions → write-time transitivity
-  // guarantees the candidates already satisfy subject→object.
-  if (!schemaHasConditions && isTightGate) return candidateIds;
-
+  // Verify: structural connectivity (gate + chain + expand) is necessary
+  // but NOT sufficient — the expand/chain steps admit relations that don't
+  // compose into the queried permission, so a structurally-reachable
+  // candidate can still be a non-grant. Bind the candidates to the subject
+  // through the permission plan. checkBatch is a single batched query.
   return plan.checkBatch(ctx, subject, objectType, [...candidateIds]);
 }
 
@@ -1463,7 +1469,6 @@ export async function collectViaSubjects<Data = unknown>(
   via: readonly Entity[],
   subjectType: string,
   acceptableRelations: readonly string[],
-  schemaHasConditions: boolean,
   _requestContext?: Data,
 ): Promise<Set<string>> {
   if (via.length === 0) return new Set();
@@ -1547,7 +1552,8 @@ export async function collectViaSubjects<Data = unknown>(
   for (const c of chainPassed) if (!c) return new Set();
   if (candidateIds.size === 0) return new Set();
 
-  if (!schemaHasConditions && isTightExpand) return candidateIds;
-
+  // Verify: see collectViaObjects — structural reachability of a subject to
+  // the object does not imply the subject holds the permission. Always bind
+  // candidates through the permission plan.
   return plan.checkBatchSubjects(ctx, object, subjectType, [...candidateIds]);
 }

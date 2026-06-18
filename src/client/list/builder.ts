@@ -72,13 +72,6 @@ export class ListQueryBuilder<
       requestContext,
     );
 
-    // Detect whether any conditions exist in the schema.  When there
-    // are none we can skip the per-candidate permission verification
-    // entirely in the via path because write-time materialisation
-    // guarantees transitivity (subject→via + via→object ⇒ subject→object).
-    const schemaHasConditions =
-      Object.keys(z.schema.conditions || {}).length > 0;
-
     if (this._mode === "listObjects") {
       const subject = { type: this._subjectType!, id: this._subjectId! };
       const objectType = this._objectType!;
@@ -91,7 +84,6 @@ export class ListQueryBuilder<
             this._via,
             objectType,
             acceptableRelations,
-            schemaHasConditions,
             requestContext,
           )
         : await plan.expandObjects(ctx, subject, objectType);
@@ -109,7 +101,6 @@ export class ListQueryBuilder<
           this._via,
           subjectType,
           acceptableRelations,
-          schemaHasConditions,
           requestContext,
         )
       : await plan.expandSubjects(ctx, object, subjectType);

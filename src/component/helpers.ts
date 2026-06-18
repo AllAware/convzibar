@@ -1,4 +1,7 @@
-import { expandRelationTargets } from "../shared/relation-def";
+import {
+  expandRelationTargets,
+  iterateRelationTargets,
+} from "../shared/relation-def";
 import type { GraphConfig, ReadTimePath, TraversalRule } from "./types";
 
 function expandRelation(
@@ -23,14 +26,31 @@ function getTargetEntityTypes(
     if (relDef) {
       const defs = Array.isArray(relDef) ? relDef : [relDef];
       for (const d of defs) {
-        if (typeof d === "string" && schema.entities[d]) {
-          types.add(d);
-        } else if (typeof d === "object" && d !== null && "type" in d) {
+        if (typeof d === "string") {
+          if (d.includes("#")) {
+            // Userset target `type#rel` — the reachable entity is `type`.
+            // Without this, a dot-path readTimeRelation whose source relation
+            // targets its intermediate only through a userset compiled with an
+            // empty `sourceTypes`, silently denying at read time.
+            const usersetType = d.split("#")[0];
+            if (schema.entities[usersetType]) types.add(usersetType);
+          } else if (schema.entities[d]) {
+            types.add(d);
+          }
+        } else if (typeof d === "object" && d !== null) {
           if (
+            "type" in d &&
             typeof (d as any).type === "string" &&
             schema.entities[(d as any).type]
           ) {
             types.add((d as any).type);
+          } else if (
+            "relation" in d &&
+            typeof (d as any).relation === "string" &&
+            (d as any).relation.includes("#")
+          ) {
+            const usersetType = (d as any).relation.split("#")[0];
+            if (schema.entities[usersetType]) types.add(usersetType);
           }
         }
       }
@@ -41,8 +61,13 @@ function getTargetEntityTypes(
 
 export function parseSchemaToGraphConfig(schema: any): GraphConfig {
   // Deep-clone entities so that Pass 2 reverse-edge resolution does not
-  // mutate the caller's schema object.
-  schema = { ...schema, entities: JSON.parse(JSON.stringify(schema.entities || {})) };
+  // mutate the caller's schema object. Use structuredClone rather than a
+  // JSON round-trip: JSON.stringify silently DROPS keys whose value is
+  // `undefined`, which is exactly how placeholder relations are stored
+  // (`.relation('admin')` with no target). Dropping them detaches any
+  // local-inheritance reference to a placeholder (e.g. `viewer: 'admin'`
+  // where `admin` is RT-derived), turning it into an "unknown" target.
+  schema = { ...schema, entities: structuredClone(schema.entities || {}) };
 
   const rules: TraversalRule[] = [];
   // reverseEdges: objectType -> relation -> subjectType -> reverseRelation
@@ -121,6 +146,38 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
                 currentArr.length === 1 ? currentArr[0] : currentArr;
             }
           }
+        }
+      }
+    }
+  }
+
+  // Reject bare-string relation targets that resolve to neither a declared
+  // relation on the owning entity nor a known entity type. classifyStringRef
+  // tags these as `kind: "unknown"`, after which every downstream consumer
+  // (validation, rule generation, traversal) silently ignores them — turning
+  // a one-character typo into a silent authorization gap. Surfacing it at
+  // schema load converts a deny-when-should-grant bug into a load-time error.
+  // Runs AFTER reverse-edge resolution so back-filled placeholder relations
+  // are seen as entity-typed targets rather than "unknown".
+  for (const [entityType, def] of Object.entries(schema.entities || {})) {
+    const relations = ((def as any).relations || {}) as Record<string, unknown>;
+    const classifyCtx = {
+      localRelations: relations,
+      entities: schema.entities as Record<string, unknown>,
+    };
+    for (const [relName, relDef] of Object.entries(relations)) {
+      for (const target of iterateRelationTargets(relDef, classifyCtx)) {
+        if (target.kind === "unknown") {
+          const knownRelations = Object.keys(relations).filter(
+            (r) => r !== relName,
+          );
+          const knownEntities = Object.keys(schema.entities || {});
+          throw new Error(
+            `Zbar Schema Error: relation '${relName}' on '${entityType}' references '${target.raw}', ` +
+              `which is neither a relation declared on '${entityType}' nor a known entity type. ` +
+              `Use a declared relation [${knownRelations.join(", ")}], an entity type [${knownEntities.join(", ")}], ` +
+              `a dot-path ('source.target'), or a userset ('type#relation').`,
+          );
         }
       }
     }
@@ -349,7 +406,11 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
         });
       } else {
         const parts = rt.dotPath.split(".");
-        if (parts.length !== 2) continue;
+        if (parts.length !== 2) {
+          throw new Error(
+            `Zbar Schema Error: readTimeRelation('${rt.derivedRelation}', '${rt.dotPath}') on '${entityType}' must be a single dot-path of the form 'source.target' (exactly one '.'). Got ${parts.length} segment(s).`,
+          );
+        }
         const [sourceRelation, targetRelation] = parts;
         const sourceTypes = getTargetEntityTypes(
           schema,
@@ -374,7 +435,7 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
   // schema load makes the problem surface at enableComponent time, long
   // before any request would see the wrong answer.
   if (readTimePaths.length > 0) {
-    detectReadTimePathCycle(readTimePaths);
+    detectReadTimePathCycle(readTimePaths, schema);
   }
 
   return {
@@ -390,14 +451,27 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
  * relation on each of its declared source types. Throws on the first
  * cycle encountered, with the full loop in the error message.
  */
-function detectReadTimePathCycle(paths: readonly ReadTimePath[]): void {
+function detectReadTimePathCycle(
+  paths: readonly ReadTimePath[],
+  schema: any,
+): void {
   const edges = new Map<string, string[]>();
   const keyOf = (type: string, rel: string) => `${type}#${rel}`;
   for (const rt of paths) {
     const from = keyOf(rt.objectType, rt.derivedRelation);
     const bucket = edges.get(from) ?? [];
     for (const sourceType of rt.sourceTypes) {
-      bucket.push(keyOf(sourceType, rt.targetRelation));
+      // Mirror runtime chaining: `rtBranches` recurses into
+      // resolveRelationInheritance(sourceType, targetRelation), so a cycle
+      // can close through ANY relation that `targetRelation` locally
+      // contains — not just `targetRelation` itself. Building only the
+      // literal edge here misses inheritance-closing loops, which then run
+      // to `readTimeChainDepth` at runtime and silently deny.
+      for (const member of expandRelationTargets(schema, sourceType, [
+        rt.targetRelation,
+      ])) {
+        bucket.push(keyOf(sourceType, member.relation));
+      }
     }
     edges.set(from, bucket);
   }

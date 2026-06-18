@@ -337,6 +337,127 @@ describe("Read-time cycle detection", () => {
       /cycle/i,
     );
   });
+
+  test("rejects a cycle that closes through an INHERITED member of the target relation", () => {
+    // `member` RT-derives from `parent.admin`; `admin` locally inherits
+    // `member` (admin: ['member']). At runtime rtBranches chains into
+    // resolveRelationInheritance(sys, 'admin') = ['admin','member'], so
+    // member → admin → member loops to the depth cap and silently denies.
+    // The detector must model that inheritance edge, not just the literal
+    // targetRelation, and reject at schema load.
+    const schema = {
+      entities: {
+        user: { relations: {} },
+        sys: {
+          relations: {
+            member: [{ type: "user" }],
+            admin: ["member"],
+            parent: [{ type: "sys" }],
+          },
+          readTimeRelations: [
+            { derivedRelation: "member", dotPath: "parent.admin" },
+          ],
+        },
+      },
+    } as any;
+    expect(() => parseSchemaToGraphConfig(schema)).toThrow(/cycle/i);
+  });
+});
+
+// ============================================================================
+// Read-time source-type resolution (dot-path through a userset).
+// ============================================================================
+
+describe("Read-time dot-path source-type resolution", () => {
+  test("resolves sourceTypes through a userset rewrite on the source relation", () => {
+    // org.owner is a userset target ('group#member'), so the only entity
+    // type reachable through `owner` is `group`. getTargetEntityTypes must
+    // see it; otherwise the RT path compiles with sourceTypes:[] and
+    // silently grants nothing at read time.
+    const schema = {
+      entities: {
+        user: { relations: {} },
+        group: { relations: { member: [{ type: "user" }] } },
+        org: {
+          relations: {
+            owner: ["group#member"],
+            member: [],
+          },
+          readTimeRelations: [
+            { derivedRelation: "member", dotPath: "owner.member" },
+          ],
+        },
+      },
+    } as any;
+
+    const config = parseSchemaToGraphConfig(schema);
+    expect(config.readTimePaths).toHaveLength(1);
+    expect(config.readTimePaths![0].sourceTypes).toEqual(["group"]);
+  });
+});
+
+// ============================================================================
+// Schema-load validations: surface silent-deny / silent-gap config errors.
+// ============================================================================
+
+describe("Schema-load validation", () => {
+  test("rejects a bare-string relation target that is neither a relation nor an entity (typo guard)", () => {
+    const schema = {
+      entities: {
+        user: { relations: {} },
+        org: {
+          relations: {
+            owner: [{ type: "user" }],
+            admin: ["owner"],
+            // typo: 'admni' instead of 'admin' — previously dropped silently.
+            viewer: ["admni"],
+          },
+        },
+      },
+    } as any;
+    expect(() => parseSchemaToGraphConfig(schema)).toThrow(/admni/);
+  });
+
+  test("accepts a reference to a placeholder relation (no target) — it is RT/reverse-filled", () => {
+    // contact.admin is a placeholder (no target) referenced by viewer; the
+    // structuredClone must preserve the key so this does NOT trip the typo
+    // guard.
+    const schema = {
+      entities: {
+        user: { relations: {} },
+        system: { relations: { admin: [{ type: "user" }] } },
+        contact: {
+          relations: {
+            owner: [{ type: "system" }],
+            admin: undefined,
+            viewer: ["admin"],
+          },
+          readTimeRelations: [
+            { derivedRelation: "admin", dotPath: "owner.admin" },
+          ],
+        },
+      },
+    } as any;
+    expect(() => parseSchemaToGraphConfig(schema)).not.toThrow();
+  });
+
+  test("rejects a readTimeRelation dot-path with more than two segments", () => {
+    const schema = {
+      entities: {
+        user: { relations: {} },
+        b: { relations: { m: [{ type: "user" }] } },
+        a: {
+          relations: { owner: [{ type: "b" }], viewer: [] },
+          readTimeRelations: [
+            { derivedRelation: "viewer", dotPath: "owner.m.user" },
+          ],
+        },
+      },
+    } as any;
+    expect(() => parseSchemaToGraphConfig(schema)).toThrow(
+      /single dot-path|exactly one/i,
+    );
+  });
 });
 
 // ============================================================================

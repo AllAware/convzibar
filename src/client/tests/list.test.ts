@@ -410,8 +410,20 @@ describe("Fluent .list() Query Builder", () => {
     const sys1 = { type: "system" as const, id: "sys1" };
     const dev1 = { type: "device" as const, id: "dev1" };
 
+    // sys1 is a VIEWER of dev1, so via the device.viewer `system#viewer`
+    // userset, sys1's viewers (alice) become dev1 viewers — but NOT dev1
+    // admins (that would require sys1 to be a dev1 admin AND alice a sys1
+    // admin). So alice legitimately gets `view` but not `manage` on dev1.
+    // (Previously this used a `sys1 admin dev1` edge, which grants alice
+    // nothing on dev1 — the assertion `view == ['dev1']` only passed because
+    // of the `.via()` tight-gate over-grant. The dedicated over-grant guards
+    // below pin that bug; this test pins the legitimate positive path.)
     await zbar.addRelation(ctx, alice, "viewer", sys1);
-    await zbar.addRelation(ctx, sys1, "admin", dev1);
+    await zbar.addRelation(ctx, sys1, "viewer", dev1);
+
+    // .via() must agree with can(): view yes, manage no.
+    expect(await zbar.can(ctx, alice, "view", dev1)).toBe(true);
+    expect(await zbar.can(ctx, alice, "manage", dev1)).toBe(false);
 
     const viewResult = await zbar
       .list()
@@ -430,6 +442,121 @@ describe("Fluent .list() Query Builder", () => {
       .via(sys1)
       .collect(ctx);
     expect(manageResult).toEqual([]);
+  });
+
+  // ===========================================================================
+  // .via() over-grant regression guards.
+  //
+  // The `.via()` planners used to short-circuit (`if (!schemaHasConditions &&
+  // isTightGate) return candidateIds`) and return every object STRUCTURALLY
+  // reachable from the final via, without binding the candidate to the subject
+  // through the permission. That over-granted: connectivity through the via is
+  // not the same as holding the permission on the object. These tests assert
+  // `.via()` agrees with `can()` (the authoritative answer) — they FAIL on the
+  // pre-fix code and pass once the fast path always verifies via checkBatch.
+  // ===========================================================================
+
+  test("over-grant guard (single hop): structurally-reachable but non-permitted object is excluded", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+    const zbar = mkZbar();
+
+    const alice = { type: "user" as const, id: "alice" };
+    const sys1 = { type: "system" as const, id: "sys1" };
+    const dev1 = { type: "device" as const, id: "dev1" };
+
+    // alice is a viewer of sys1; sys1 is ADMIN of dev1 (so dev1 is reachable
+    // from sys1 in the materialised graph). But dev1.admin via `system#admin`
+    // only propagates sys1's ADMINS to dev1 — alice is a viewer, so she holds
+    // nothing on dev1.
+    await zbar.addRelation(ctx, alice, "viewer", sys1);
+    await zbar.addRelation(ctx, sys1, "admin", dev1);
+
+    // Ground truth: alice has no access to dev1.
+    expect(await zbar.can(ctx, alice, "view", dev1)).toBe(false);
+    expect(await zbar.can(ctx, alice, "manage", dev1)).toBe(false);
+
+    // .via() must NOT over-grant — it must agree with can().
+    const viaView = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .via(sys1)
+      .collect(ctx);
+    expect(viaView).toEqual([]);
+
+    // Reverse direction (listSubjects) must be symmetric.
+    const viaSubjects = await zbar
+      .list()
+      .object(dev1)
+      .permission("view")
+      .subject("user")
+      .via(sys1)
+      .collect(ctx);
+    expect(viaSubjects).toEqual([]);
+  });
+
+  test("over-grant guard (multi-hop): a non-composing chain bridge does not grant", async () => {
+    const t = setup();
+    const ctx = mkCtx(t);
+
+    // Dedicated schema: the chain hop sys → grp is a non-permission relation
+    // (`group.watched_by`), and devY is owned by a DIFFERENT system (sysY).
+    // The interior chain link is checked with *every* relation on the
+    // intermediate type, so the non-composing `watched_by` edge bridges the
+    // chain — but it must not grant `view` on devY.
+    const bridgeSchema = createZbarSchema<any>()
+      .entity("user")
+      .entity("system", (e) =>
+        e
+          .relation("owner", "user")
+          .relation("admin", "user", "owner")
+          .relation("viewer", "user", "admin"),
+      )
+      .entity("group", (e) =>
+        e
+          .relation("member", "user")
+          .relation("watched_by", { type: "system" }),
+      )
+      .entity("device", (e) =>
+        e
+          .relation("owner", { type: "system" })
+          .relation("container", { type: "group" })
+          .relation("viewer", "owner.viewer")
+          .permission("view", "viewer"),
+      )
+      .build();
+
+    const zbar = new Zbar(api, {
+      schema: bridgeSchema,
+      tenantId: "t1",
+      asyncWrites: false,
+    });
+
+    const alice = { type: "user" as const, id: "alice" };
+    const sys1 = { type: "system" as const, id: "sys1" };
+    const sysY = { type: "system" as const, id: "sysY" };
+    const grp1 = { type: "group" as const, id: "grp1" };
+    const devY = { type: "device" as const, id: "devY" };
+
+    await zbar.addRelation(ctx, alice, "viewer", sys1); // alice views sys1
+    await zbar.addRelation(ctx, sys1, "watched_by", grp1); // non-composing bridge
+    await zbar.addRelation(ctx, sysY, "owner", devY); // devY owned by sysY (not sys1)
+    await zbar.addRelation(ctx, grp1, "container", devY); // devY in grp1
+
+    // Ground truth: alice cannot view devY (devY.viewer derives from sysY's
+    // viewers; alice only views sys1).
+    expect(await zbar.can(ctx, alice, "view", devY)).toBe(false);
+
+    const viaChain = await zbar
+      .list()
+      .object("device")
+      .permission("view")
+      .subject(alice)
+      .via(sys1, grp1)
+      .collect(ctx);
+    expect(viaChain).toEqual([]);
   });
 
   test("via gate-check: subject with no relationship to via entity returns empty", async () => {
