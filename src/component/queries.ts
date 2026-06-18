@@ -107,78 +107,43 @@ async function fetchEffectiveReverse(
 
 // ============================================================================
 // Public queries.
+//
+// The whole effective-graph read surface is two queries — forward (subject ×
+// relation → objects) and reverse (object × relation → subjects) — each
+// dispatching internally on whether far-side *points* or a type *range* was
+// supplied. The client builds the `${type}:${id}` scope keys.
 // ============================================================================
 
-export const checkPermissionFast = query({
+export const effectiveForward = query({
   args: {
-    subject: subjectValidator,
+    subjects: v.array(subjectValidator),
     relations: v.array(v.string()),
-    object: objectValidator,
+    objectPoints: v.optional(v.array(v.string())),
+    objectRange: v.optional(v.string()), // objectType
   },
   handler: async (ctx: any, args: any) => {
     return fetchEffectiveForward(ctx, {
-      subjects: [args.subject],
+      subjects: args.subjects,
       relations: args.relations,
-      objectPoints: [buildScopeKey(args.object.type, args.object.id)],
+      objectPoints: args.objectPoints,
+      objectRange: args.objectRange ? { objectType: args.objectRange } : undefined,
     });
   },
 });
 
-export const listAccessibleObjectsFast = query({
+export const effectiveReverse = query({
   args: {
-    subject: subjectValidator,
+    objects: v.array(objectValidator),
     relations: v.array(v.string()),
-    objectType: v.string(),
-  },
-  handler: async (ctx: any, args: any) => {
-    return fetchEffectiveForward(ctx, {
-      subjects: [args.subject],
-      relations: args.relations,
-      objectRange: { objectType: args.objectType },
-    });
-  },
-});
-
-/**
- * Batch-check whether a subject has any of the given relations with each of
- * several candidate objects. Returns only the matches.
- */
-export const checkPermissionBatchObjects = query({
-  args: {
-    subject: subjectValidator,
-    relations: v.array(v.string()),
-    objectType: v.string(),
-    candidateObjectIds: v.array(v.string()),
-  },
-  handler: async (ctx: any, args: any) => {
-    return fetchEffectiveForward(ctx, {
-      subjects: [args.subject],
-      relations: args.relations,
-      objectPoints: args.candidateObjectIds.map((id: string) =>
-        buildScopeKey(args.objectType, id),
-      ),
-    });
-  },
-});
-
-/**
- * Batch-check whether each of several candidate subjects has any of the given
- * relations with a specific object. Returns only the matches.
- */
-export const checkPermissionBatchSubjects = query({
-  args: {
-    object: objectValidator,
-    relations: v.array(v.string()),
-    subjectType: v.string(),
-    candidateSubjectIds: v.array(v.string()),
+    subjectPoints: v.optional(v.array(v.string())),
+    subjectRange: v.optional(v.string()), // subjectType
   },
   handler: async (ctx: any, args: any) => {
     return fetchEffectiveReverse(ctx, {
-      objects: [args.object],
+      objects: args.objects,
       relations: args.relations,
-      subjectPoints: args.candidateSubjectIds.map((id: string) =>
-        buildScopeKey(args.subjectType, id),
-      ),
+      subjectPoints: args.subjectPoints,
+      subjectRange: args.subjectRange ? { subjectType: args.subjectRange } : undefined,
     });
   },
 });
@@ -289,55 +254,3 @@ export const listDirectRelationships = query({
   },
 });
 
-export const listSubjectsWithAccessFast = query({
-  args: {
-    subjectType: v.string(),
-    relations: v.array(v.string()),
-    object: objectValidator,
-  },
-  handler: async (ctx: any, args: any) => {
-    return fetchEffectiveReverse(ctx, {
-      objects: [args.object],
-      relations: args.relations,
-      subjectRange: { subjectType: args.subjectType },
-    });
-  },
-});
-
-/**
- * Batched forward expansion: for each `subject` × `relation`, return every
- * effective edge whose object is of `objectType`. Drives `Compose.expandObjects`.
- */
-export const listAccessibleObjectsBatch = query({
-  args: {
-    subjects: v.array(subjectValidator),
-    relations: v.array(v.string()),
-    objectType: v.string(),
-  },
-  handler: async (ctx: any, args: any) => {
-    return fetchEffectiveForward(ctx, {
-      subjects: args.subjects,
-      relations: args.relations,
-      objectRange: { objectType: args.objectType },
-    });
-  },
-});
-
-/**
- * Batched reverse expansion: for each `object` × `relation`, return every
- * effective edge whose subject is of `subjectType`. Drives `Compose.expandSubjects`.
- */
-export const listSubjectsWithAccessBatch = query({
-  args: {
-    objects: v.array(objectValidator),
-    relations: v.array(v.string()),
-    subjectType: v.string(),
-  },
-  handler: async (ctx: any, args: any) => {
-    return fetchEffectiveReverse(ctx, {
-      objects: args.objects,
-      relations: args.relations,
-      subjectRange: { subjectType: args.subjectType },
-    });
-  },
-});

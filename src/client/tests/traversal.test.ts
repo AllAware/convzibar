@@ -931,24 +931,18 @@ describe("getPermissions through the unified plan", () => {
  */
 function countingCtx(t: any) {
   const base = mkCtx(t);
+  // The entire effective-graph read surface is two component queries; counting
+  // them by direction is the meaningful query-count contract (point vs range
+  // vs batch is an internal dispatch detail of each).
   const counts = {
-    checkPermissionFast: 0,
-    listAccessibleObjectsFast: 0,
-    listSubjectsWithAccessFast: 0,
-    checkPermissionBatchObjects: 0,
-    checkPermissionBatchSubjects: 0,
-    listAccessibleObjectsBatch: 0,
-    listSubjectsWithAccessBatch: 0,
+    effectiveForward: 0,
+    effectiveReverse: 0,
   };
   const ctx = {
     runQuery: async (fn: any, args: any) => {
       const name = getFunctionName(fn);
-      for (const key of Object.keys(counts) as Array<keyof typeof counts>) {
-        if (name === `queries:${key}`) {
-          counts[key]++;
-          break;
-        }
-      }
+      if (name === "queries:effectiveForward") counts.effectiveForward++;
+      else if (name === "queries:effectiveReverse") counts.effectiveReverse++;
       return base.runQuery(fn, args);
     },
     runMutation: base.runMutation,
@@ -978,8 +972,9 @@ describe("planRelation with no permission (the .via() gate/chain shape)", () => 
     const bob = { type: "user" as const, id: "bob" };
     expect(await plan.check(ctx, bob, sys)).toBe(false);
 
-    // Two checks → exactly two `checkPermissionFast` calls.
-    expect(counts.checkPermissionFast).toBe(2);
+    // Two checks → exactly two forward queries, no reverse.
+    expect(counts.effectiveForward).toBe(2);
+    expect(counts.effectiveReverse).toBe(0);
   });
 
   test("two materialised queries when exactly one RT dot-path applies", async () => {
@@ -1011,9 +1006,8 @@ describe("planRelation with no permission (the .via() gate/chain shape)", () => 
     // Direct branch: 1 × checkPermissionFast
     // RT branch (owner.admin): 1 × listSubjectsWithAccessFast (hop 1)
     //                         + 1 × checkPermissionBatchObjects (hop 2)
-    expect(counts.checkPermissionFast).toBe(1);
-    expect(counts.listSubjectsWithAccessFast).toBe(1);
-    expect(counts.checkPermissionBatchObjects).toBe(1);
+    expect(counts.effectiveForward).toBe(2); // direct + RT hop-2
+    expect(counts.effectiveReverse).toBe(1); // RT hop-1
   });
 });
 
@@ -1034,10 +1028,9 @@ describe("evaluateManyPermissions (getPermissions' minimum-work evaluator)", () 
     }
     await zbar.getPermissions(ctx, alice, doc);
 
-    expect(counts.checkPermissionFast).toBe(1);
-    // No RT paths declared on `doc` → no fallback queries needed.
-    expect(counts.listSubjectsWithAccessFast).toBe(0);
-    expect(counts.listAccessibleObjectsFast).toBe(0);
+    // No RT paths declared on `doc` → one forward batch, no fallback queries.
+    expect(counts.effectiveForward).toBe(1);
+    expect(counts.effectiveReverse).toBe(0);
   });
 
   test("batches the materialised side even when some permissions need RT fallback", async () => {
@@ -1059,9 +1052,11 @@ describe("evaluateManyPermissions (getPermissions' minimum-work evaluator)", () 
     const perms = await zbar.getPermissions(ctx, alice, bobContact);
     expect([...perms].sort()).toEqual(["view"]);
 
-    // Contract: exactly one `checkPermissionFast` for the materialised
-    // union. Anything more would be a regression back to plan-per-permission.
-    expect(counts.checkPermissionFast).toBe(1);
+    // One materialised forward batch covers every permission (shared, not
+    // plan-per-permission); the RT fallback adds one source hop (reverse) +
+    // one inner check (forward) per derived relation (viewer, admin).
+    expect(counts.effectiveForward).toBe(3); // 1 materialised + 2 RT hop-2
+    expect(counts.effectiveReverse).toBe(2); // 2 RT hop-1
   });
 
   test("returns granted permissions in input order", async () => {
@@ -1113,7 +1108,8 @@ describe("evaluateManyPermissions (getPermissions' minimum-work evaluator)", () 
 
     const result = await evaluateManyPermissions(z, ctx, alice, doc, []);
     expect(result).toEqual([]);
-    expect(counts.checkPermissionFast).toBe(0);
+    expect(counts.effectiveForward).toBe(0);
+    expect(counts.effectiveReverse).toBe(0);
   });
 });
 
@@ -1314,9 +1310,8 @@ describe("Union.check hybrid (sequential direct, parallel RT on miss)", () => {
     expect(await plan.check(ctx, alice, device)).toBe(true);
 
     // Direct branch hits on the first query → RT Compose never fires.
-    expect(counts.checkPermissionFast).toBe(1);
-    expect(counts.listSubjectsWithAccessFast).toBe(0);
-    expect(counts.checkPermissionBatchObjects).toBe(0);
+    expect(counts.effectiveForward).toBe(1);
+    expect(counts.effectiveReverse).toBe(0);
   });
 
   test("direct miss + RT hit fires direct + every RT query (no cancellation)", async () => {
@@ -1338,9 +1333,8 @@ describe("Union.check hybrid (sequential direct, parallel RT on miss)", () => {
     expect(await plan.check(ctx, alice, device)).toBe(true);
 
     // Direct probe misses (1 query), then RT Compose fires its two hops.
-    expect(counts.checkPermissionFast).toBe(1);
-    expect(counts.listSubjectsWithAccessFast).toBe(1);
-    expect(counts.checkPermissionBatchObjects).toBe(1);
+    expect(counts.effectiveForward).toBe(2); // direct + RT hop-2
+    expect(counts.effectiveReverse).toBe(1); // RT hop-1
   });
 
   test("all miss fires direct + the RT source hop (no intermediates → Compose self-short-circuits)", async () => {
@@ -1359,11 +1353,10 @@ describe("Union.check hybrid (sequential direct, parallel RT on miss)", () => {
     const plan = planRelation(z, "device", ["viewer"]);
     expect(await plan.check(ctx, alice, device)).toBe(false);
 
-    // Direct probe misses (1), RT Compose fires its source hop (1) and
-    // bails on empty intermediates before firing the second hop.
-    expect(counts.checkPermissionFast).toBe(1);
-    expect(counts.listSubjectsWithAccessFast).toBe(1);
-    expect(counts.checkPermissionBatchObjects).toBe(0);
+    // Direct probe misses (1 forward), RT Compose fires its source hop
+    // (1 reverse) and bails on empty intermediates before the second hop.
+    expect(counts.effectiveForward).toBe(1);
+    expect(counts.effectiveReverse).toBe(1);
   });
 
   test("all miss with intermediates present fires every branch end-to-end", async () => {
@@ -1386,8 +1379,7 @@ describe("Union.check hybrid (sequential direct, parallel RT on miss)", () => {
 
     // Direct (1) + RT source hop finds the group (1) + RT subject-side
     // batch check against that group (1) = 3 queries total.
-    expect(counts.checkPermissionFast).toBe(1);
-    expect(counts.listSubjectsWithAccessFast).toBe(1);
-    expect(counts.checkPermissionBatchObjects).toBe(1);
+    expect(counts.effectiveForward).toBe(2); // direct + RT hop-2
+    expect(counts.effectiveReverse).toBe(1); // RT hop-1
   });
 });

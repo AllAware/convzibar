@@ -19,6 +19,18 @@ const cfg = (graphConfig: GraphConfig) => ({
   graphConfig,
 });
 
+// Inspect effective rows for (subject, relations, object) via the collapsed
+// forward query.
+const checkFast = (
+  runner: any,
+  a: { subject: any; relations: string[]; object: any },
+) =>
+  runner.query(api.queries.effectiveForward, {
+    subjects: [a.subject],
+    relations: a.relations,
+    objectPoints: [`${a.object.type}:${a.object.id}`],
+  });
+
 describe("ReBAC Core Engine (v3)", () => {
   test("direct relationships are correctly inserted into relationships and effectiveRelationships", async () => {
     const t = setup();
@@ -41,7 +53,7 @@ describe("ReBAC Core Engine (v3)", () => {
     });
 
     // 2. Query relationships to ensure it exists
-    const rels = await t.query(api.queries.checkPermissionFast, {
+    const rels = await checkFast(t, {
       subject: user,
       relations: [relation],
       object: org,
@@ -89,7 +101,7 @@ describe("ReBAC Core Engine (v3)", () => {
     });
 
     // 3. Query effective relationships on Project
-    const rels = await t.query(api.queries.checkPermissionFast, {
+    const rels = await checkFast(t, {
       subject: user,
       relations: ["editor"],
       object: project,
@@ -133,7 +145,7 @@ describe("ReBAC Core Engine (v3)", () => {
     });
 
     // Verify it exists
-    const relsBefore = await t.query(api.queries.checkPermissionFast, {
+    const relsBefore = await checkFast(t, {
       subject: user,
       relations: ["editor"],
       object: project,
@@ -149,7 +161,7 @@ describe("ReBAC Core Engine (v3)", () => {
     });
 
     // Verify it is gone
-    const relsAfter = await t.query(api.queries.checkPermissionFast, {
+    const relsAfter = await checkFast(t, {
       subject: user,
       relations: ["editor"],
       object: project,
@@ -233,7 +245,7 @@ describe("ReBAC Core Engine (v3)", () => {
     });
 
     // Check paths for doc1
-    let relsDoc1 = await t.query(api.queries.checkPermissionFast, {
+    let relsDoc1 = await checkFast(t, {
       subject: user,
       relations: ["viewer"],
       object: doc1,
@@ -242,7 +254,7 @@ describe("ReBAC Core Engine (v3)", () => {
     expect(relsDoc1[0].paths.length).toBe(3); // 3 paths (one per project)
 
     // Check paths for doc2
-    let relsDoc2 = await t.query(api.queries.checkPermissionFast, {
+    let relsDoc2 = await checkFast(t, {
       subject: user,
       relations: ["viewer"],
       object: doc2,
@@ -257,14 +269,14 @@ describe("ReBAC Core Engine (v3)", () => {
       ...cfg(graphConfig),
     });
 
-    relsDoc1 = await t.query(api.queries.checkPermissionFast, {
+    relsDoc1 = await checkFast(t, {
       subject: user,
       relations: ["viewer"],
       object: doc1,
     });
     expect(relsDoc1[0].paths.length).toBe(2);
 
-    relsDoc2 = await t.query(api.queries.checkPermissionFast, {
+    relsDoc2 = await checkFast(t, {
       subject: user,
       relations: ["viewer"],
       object: doc2,
@@ -279,7 +291,7 @@ describe("ReBAC Core Engine (v3)", () => {
       ...cfg(graphConfig),
     });
 
-    relsDoc1 = await t.query(api.queries.checkPermissionFast, {
+    relsDoc1 = await checkFast(t, {
       subject: user,
       relations: ["viewer"],
       object: doc1,
@@ -294,14 +306,14 @@ describe("ReBAC Core Engine (v3)", () => {
       ...cfg(graphConfig),
     });
 
-    relsDoc1 = await t.query(api.queries.checkPermissionFast, {
+    relsDoc1 = await checkFast(t, {
       subject: user,
       relations: ["viewer"],
       object: doc1,
     });
     expect(relsDoc1.length).toBe(0); // The effective relationship should be completely deleted
 
-    relsDoc2 = await t.query(api.queries.checkPermissionFast, {
+    relsDoc2 = await checkFast(t, {
       subject: user,
       relations: ["viewer"],
       object: doc2,
@@ -369,7 +381,7 @@ describe("ReBAC Core Engine (v3)", () => {
     });
 
     // 3. Verify user has admin on the document (3 hops away)
-    let relsDoc = await t.query(api.queries.checkPermissionFast, {
+    let relsDoc = await checkFast(t, {
       subject: user,
       relations: ["admin"],
       object: document,
@@ -378,7 +390,7 @@ describe("ReBAC Core Engine (v3)", () => {
     expect(relsDoc[0].paths[0].baseIds.length).toBeGreaterThan(3); // Should have accumulated several tokens
 
     // Verify user has admin on the folder (2 hops away)
-    let relsFolder = await t.query(api.queries.checkPermissionFast, {
+    let relsFolder = await checkFast(t, {
       subject: user,
       relations: ["admin"],
       object: folder,
@@ -386,7 +398,7 @@ describe("ReBAC Core Engine (v3)", () => {
     expect(relsFolder.length).toBe(1);
 
     // Verify user has admin on the project (1 hop away)
-    let relsProject = await t.query(api.queries.checkPermissionFast, {
+    let relsProject = await checkFast(t, {
       subject: user,
       relations: ["admin"],
       object: project,
@@ -402,7 +414,7 @@ describe("ReBAC Core Engine (v3)", () => {
     });
 
     // Document admin should be gone
-    relsDoc = await t.query(api.queries.checkPermissionFast, {
+    relsDoc = await checkFast(t, {
       subject: user,
       relations: ["admin"],
       object: document,
@@ -410,7 +422,7 @@ describe("ReBAC Core Engine (v3)", () => {
     expect(relsDoc.length).toBe(0);
 
     // Folder admin should be gone
-    relsFolder = await t.query(api.queries.checkPermissionFast, {
+    relsFolder = await checkFast(t, {
       subject: user,
       relations: ["admin"],
       object: folder,
@@ -418,7 +430,7 @@ describe("ReBAC Core Engine (v3)", () => {
     expect(relsFolder.length).toBe(0);
 
     // Project admin should STILL exist!
-    relsProject = await t.query(api.queries.checkPermissionFast, {
+    relsProject = await checkFast(t, {
       subject: user,
       relations: ["admin"],
       object: project,
@@ -433,7 +445,7 @@ describe("ReBAC Core Engine (v3)", () => {
       ...cfg(graphConfig),
     });
 
-    relsDoc = await t.query(api.queries.checkPermissionFast, {
+    relsDoc = await checkFast(t, {
       subject: user,
       relations: ["admin"],
       object: document,
@@ -449,14 +461,14 @@ describe("ReBAC Core Engine (v3)", () => {
     });
 
     // Entire chain of derived access should collapse
-    relsDoc = await t.query(api.queries.checkPermissionFast, {
+    relsDoc = await checkFast(t, {
       subject: user,
       relations: ["admin"],
       object: document,
     });
     expect(relsDoc.length).toBe(0);
 
-    relsProject = await t.query(api.queries.checkPermissionFast, {
+    relsProject = await checkFast(t, {
       subject: user,
       relations: ["admin"],
       object: project,
@@ -501,7 +513,7 @@ describe("ReBAC Core Engine (v3)", () => {
       ...cfg(graphConfig),
     });
 
-    const rels = await t.query(api.queries.checkPermissionFast, {
+    const rels = await checkFast(t, {
       subject: n1,
       relations: ["link"],
       object: n1,
@@ -559,7 +571,7 @@ describe("ReBAC Core Engine (v3)", () => {
     });
 
     // Because maxWriteDepth is 2, the derivation should stop before n1 reaches n4
-    const rels = await t.query(api.queries.checkPermissionFast, {
+    const rels = await checkFast(t, {
       subject: n1,
       relations: ["reachable"],
       object: n4,
@@ -609,7 +621,7 @@ describe("ReBAC Core Engine (v3)", () => {
       await new Promise((r) => setTimeout(r, 50));
     }
 
-    const rels = await t.query(api.queries.checkPermissionFast, {
+    const rels = await checkFast(t, {
       subject: user,
       relations: ["editor"],
       object: project,
@@ -632,7 +644,7 @@ describe("ReBAC Core Engine (v3)", () => {
       await new Promise((r) => setTimeout(r, 50));
     }
 
-    const relsAfter = await t.query(api.queries.checkPermissionFast, {
+    const relsAfter = await checkFast(t, {
       subject: user,
       relations: ["editor"],
       object: project,

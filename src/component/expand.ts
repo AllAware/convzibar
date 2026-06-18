@@ -133,9 +133,18 @@ export async function applyTraversalRulesToItem(
     }
   }
 
-  // Effective reverse edges: mirror a declared `{ reverse: … }` across the
-  // materialised side. `skipReverse` is set by producers that already handled
-  // the reverse side (e.g. initial-add pairs) to prevent loops.
+  // Effective reverse edges. A declared `{ reverse: … }` must also be mirrored
+  // on the materialised side, but how depends on whether this edge has a base
+  // row:
+  //   • Explicit edges (depth 1) are flagged `skipReverse: true` by the caller
+  //     because their reverse is a REAL base row that is queued separately — it
+  //     materialises the reverse effective edge itself AND expands its own
+  //     traversals. Synthesising it here too would double-materialise it.
+  //   • Derived edges (depth ≥ 2) have no base row, so we synthesise the
+  //     reverse effective edge here, flagging the synthesised item `skipReverse`
+  //     so reverse-of-reverse can't loop.
+  // (This is why the flag can't simply be dropped — the two cases genuinely
+  // differ; the base row is the source of truth for the explicit case.)
   if (graphConfig.reverseEdges && !current.skipReverse) {
     const reverseRel =
       graphConfig.reverseEdges?.[current.object.type]?.[current.relation]?.[

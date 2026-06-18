@@ -153,10 +153,10 @@ describe("Schema Compiler Deduplication (Integration)", () => {
     expect(await zbar.can(ctx, user, "view_project", project)).toBe(true);
 
     // Only the dominant 'admin' row was propagated
-    const allRels = await ctx.runQuery(api.queries.checkPermissionFast, {
-      subject: user,
-      object: project,
+    const allRels = await ctx.runQuery(api.queries.effectiveForward, {
+      subjects: [user],
       relations: ["admin", "manager", "viewer"],
+      objectPoints: [`${project.type}:${project.id}`],
     });
 
     expect(allRels).toHaveLength(1);

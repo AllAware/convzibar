@@ -66,11 +66,17 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
   const reverseEdges: Record<string, Record<string, Record<string, string>>> =
     {};
 
-  // First pass: collect all reverse edges declared via { type, reverse } syntax.
-  // A single relation may target multiple entity types, each with its own
-  // reverse name, so we key by (objectType, relation, subjectType). We also
-  // store the INVERSE mapping so the lookup works symmetrically from either
-  // direction of the relationship.
+  // First pass: collect all reverse edges declared via { type, reverse } syntax,
+  // keyed by (objectType, relation, subjectType). A single relation may target
+  // multiple entity types, each with its own reverse name.
+  //
+  // We store BOTH the forward entry and its INVERSE. The forward entry mirrors
+  // a written/declared edge to its reverse. The inverse entry is what mirrors a
+  // *derived* reverse-relation edge back to its forward relation at the
+  // effective level: e.g. when `system.contact_member` is materialised by a
+  // traversal, the BFS reverse-mirror uses the inverse to also materialise the
+  // declared `contact.owner` side. Dropping it breaks every primary-contact /
+  // reverse-derived effective edge (verified: 19 IoT tests).
   for (const [entityType, def] of Object.entries(schema.entities || {})) {
     const relations = (def as any).relations || {};
     for (const [relName, relDef] of Object.entries(relations)) {
@@ -84,7 +90,7 @@ export function parseSchemaToGraphConfig(schema: any): GraphConfig {
               reverseEdges[entityType][relName] || {};
             reverseEdges[entityType][relName][objItem.type] = objItem.reverse;
 
-            // Inverse entry for bidirectional lookup.
+            // Inverse entry: maps the reverse relation back to the forward one.
             reverseEdges[objItem.type] = reverseEdges[objItem.type] || {};
             reverseEdges[objItem.type][objItem.reverse] =
               reverseEdges[objItem.type][objItem.reverse] || {};

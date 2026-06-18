@@ -11,6 +11,18 @@ const setup = () => {
   return t;
 };
 
+// Inspect effective rows for (subject, relations, object) via the collapsed
+// forward query.
+const checkFast = (
+  runner: any,
+  a: { subject: any; relations: string[]; object: any },
+) =>
+  runner.query(api.queries.effectiveForward, {
+    subjects: [a.subject],
+    relations: a.relations,
+    objectPoints: [`${a.object.type}:${a.object.id}`],
+  });
+
 async function assertDbState(
   t: any,
   expectedRelationships: number,
@@ -71,7 +83,7 @@ describe("Mutation Operations", () => {
     await zbar.addRelation(ctx, user, "owner", org);
     await zbar.addRelation(ctx, org, "parent_org", project);
 
-    const relsBefore = await t.query(api.queries.checkPermissionFast, {
+    const relsBefore = await checkFast(t, {
       subject: user,
       relations: ["owner"],
       object: org,
@@ -83,7 +95,7 @@ describe("Mutation Operations", () => {
     expect(res.relationshipsRemoved).toBe(1);
     expect(res.effectiveRelationshipsRemoved).toBeGreaterThan(0);
 
-    const relsAfter = await t.query(api.queries.checkPermissionFast, {
+    const relsAfter = await checkFast(t, {
       subject: user,
       relations: ["owner"],
       object: org,
