@@ -22,7 +22,6 @@ import {
 // ============================================================================
 
 const modules = import.meta.glob("../../component/**/*.ts");
-const TENANT = "trv-tenant";
 
 const setup = () => {
   const t = convexTest(schema, modules);
@@ -383,7 +382,6 @@ describe("operator semantics", () => {
   test("EMPTY is a constant-false singleton", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = mkZbar();
     const alice = { type: "user" as const, id: "alice" };
     const sys = { type: "system" as const, id: "sys1" };
 
@@ -739,7 +737,6 @@ describe("operator enumeration (step 2)", () => {
   test("EMPTY.expandObjects / expandSubjects / checkBatchSubjects return empty sets", async () => {
     const t = setup();
     const ctx = mkCtx(t);
-    const zbar = mkZbar();
     const alice = { type: "user" as const, id: "alice" };
     const sys = { type: "system" as const, id: "sys1" };
 

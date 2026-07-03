@@ -1,6 +1,6 @@
 # Convzibar (Convex x Zanzibar)
 
-A high-performance, strictly typed ReBAC and ABAC authorization engine built
+A high-performance, strictly typed ReBAC authorization engine built
 specifically for Convex, heavily inspired by Google Zanzibar.
 
 Convzibar is a **hybrid engine**: you choose, per relation, whether cross-object
@@ -22,8 +22,8 @@ against the materialized cache plus any read-time branches.
   indexed queries). Local inheritance (e.g., `admin` implies `viewer`) is
   always computed in memory.
 - **Unified planning algebra:** Every read is compiled into a typed operator
-  tree — `Materialised`, `ValidatedMaterialised`, `EdgeExpand`, `Compose`,
-  `Union` — with cost-ordered execution, sequential narrowing for batch
+  tree — `Materialised`, `EdgeExpand`, `Compose`, `Union` — with
+  cost-ordered execution, sequential narrowing for batch
   checks, and fan-out collapsing through batched Convex round-trips. There's
   no hand-rolled "try cache, fall back to RT" ladder; both strategies are
   branches of the same plan.
@@ -34,10 +34,6 @@ against the materialized cache plus any read-time branches.
 - **Multi-permission batching:** `getPermissions()` resolves every permission
   on `(subject, object)` in **one** materialized query plus at most one
   shared read-time branch per unique `(derivedRelation, sourceType)`.
-- **Unified ABAC + ReBAC:** Attach dynamic conditions to both relationships
-  (write-time edges) and permissions (read-time requirements). Conditions
-  evaluate in order along the path, and a condition that returns an object
-  merges its data into the context for downstream conditions (middleware).
 - **Userset Expansion:** Use `#` syntax (e.g., `group#admin`) to allow
   non-user entities as subjects. When a group is made admin of a resource,
   all admins of that group inherit access — materialized at write-time by
@@ -100,32 +96,7 @@ as the single source of truth and powers the TypeScript inference.
 import { createZbarSchema, Zbar } from "convzibar";
 import { components } from "./_generated/api";
 
-export type MyContext = {
-  timezone?: string;
-  active?: boolean;
-  userRank?: "novice" | "expert";
-};
-
-export const zbarSchema = createZbarSchema<MyContext>()
-  // Define dynamic conditions (ABAC)
-  // 1. Conditions can return a boolean to allow/deny access
-  .condition("isBusinessHours", (ctx, { data }) => data.timezone === "EST")
-  .condition("isActive", (ctx, { data }) => data.active === true)
-
-  // 2. Conditions can also act as "middleware" by returning an object.
-  // This object is merged into the context (`data`) for all subsequent
-  // condition checks in the evaluation chain! You have full access to `ctx` (QueryCtx).
-  .condition("injectUserRank", async (ctx, { subject, data }) => {
-    // e.g. Query your database to fetch additional data
-    const user = await ctx.runQuery(components.api.users.get, {
-      id: subject.id,
-    });
-    return { userRank: user?.rank || "novice" };
-  })
-
-  // This condition relies on the `userRank` injected above
-  .condition("isExpert", (ctx, { data }) => data.userRank === "expert")
-
+export const zbarSchema = createZbarSchema()
   // Define your Entity Graph (ReBAC)
   .entity("user")
   .entity("org", (e) =>
@@ -162,18 +133,14 @@ export const zbarSchema = createZbarSchema<MyContext>()
       // This edge materializes at write-time — reads are a single indexed lookup.
       .relation("editor", "user", "parent_org.admin")
 
-      // Permissions can require conditions
-      .permission("edit", { relation: "editor", condition: "isBusinessHours" })
-
-      // A condition can rely on data injected by a previous condition in the evaluation chain!
-      .permission("delete", { relation: "editor", condition: "isExpert" }),
+      .permission("edit", "editor")
+      .permission("delete", "editor"),
   )
   .build();
 
 // Export the strictly typed client instance
 export const zbar = new Zbar(components.convzibar, {
   schema: zbarSchema,
-  tenantId: "default",    // Useful for multi-tenant isolation
   readTimeChainDepth: 3,  // Max depth for chained read-time paths (default: 3)
 });
 ```
@@ -227,30 +194,6 @@ export const createProject = mutation({
 });
 ```
 
-You can also attach conditions directly to the graph edges. Edges in a path are
-evaluated first, allowing them to act as middleware that injects context for
-later conditions!
-
-```typescript
-// This edge uses our middleware condition to dynamically fetch and inject the user's rank
-await zbar.addRelation(
-  ctx,
-  { type: "user", id: userId },
-  "editor",
-  { type: "project", id: projId },
-  { condition: "injectUserRank" },
-);
-
-// This edge is only valid if the explicit context provides { active: true }
-await zbar.addRelation(
-  ctx,
-  { type: "user", id: userId },
-  "viewer",
-  { type: "project", id: projId },
-  { condition: "isActive" },
-);
-```
-
 You can also seamlessly change and override relationships. Because this system
 performs zero-downtime Add-before-Remove background chaining, the user will
 never experience a temporary loss of access during the update:
@@ -293,7 +236,6 @@ export const getProjectData = query({
       { type: "user", id: userId },
       "edit",
       { type: "project", id: projId },
-      { timezone: "EST" }, // Inject runtime context for ABAC conditions
     );
 
     // Or safely check boolean
@@ -302,7 +244,6 @@ export const getProjectData = query({
       { type: "user", id: userId },
       "edit",
       { type: "project", id: projId },
-      { timezone: "EST" },
     );
 
     // Check a specific relation (skips permission → relation expansion)
@@ -311,7 +252,6 @@ export const getProjectData = query({
       { type: "user", id: userId },
       "editor",
       { type: "project", id: projId },
-      { timezone: "EST" },
     );
 
     // Get every permission the subject holds — resolved in ONE materialized
@@ -320,7 +260,6 @@ export const getProjectData = query({
       ctx,
       { type: "user", id: userId },
       { type: "project", id: projId },
-      { timezone: "EST" },
     );
     // perms: Array<"edit" | "delete">  (typed from the schema)
 
@@ -397,7 +336,7 @@ const projects = await zbar.list()
   .object("project")
   .permission("edit")
   .subject({ type: "user", id: userId })
-  .collect(ctx, { timezone: "EST" });
+  .collect(ctx);
 // Returns: [{ objectId: "proj_123" }, ...]
 ```
 
@@ -408,7 +347,7 @@ const users = await zbar.list()
   .object({ type: "project", id: projId })
   .permission("edit")
   .subject("user")
-  .collect(ctx, { timezone: "EST" });
+  .collect(ctx);
 // Returns: [{ subjectId: "user_456" }, ...]
 ```
 
@@ -601,93 +540,7 @@ const configuredSources = await zbar.listDirect()
   .collect(ctx);
 ```
 
-### 7. Multi-Tenancy
-
-A single `Zbar` instance is bound to one `tenantId`. To operate against a
-different tenant, derive a new instance with `.withTenant()`:
-
-```typescript
-const tenantZbar = zbar.withTenant("tenant_abc");
-await tenantZbar.can(ctx, user, "edit", project);
-```
-
-All queries and mutations are tenant-scoped via indexed prefixes on the
-`relationships` and `effectiveRelationships` tables — tenants are fully
-isolated with no cross-tenant leaks.
-
-### 8. React Hooks
-
-A specialized hook checks permissions on the client, caching them under
-Convex's `useQuery`. Expose a server-side permission query and wrap your app
-in the provider:
-
-```typescript
-// convex/queries.ts
-import { query } from "./_generated/server";
-import { zbar } from "./zbar";
-
-export const checkPermission = query({
-  args: {
-    permission: v.string(),
-    resource: v.object({ type: v.string(), id: v.string() }),
-    requestContext: v.any(),
-  },
-  handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return false;
-
-    return await zbar.can(
-      ctx,
-      { type: "user", id: identity.subject },
-      args.permission as any,
-      args.resource as any,
-      args.requestContext,
-    );
-  },
-});
-```
-
-Then generate type-safe hooks by passing `typeof zbarSchema` to
-`createReactZbar`:
-
-```tsx
-// lib/zbar.ts
-import { createReactZbar } from "convzibar/react";
-import type { zbarSchema } from "../convex/zbar";
-
-export const { ZbarProvider, useCan, usePermissions } =
-  createReactZbar<typeof zbarSchema>();
-```
-
-```tsx
-// app/providers.tsx
-import { ZbarProvider } from "../lib/zbar";
-import { api } from "../convex/_generated/api";
-
-export function Providers({ children }: { children: React.ReactNode }) {
-  return (
-    <ZbarProvider checkPermissionQuery={api.queries.checkPermission}>
-      {children}
-    </ZbarProvider>
-  );
-}
-
-// app/MyComponent.tsx
-import { useCan } from "../lib/zbar";
-
-export function MyComponent({ projectId }: { projectId: string }) {
-  const canEdit = useCan(
-    "edit",
-    { type: "project", id: projectId },
-    { timezone: "EST" },
-  );
-
-  if (!canEdit) return <div>Access Denied</div>;
-  return <button>Edit Project</button>;
-}
-```
-
-### 9. Cleaning Up
+### 7. Cleaning Up
 
 When an entity is deleted from your application, remove it from the
 authorization graph to prevent stale access and clean up the traversal cache.
@@ -709,15 +562,20 @@ export const deleteProject = mutation({
 
 - **`relationships` table:** Ground-truth base edges. Stores every
   explicitly-written edge plus auto-inserted reverse edges. Indexed by
-  `(tenantId, objectType, objectId)` and by
-  `(tenantId, subjectType, subjectId, relation, objectType, objectId)` for
-  point lookups and range scans in both directions.
+  `(objectType, objectId)` and by
+  `(subjectType, subjectId, relation, objectType, objectId)` for point
+  lookups and range scans in both directions.
 - **`effectiveRelationships` table:** Materialized cache of cross-object
   derivations produced by the write-time BFS. Each row stores one or more
   `paths`, where each path carries the `baseIds` (lineage tokens) of the
-  edges that produced it and any conditions gated along the way. Removing a
-  base edge surgically deletes only the paths containing that ID — an O(N)
-  cascade instead of a full recomputation.
+  edges that produced it. Removing a base edge surgically deletes only the
+  paths containing that ID — an O(N) cascade instead of a full
+  recomputation.
+- **`configs` table:** Compiled graph configuration, stored once and
+  referenced by a stable content hash — mutations ship only the hash
+  instead of re-serialising the rule set into every call and workpool
+  chunk. The first write from a client instance registers it automatically
+  (and re-registers if the row ever disappears).
 - **Local inheritance is never stored.** The fact that `admin` implies
   `viewer` is inferred at read time via `resolveRelationInheritance()` over
   the schema — a pure CPU operation, no extra DB writes.
@@ -733,8 +591,6 @@ the schema into a `Traversal` tree built from these operators:
 
 - **`Materialised`** — one indexed query over `effectiveRelationships`
   (cost 1). The structural-connectivity leaf.
-- **`ValidatedMaterialised`** — same as `Materialised`, plus per-target
-  condition validation. Used whenever a permission is in play.
 - **`EdgeExpand`** — the primitive enumeration of entities reachable via one
   typed relation. The source side of `Compose`.
 - **`Compose(sourceSide, subjectSide)`** — two-hop join through an

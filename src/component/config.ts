@@ -8,6 +8,15 @@
 
 import type { GraphConfig } from "./types";
 
+/**
+ * Stable marker embedded in the unregistered-config error. The client matches
+ * on it to fall back to resending the full config when its local
+ * "already registered" belief turns out to be stale (e.g. the registering
+ * transaction rolled back after the client flipped its flag, or component
+ * data was wiped/restored while a warm isolate still held the instance).
+ */
+export const CONFIG_UNREGISTERED_MARKER = "[convzibar:config-unregistered]";
+
 /** Insert a compiled config keyed by `hash` if not already present (idempotent). */
 async function ensureConfig(
   ctx: any,
@@ -43,7 +52,8 @@ export async function loadConfig(
     .unique();
   if (!row) {
     throw new Error(
-      `Zbar: graph config '${hash}' is not registered. The first mutation from a Zbar client registers it automatically — re-run after re-creating the client.`,
+      `Zbar: graph config '${hash}' is not registered. ${CONFIG_UNREGISTERED_MARKER} ` +
+        `The first mutation from a Zbar client registers it automatically.`,
     );
   }
   return row.config as GraphConfig;

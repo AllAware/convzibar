@@ -531,7 +531,7 @@ describe("ZbarUnsafe: Bulk Transform", () => {
     const result = await unsafe.transformRelationships(
       ctx,
       { relation: "viewer" },
-      (row) => ({ patch: { relation: "reader" } }),
+      () => ({ patch: { relation: "reader" } }),
     );
 
     expect(result.patched).toBe(2);

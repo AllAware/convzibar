@@ -1,3 +1,4 @@
+import { CONFIG_UNREGISTERED_MARKER } from "../../component/config";
 import { parseSchemaToGraphConfig } from "../../component/helpers";
 import type { GraphConfig } from "../../component/types";
 import type { ZbarInternal, ActionCtx, MutationCtx, QueryCtx } from "../internal";
@@ -58,6 +59,13 @@ function hashGraphConfig(config: GraphConfig): string {
   const s = stableStringify(config);
   // Two FNV-1a passes with different offset bases → 64-bit-ish identity.
   return "cfg_" + fnv1a(s, 0x811c9dc5) + fnv1a(s, 0x01000193);
+}
+
+/** Whether an error from a component mutation is the unregistered-config throw. */
+function isConfigUnregisteredError(error: unknown): boolean {
+  return (
+    error instanceof Error && error.message.includes(CONFIG_UNREGISTERED_MARKER)
+  );
 }
 
 /**
@@ -195,7 +203,7 @@ export class Zbar<Schema extends ZbarSchema> {
 
   /** Fluent query builder for listing objects or subjects. */
   list(): ListInitial<Schema> {
-    return new ListQueryBuilder<Schema>(this._internal) as any;
+    return new ListQueryBuilder(this._internal) as any;
   }
 
   /** Fluent query builder for listing **direct** (base) relationships. */
@@ -204,17 +212,44 @@ export class Zbar<Schema extends ZbarSchema> {
   }
 
   /**
-   * Shared config slice for every mutation payload. Sends the full compiled
-   * config only until the component has registered it (once per instance);
-   * thereafter only the hash travels.
+   * Run a component write mutation, shipping the full compiled config only
+   * until the component has registered it (once per instance); thereafter
+   * only the hash travels.
+   *
+   * `_configRegistered` is client-side memory of server-side state, so it can
+   * go stale: the registering transaction may roll back after the flag flips
+   * (parent mutation throws, OCC retry), or component data may be wiped or
+   * restored while a warm isolate still holds this instance. When the
+   * component reports the hash unknown, resend the full config once instead
+   * of failing every subsequent write from this instance.
    */
-  private _writeArgs() {
+  private async _runWrite(
+    ctx: MutationCtx | ActionCtx,
+    mutationRef: any,
+    payload: Record<string, unknown>,
+  ): Promise<any> {
     const z = this._internal;
-    return {
-      configHash: z.configHash,
-      graphConfig: this._configRegistered ? undefined : z.graphConfig,
-      asyncWrites: z.asyncWrites,
-    };
+    const attempt = (withConfig: boolean) =>
+      ctx.runMutation(mutationRef, {
+        ...payload,
+        configHash: z.configHash,
+        graphConfig: withConfig ? z.graphConfig : undefined,
+        asyncWrites: z.asyncWrites,
+      });
+
+    let result;
+    if (!this._configRegistered) {
+      result = await attempt(true);
+    } else {
+      try {
+        result = await attempt(false);
+      } catch (error) {
+        if (!isConfigUnregisteredError(error)) throw error;
+        result = await attempt(true);
+      }
+    }
+    this._configRegistered = true;
+    return result;
   }
 
   /**
@@ -242,15 +277,12 @@ export class Zbar<Schema extends ZbarSchema> {
       validateProperties(z, object.type, relation, options.properties);
     }
 
-    const result = await ctx.runMutation(this.component.mutations.addRelation, {
+    return this._runWrite(ctx, this.component.mutations.addRelation, {
       subject,
       relation,
       object,
       properties: options?.properties,
-      ...this._writeArgs(),
     });
-    this._configRegistered = true;
-    return result;
   }
 
   /**
@@ -281,16 +313,13 @@ export class Zbar<Schema extends ZbarSchema> {
       validateProperties(z, object.type, newRelation as string, options.properties);
     }
 
-    const result = await ctx.runMutation(this.component.mutations.updateRelation, {
+    return this._runWrite(ctx, this.component.mutations.updateRelation, {
       subject,
       oldRelation,
       newRelation,
       object,
       properties: options?.properties,
-      ...this._writeArgs(),
     });
-    this._configRegistered = true;
-    return result;
   }
 
   /**
@@ -322,16 +351,13 @@ export class Zbar<Schema extends ZbarSchema> {
       z.schema.entities[object.type]?.relations || {},
     );
 
-    const result = await ctx.runMutation(this.component.mutations.setRelation, {
+    return this._runWrite(ctx, this.component.mutations.setRelation, {
       subject,
       relation,
       object,
       objectRelations,
       properties: options?.properties,
-      ...this._writeArgs(),
     });
-    this._configRegistered = true;
-    return result;
   }
 
   /** Remove a relationship between a subject and an object. */
@@ -348,14 +374,11 @@ export class Zbar<Schema extends ZbarSchema> {
     const z = this._internal;
     validateRelationParameter(z, subject, relation, object);
 
-    const result = await ctx.runMutation(this.component.mutations.removeRelation, {
+    return this._runWrite(ctx, this.component.mutations.removeRelation, {
       subject,
       relation,
       object,
-      ...this._writeArgs(),
     });
-    this._configRegistered = true;
-    return result;
   }
 
   /** Delete an entity and all its associated relationships. */
@@ -366,11 +389,8 @@ export class Zbar<Schema extends ZbarSchema> {
     relationshipsRemoved: number;
     effectiveRelationshipsRemoved: number;
   }> {
-    const result = await ctx.runMutation(this.component.mutations.deleteEntity, {
+    return this._runWrite(ctx, this.component.mutations.deleteEntity, {
       entity,
-      ...this._writeArgs(),
     });
-    this._configRegistered = true;
-    return result;
   }
 }

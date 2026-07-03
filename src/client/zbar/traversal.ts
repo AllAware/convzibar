@@ -18,12 +18,10 @@ import {
 // operator algebra.
 //
 // Operators:
-//   • Materialised         — leaf over the effective graph, no conditions.
-//   • ValidatedMaterialised — leaf that additionally runs condition /
-//                              path validation (the permission-check shape).
-//   • EdgeExpand           — primitive source-side enumeration for Compose.
-//   • Union                — OR.
-//   • Compose              — two-hop join through an intermediate.
+//   • Materialised — leaf over the effective graph.
+//   • EdgeExpand   — primitive source-side enumeration for Compose.
+//   • Union        — OR.
+//   • Compose      — two-hop join through an intermediate.
 //
 // Contract:
 //   • `check(s, o)`               — single-pair existence.

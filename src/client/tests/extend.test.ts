@@ -21,11 +21,6 @@ const mkCtx = (t: any) =>
 // Schema using .extend() for forward references — NO `as any` needed
 // ============================================================================
 
-interface ZbarContext {
-  ip?: string;
-  role?: string;
-}
-
 const extendSchema = createZbarSchema()
   .entity("user")
   .entity("system", (e) =>

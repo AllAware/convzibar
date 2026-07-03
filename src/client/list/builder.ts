@@ -1,5 +1,4 @@
 import type { ActionCtx, QueryCtx } from "../internal";
-import type { ZbarSchema } from "../types";
 import {
   resolvePermissionRelations,
   resolveRelationInheritance,
@@ -18,9 +17,7 @@ type ListResult = { objectId: string } | { subjectId: string };
  * implements all builder interfaces; the TypeScript interfaces (in ./types.ts)
  * restrict which methods are visible at each step.
  */
-export class ListQueryBuilder<
-  Schema extends ZbarSchema,
-> extends BaseListBuilder<ListResult> {
+export class ListQueryBuilder extends BaseListBuilder<ListResult> {
   private _via: Array<{ type: string; id: string }> = [];
   private _mode!: "listObjects" | "listSubjects";
 
