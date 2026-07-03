@@ -33,6 +33,13 @@ If this is your first time, here are the recommended steps:
 After the initial publish, you can use the release scripts documented below,
 which will do steps 3-12 automatically (except the sanity check in step 9).
 
+> **CI tagging:** the `Tag release` workflow
+> (`.github/workflows/tag-release.yml`) creates the `v<version>` tag and the
+> GitHub release automatically whenever a push to `main` changes the version
+> in `package.json` — so steps 11-12 are optional when releasing via a merge.
+> It can also be run manually from the Actions tab (with an optional `ref`
+> input) to tag a commit retroactively.
+
 ## Package scripts for releasing
 
 In package.json, there are some scripts that are useful for doing releases.
