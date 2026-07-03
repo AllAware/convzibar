@@ -5,9 +5,13 @@ export interface Entity {
 }
 export interface Traversal {
     /**
-     * Rough leaf count — one unit per `effectiveRelationships` query the
-     * worst-case traversal would issue. Used by `Union.of` to order children
-     * so narrowing probes the cheapest paths first.
+     * Minimum number of `effectiveRelationships` queries on the *cheapest*
+     * path that can satisfy this traversal. A leaf is 1; a `Compose` is the
+     * sum of its hops (both must run); a `Union` is the min of its children
+     * (the cheapest branch can answer it). Used by `Union.of` to order
+     * children ascending so narrowing / short-circuit probes the cheapest
+     * branch first. (Consistently "cheapest path", not worst case — that's
+     * why `Union` takes the min and `Compose` the sum.)
      */
     readonly cost: number;
     check(ctx: QueryCtx | ActionCtx, subject: Entity, object: Entity): Promise<boolean>;
@@ -48,14 +52,14 @@ export declare class Materialised implements Traversal {
     expandSubjects(ctx: QueryCtx | ActionCtx, object: Entity, subjectType: string): Promise<Set<string>>;
     /**
      * Batched forward expansion: union of objects of `objectType` reachable
-     * from any of `subjects`. One round-trip instead of N. Falls through to
-     * the cheaper singleton query when only one subject is supplied.
+     * from any of `subjects`. One round-trip instead of N; falls through to the
+     * cheaper singleton query when only one subject is supplied.
      */
     expandObjectsFromMany(ctx: QueryCtx | ActionCtx, subjects: readonly Entity[], objectType: string): Promise<Set<string>>;
     /**
-     * Batched reverse expansion: union of subjects of `subjectType` reaching
-     * any of `objects`. One round-trip instead of N. Falls through to the
-     * cheaper singleton query when only one object is supplied.
+     * Batched reverse expansion: union of subjects of `subjectType` reaching any
+     * of `objects`. One round-trip instead of N; falls through to the cheaper
+     * singleton query when only one object is supplied.
      */
     expandSubjectsFromMany(ctx: QueryCtx | ActionCtx, objects: readonly Entity[], subjectType: string): Promise<Set<string>>;
 }
@@ -165,112 +169,37 @@ export declare class Union implements Traversal {
 }
 export declare const EMPTY: Traversal;
 /**
- * The permission-check shape of the materialised leaf: runs the same
- * `effectiveRelationships` query as `Materialised`, then feeds every
- * matching row through `validatePath` (condition chain + target condition).
+ * Compile a Traversal tree for `(relation, objectType)`. `targets` is the
+ * inheritance-/userset-expanded set of acceptable relation names. The tree is
  *
- * Takes `targets` (`Array<{relation, condition?}>`) rather than a bare
- * relation list because the condition name lives on the target entry, not
- * on the row. `permission` is the identifier exposed to condition functions
- * so they can branch on "what was asked" if they need to; `requestContext`
- * is the caller-supplied data bag threaded through the condition chain.
+ *     Union([ Materialised(targets), ...Compose(edge, plan(...)) ])
  *
- * This is the operator that makes the top-level `can` / `hasRelationship`
- * / `list` / `getPermissions` plan genuinely unified — the materialised
- * branch no longer has to live as hand-rolled code outside the algebra.
+ * — a direct materialised lookup unioned with one Compose per applicable
+ * read-time path. Collapses to the direct branch when no RT paths apply, and
+ * to `EMPTY` when `targets` is empty. Each leaf is one effectiveRelationships
+ * query: a direct lookup is one, a single RT dot is two, an N-level RT chain
+ * is N+1.
  */
-export declare class ValidatedMaterialised<Data = unknown> implements Traversal {
-    private readonly z;
-    readonly targets: ReadonlyArray<{
-        relation: string;
-        condition?: string;
-    }>;
-    private readonly permission;
-    private readonly requestContext;
-    readonly cost = 1;
-    readonly relations: string[];
-    constructor(z: ZbarInternal, targets: ReadonlyArray<{
-        relation: string;
-        condition?: string;
-    }>, permission: string, requestContext: Data | undefined);
-    check(ctx: QueryCtx | ActionCtx, subject: Entity, object: Entity): Promise<boolean>;
-    checkBatch(ctx: QueryCtx | ActionCtx, subject: Entity, objectType: string, candidateIds: readonly string[]): Promise<Set<string>>;
-    checkBatchSubjects(ctx: QueryCtx | ActionCtx, object: Entity, subjectType: string, candidateIds: readonly string[]): Promise<Set<string>>;
-    expandObjects(ctx: QueryCtx | ActionCtx, subject: Entity, objectType: string): Promise<Set<string>>;
-    expandSubjects(ctx: QueryCtx | ActionCtx, object: Entity, subjectType: string): Promise<Set<string>>;
-    expandObjectsFromMany(ctx: QueryCtx | ActionCtx, subjects: readonly Entity[], objectType: string): Promise<Set<string>>;
-    expandSubjectsFromMany(ctx: QueryCtx | ActionCtx, objects: readonly Entity[], subjectType: string): Promise<Set<string>>;
-    /**
-     * Forward validation: row objects decode from `objectKey` with the fixed
-     * `objectType`, row subjects supplied by `subjectForRow` (either a constant
-     * or a per-row decoder for the batched-fan-out case).
-     */
-    private _validateForward;
-    /** Mirror of `_validateForward` for the reverse direction. */
-    private _validateReverse;
-    private _validateRows;
-}
-/**
- * Compile a Traversal tree for `(relation, objectType)` by walking the
- * schema from the object side.
- *
- * `targets` carries the inheritance- / userset-expanded relations (with
- * optional conditions) that the caller considers acceptable; conditions
- * only apply when `permission` is provided. Every schema-declared path
- * becomes a branch of the returned tree:
- *
- *     Union([
- *       direct,                     // one leaf — the inherited relations
- *       Compose(edge, plan(...)),   // one branch per read-time dot-path
- *       Compose(edge, plan(...)),   // ...
- *     ])
- *
- *   - `direct` is `ValidatedMaterialised` when `permission` is given (the
- *     condition-aware shape used by `can` / `hasRelationship` / `list` /
- *     `getPermissions`), or plain `Materialised` otherwise (the structural
- *     connectivity shape used by `.via()` gate/chain hops).
- *   - Each Compose is the 2-hop expansion of one read-time path; its
- *     subject side recursively plans the target relation on the source
- *     entity type, so chained RT paths unfold as nested Composes.
- *
- * The tree collapses to the single direct branch when the schema declares
- * no applicable RT paths. It collapses to `EMPTY` when `targets` is empty.
- *
- * ## Runtime cost
- *
- *     leaves visited by check(s, o)  =  number of schema edges on the
- *                                       chosen path from s to o
- *
- * Every leaf is one `effectiveRelationships` point/range query. A direct
- * lookup is one query; a single RT dot is two; a two-level RT chain is
- * three.
- */
-export declare function planRelation<Data = unknown>(z: ZbarInternal, objectType: string, targets: ReadonlyArray<{
-    relation: string;
-    condition?: string;
-}>, permission?: string, requestContext?: Data, depth?: number): Traversal;
+export declare function planRelation(z: ZbarInternal, objectType: string, targets: readonly string[], depth?: number): Traversal;
 /**
  * Evaluate multiple permissions on a shared `(subject, object)` in the
  * minimum number of queries. Returns the granted permissions in input
  * order.
  */
-export declare function evaluateManyPermissions<Data = unknown>(z: ZbarInternal, ctx: QueryCtx | ActionCtx, subject: Entity, object: Entity, perms: ReadonlyArray<{
+export declare function evaluateManyPermissions(z: ZbarInternal, ctx: QueryCtx | ActionCtx, subject: Entity, object: Entity, perms: ReadonlyArray<{
     permission: string;
-    targets: ReadonlyArray<{
-        relation: string;
-        condition?: string;
-    }>;
-}>, requestContext?: Data): Promise<string[]>;
+    targets: readonly string[];
+}>): Promise<string[]>;
 /**
  * Forward via: `subject → via[0] → … → via[last] → objects` where objects
  * are enumerated and narrowed to the subjects the permission plan actually
  * grants. Returns the final object-ID set.
  */
-export declare function collectViaObjects<Data = unknown>(z: ZbarInternal, ctx: QueryCtx | ActionCtx, plan: Traversal, subject: Entity, via: readonly Entity[], objectType: string, acceptableRelations: readonly string[], schemaHasConditions: boolean, _requestContext?: Data): Promise<Set<string>>;
+export declare function collectViaObjects(z: ZbarInternal, ctx: QueryCtx | ActionCtx, plan: Traversal, subject: Entity, via: readonly Entity[], objectType: string, acceptableRelations: readonly string[]): Promise<Set<string>>;
 /**
  * Reverse via: `subjects → via[0] → … → via[last] → object`. Returns the
  * subject-ID set narrowed to what the permission plan grants on the pinned
  * `object`.
  */
-export declare function collectViaSubjects<Data = unknown>(z: ZbarInternal, ctx: QueryCtx | ActionCtx, plan: Traversal, object: Entity, via: readonly Entity[], subjectType: string, acceptableRelations: readonly string[], schemaHasConditions: boolean, _requestContext?: Data): Promise<Set<string>>;
+export declare function collectViaSubjects(z: ZbarInternal, ctx: QueryCtx | ActionCtx, plan: Traversal, object: Entity, via: readonly Entity[], subjectType: string, acceptableRelations: readonly string[]): Promise<Set<string>>;
 //# sourceMappingURL=traversal.d.ts.map

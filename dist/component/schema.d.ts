@@ -1,14 +1,14 @@
 declare const _default: import("convex/server").SchemaDefinition<{
     relationships: import("convex/server").TableDefinition<import("convex/values").VObject<{
         properties?: any;
-        condition?: string | undefined;
         tenantId?: string | undefined;
+        condition?: string | undefined;
         conditionContext?: any;
         relation: string;
-        objectType: string;
-        subjectType: string;
         objectId: string;
         subjectId: string;
+        subjectType: string;
+        objectType: string;
     }, {
         tenantId: import("convex/values").VString<string | undefined, "optional">;
         subjectType: import("convex/values").VString<string, "required">;
@@ -19,9 +19,9 @@ declare const _default: import("convex/server").SchemaDefinition<{
         condition: import("convex/values").VString<string | undefined, "optional">;
         conditionContext: import("convex/values").VAny<any, "optional", string>;
         properties: import("convex/values").VAny<any, "optional", string>;
-    }, "required", "properties" | "relation" | "condition" | "tenantId" | "objectType" | "subjectType" | "objectId" | "subjectId" | "conditionContext" | `properties.${string}` | `conditionContext.${string}`>, {
-        by_tenant_object: ["tenantId", "objectType", "objectId", "_creationTime"];
-        by_tenant_subject_relation_object: ["tenantId", "subjectType", "subjectId", "relation", "objectType", "objectId", "_creationTime"];
+    }, "required", "properties" | "relation" | "objectId" | "subjectId" | "subjectType" | "objectType" | "tenantId" | "condition" | "conditionContext" | `properties.${string}` | `conditionContext.${string}`>, {
+        by_object: ["objectType", "objectId", "_creationTime"];
+        by_subject_relation_object: ["subjectType", "subjectId", "relation", "objectType", "objectId", "_creationTime"];
     }, {}, {}>;
     effectiveRelationships: import("convex/server").TableDefinition<import("convex/values").VObject<{
         tenantId?: string | undefined;
@@ -64,16 +64,16 @@ declare const _default: import("convex/server").SchemaDefinition<{
                 condition: import("convex/values").VString<string, "required">;
                 conditionContext: import("convex/values").VAny<any, "optional", string>;
             }, "required", "condition" | "conditionContext" | `conditionContext.${string}`>, "optional">;
-        }, "required", "conditions" | "baseIds">, "required">;
-    }, "required", "relation" | "tenantId" | "objectKey" | "subjectKey" | "paths">, {
-        by_tenant_subject_relation_object: ["tenantId", "subjectKey", "relation", "objectKey", "_creationTime"];
-        by_tenant_object_relation_subject: ["tenantId", "objectKey", "relation", "subjectKey", "_creationTime"];
+        }, "required", "baseIds" | "conditions">, "required">;
+    }, "required", "relation" | "objectKey" | "subjectKey" | "tenantId" | "paths">, {
+        by_subject_relation_object: ["subjectKey", "relation", "objectKey", "_creationTime"];
+        by_object_relation_subject: ["objectKey", "relation", "subjectKey", "_creationTime"];
     }, {}, {}>;
     auditLog: import("convex/server").TableDefinition<import("convex/values").VObject<{
         tenantId?: string | undefined;
         actorId?: string | undefined;
         timestamp: number;
-        action: "relation_added" | "relation_removed" | "permission_check";
+        action: "permission_check" | "relation_added" | "relation_removed";
         userId: string;
         details: {
             object?: string | undefined;
@@ -86,7 +86,7 @@ declare const _default: import("convex/server").SchemaDefinition<{
     }, {
         tenantId: import("convex/values").VString<string | undefined, "optional">;
         timestamp: import("convex/values").VFloat64<number, "required">;
-        action: import("convex/values").VUnion<"relation_added" | "relation_removed" | "permission_check", [import("convex/values").VLiteral<"permission_check", "required">, import("convex/values").VLiteral<"relation_added", "required">, import("convex/values").VLiteral<"relation_removed", "required">], "required", never>;
+        action: import("convex/values").VUnion<"permission_check" | "relation_added" | "relation_removed", [import("convex/values").VLiteral<"permission_check", "required">, import("convex/values").VLiteral<"relation_added", "required">, import("convex/values").VLiteral<"relation_removed", "required">], "required", never>;
         userId: import("convex/values").VString<string, "required">;
         actorId: import("convex/values").VString<string | undefined, "optional">;
         details: import("convex/values").VObject<{
@@ -104,7 +104,16 @@ declare const _default: import("convex/server").SchemaDefinition<{
             object: import("convex/values").VString<string | undefined, "optional">;
             reason: import("convex/values").VString<string | undefined, "optional">;
         }, "required", "object" | "relation" | "subject" | "permission" | "result" | "reason">;
-    }, "required", "tenantId" | "actorId" | "timestamp" | "action" | "userId" | "details" | "details.object" | "details.relation" | "details.subject" | "details.permission" | "details.result" | "details.reason">, {}, {}, {}>;
+    }, "required", "tenantId" | "timestamp" | "action" | "userId" | "actorId" | "details" | "details.object" | "details.relation" | "details.subject" | "details.permission" | "details.result" | "details.reason">, {}, {}, {}>;
+    configs: import("convex/server").TableDefinition<import("convex/values").VObject<{
+        hash: string;
+        config: any;
+    }, {
+        hash: import("convex/values").VString<string, "required">;
+        config: import("convex/values").VAny<any, "required", string>;
+    }, "required", "hash" | "config" | `config.${string}`>, {
+        by_hash: ["hash", "_creationTime"];
+    }, {}, {}>;
 }, true>;
 export default _default;
 //# sourceMappingURL=schema.d.ts.map

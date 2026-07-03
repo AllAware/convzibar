@@ -61,9 +61,9 @@ describe("Edge Properties — Type Inference", () => {
     // because we pass a dummy component. We're testing that the
     // TypeScript compiler accepts the right property shapes.
 
-    // @ts-expect-error — "owner" has no properties, so `properties` should not be allowed
     void ((z: typeof _zbar) =>
       z.addRelation({} as any, { type: "user", id: "u1" }, "owner", { type: "org", id: "o1" }, {
+        // @ts-expect-error — "owner" has no properties, so `properties` should not be allowed
         properties: { anything: true },
       }));
 
@@ -79,15 +79,15 @@ describe("Edge Properties — Type Inference", () => {
         properties: { title: "CTO", level: 1, note: "founder" },
       }));
 
-    // @ts-expect-error — missing required field "level"
     void ((z: typeof _zbar) =>
       z.addRelation({} as any, { type: "user", id: "u1" }, "admin", { type: "org", id: "o1" }, {
+        // @ts-expect-error — missing required field "level"
         properties: { title: "CTO" },
       }));
 
-    // @ts-expect-error — wrong type for "level"
     void ((z: typeof _zbar) =>
       z.addRelation({} as any, { type: "user", id: "u1" }, "admin", { type: "org", id: "o1" }, {
+        // @ts-expect-error — wrong type for "level"
         properties: { title: "CTO", level: "high" },
       }));
   });

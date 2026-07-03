@@ -288,36 +288,36 @@ describe("Scenario: extend overwrites reverse-edge placeholder", () => {
     // device.user_member should include user (via viewer local inheritance)
     const deviceUserMembers = await zbar
       .list()
-      .subject("user")
-      .relation("user_member")
       .object(device)
+      .relation("user_member")
+      .subject("user")
       .collect(ctx);
     expect(deviceUserMembers.map((r) => r.subjectId)).toContain("u1");
 
     // system.device_member should include device (reverse edge from device.owner)
     const sysDeviceMembers = await zbar
       .list()
-      .subject("device")
-      .relation("device_member")
       .object(sys)
+      .relation("device_member")
+      .subject("device")
       .collect(ctx);
     expect(sysDeviceMembers.map((r) => r.subjectId)).toContain("d1");
 
     // system.user_member should include user via device_member.user_member
     const sysUserMembers = await zbar
       .list()
-      .subject("user")
-      .relation("user_member")
       .object(sys)
+      .relation("user_member")
+      .subject("user")
       .collect(ctx);
     expect(sysUserMembers.map((r) => r.subjectId)).toContain("u1");
 
     // system.contact_member should include contact via user_member.primary_contact
     const sysContactMembers = await zbar
       .list()
-      .subject("contact")
-      .relation("contact_member")
       .object(sys)
+      .relation("contact_member")
+      .subject("contact")
       .collect(ctx);
     expect(sysContactMembers.map((r) => r.subjectId)).toContain("c1");
   });
@@ -347,18 +347,18 @@ describe("Scenario: extend overwrites reverse-edge placeholder", () => {
     // system.user_member should include user (via group path)
     const sysUserMembers = await zbar
       .list()
-      .subject("user")
-      .relation("user_member")
       .object(sys)
+      .relation("user_member")
+      .subject("user")
       .collect(ctx);
     expect(sysUserMembers.map((r) => r.subjectId)).toContain("u1");
 
     // system.contact_member should include contact
     const sysContactMembers = await zbar
       .list()
-      .subject("contact")
-      .relation("contact_member")
       .object(sys)
+      .relation("contact_member")
+      .subject("contact")
       .collect(ctx);
     expect(sysContactMembers.map((r) => r.subjectId)).toContain("c1");
   });

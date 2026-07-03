@@ -177,7 +177,8 @@ const mkCtx = (t: any) =>
 const mkZbar = () =>
   new Zbar(api, { schema: aaSchema, asyncWrites: false, maxWriteDepth: 10 });
 
-const ref = (type: string, id: string) => ({ type, id }) as any;
+type EntityName = keyof (typeof aaSchema)["entities"] & string;
+const ref = <T extends EntityName>(type: T, id: string) => ({ type, id });
 
 // Fixture mirroring aa-app provisioning (convex/service.ts + containment.ts):
 //   system s1
@@ -187,7 +188,7 @@ const ref = (type: string, id: string) => ({ type, id }) as any;
 //   ├── device d1 (admin-tier containment in g1)
 //   ├── device d2 (viewer-tier containment in g1)
 //   └── rule nr1  (source: s1, recipient: su_member with channel properties)
-async function provision(zbar: any, ctx: any) {
+async function provision(zbar: ReturnType<typeof mkZbar>, ctx: any) {
   const s1 = ref("system", "s1");
   const g1 = ref("group", "g1");
   const d1 = ref("device", "d1");
@@ -205,7 +206,7 @@ async function provision(zbar: any, ctx: any) {
     [suOwner, uOwner],
     [suGa, uGa],
     [suMember, uMember],
-  ]) {
+  ] as const) {
     await zbar.addRelation(ctx, s1, "parent", su);
     await zbar.addRelation(ctx, u, "identity", su);
   }

@@ -1050,17 +1050,16 @@ describe("Stress: multi-system IoT deployment", () => {
     const DEVICES_PER_GROUP = 4;
     const RULES_PER_SYSTEM = 3;
 
-    type Entity = { type: string; id: string };
-    const systems: Entity[] = [];
-    const groups: Entity[] = [];
-    const devices: Entity[] = [];
-    const rules: Entity[] = [];
+    const systems: Array<{ type: "system"; id: string }> = [];
+    const groups: Array<{ type: "group"; id: string }> = [];
+    const devices: Array<{ type: "device"; id: string }> = [];
+    const rules: Array<{ type: "notification_rule"; id: string }> = [];
 
     // Users: every system gets its own admin + viewer; one user ("spy")
     // belongs to no system and should be denied across the board.
     const spy = { type: "user" as const, id: "spy" };
-    const viewersBySystem: Record<string, Entity> = {};
-    const adminsBySystem: Record<string, Entity> = {};
+    const viewersBySystem: Record<string, { type: "user"; id: string }> = {};
+    const adminsBySystem: Record<string, { type: "user"; id: string }> = {};
 
     // Build the world.
     for (let s = 0; s < SYSTEMS; s++) {

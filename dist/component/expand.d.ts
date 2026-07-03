@@ -1,15 +1,14 @@
 /**
  * Shared rule-application core for the BFS that materialises
- * `effectiveRelationships`. Both the add-path BFS (`processAddChunk` in
- * `mutations.ts`) and the rebuild BFS (`expandTraversalRules` in
- * `unsafe.ts`) call this helper to apply every traversal rule + reverse
- * edge to a single "current" queue item.
+ * `effectiveRelationships`.
  *
- * The caller still owns the outer loop, the effective-relationship
- * upsert, and the `seen`/dedup strategy (which differs between add and
- * rebuild). This function only produces the new queue pushes.
+ * `collectRuleDerivations` is the single place that knows how a traversal rule
+ * matches a "current" edge and which effective rows it joins against. Both the
+ * add-path BFS (`applyTraversalRulesToItem`) and the remove-path cascade
+ * (`processRemoveChunkInternal` in `mutations.ts`) call it, so the two
+ * directions can never drift in how they walk the rule set.
  */
-import type { GraphConfig } from "./types";
+import type { GraphConfig, TraversalRule } from "./types";
 export interface QueueItem {
     subject: {
         type: string;
@@ -22,26 +21,47 @@ export interface QueueItem {
     };
     path: {
         baseIds: string[];
-        conditions?: Array<{
-            condition: string;
-            conditionContext?: unknown;
-        }>;
     };
     depth: number;
     skipReverse?: boolean;
 }
+/** One effective-row match produced by a traversal rule against a current edge. */
+export interface RuleDerivation {
+    rule: TraversalRule;
+    /** The matched `effectiveRelationships` row (carries `paths`). */
+    match: any;
+    derivedSubject: {
+        type: string;
+        id: string;
+    };
+    derivedObject: {
+        type: string;
+        id: string;
+    };
+}
 /**
- * For a single `current` item, scan every traversal rule + reverse-edge
- * declaration and push the derived items onto `queue`. The depth / cycle
- * / reverse-edge invariants mirror what the original inline loops enforced.
- *
- * `combineConditionsLeading` controls the order conditions are stitched
- * together when a rule matches as the *source* side — which determines
- * whether `matchPath.conditions` come before or after `current.path.conditions`.
- * The add-path and rebuild-path always agree, so this isn't configurable.
+ * For a single `current` edge, find every traversal rule it triggers and the
+ * effective rows each rule joins against, yielding the derived
+ * `(subject, derivedRelation, object)` endpoints. Order-independent of what the
+ * caller does with the result (combine paths on add, propagate token deletion
+ * on remove).
+ */
+export declare function collectRuleDerivations(ctx: any, current: {
+    subject: {
+        type: string;
+        id: string;
+    };
+    relation: string;
+    object: {
+        type: string;
+        id: string;
+    };
+}, graphConfig: GraphConfig): Promise<RuleDerivation[]>;
+/**
+ * Add-path: for a single `current` queue item, apply every traversal rule +
+ * reverse-edge declaration and push the derived items onto `queue`.
  */
 export declare function applyTraversalRulesToItem(ctx: any, args: {
-    tenantId: string | undefined;
     current: QueueItem;
     queue: QueueItem[];
     graphConfig: GraphConfig;

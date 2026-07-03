@@ -2,38 +2,36 @@
  * Shared helpers for walking `SchemaRelation` definitions.
  *
  * The schema stores relation targets as a heterogeneous union (bare strings,
- * typed objects, userset strings, dot-paths, {relation, condition} pairs,
- * or arrays of the above). Multiple modules need to discriminate and walk
- * those shapes — keeping the string-parsing rules in one place makes sure
- * they stay consistent.
+ * typed objects, userset strings, dot-paths, or arrays of the above). Multiple
+ * modules need to discriminate and walk those shapes — keeping the
+ * string-parsing rules in one place makes sure they stay consistent.
  */
 /**
  * Classify a string reference found inside a relation def. The kind is
  * determined by syntax (dot-path, userset) first, then by lookup
  * (`localRelations` then `entities`), falling back to `unknown`.
  */
-export function classifyStringRef(raw, ctx, condition) {
+export function classifyStringRef(raw, ctx) {
     if (raw.includes(".")) {
         const [source, target] = raw.split(".");
-        return { kind: "dotPath", source, target, condition };
+        return { kind: "dotPath", source, target };
     }
     if (raw.includes("#")) {
         const [entityType, targetRelation] = raw.split("#");
-        return { kind: "userset", entityType, targetRelation, condition };
+        return { kind: "userset", entityType, targetRelation };
     }
     if (ctx.localRelations && raw in ctx.localRelations) {
-        return { kind: "localRef", relation: raw, condition };
+        return { kind: "localRef", relation: raw };
     }
     if (raw in ctx.entities) {
-        return { kind: "entity", entityType: raw, condition };
+        return { kind: "entity", entityType: raw };
     }
-    return { kind: "unknown", raw, condition };
+    return { kind: "unknown", raw };
 }
 /**
  * Iterate the targets of a relation def, yielding one tagged shape per
- * entry. Handles the array-or-single wrapping and the string / typed /
- * {relation, condition} dispatch — callers match on `kind` instead of
- * re-parsing strings.
+ * entry. Handles the array-or-single wrapping and the string / typed
+ * dispatch — callers match on `kind` instead of re-parsing strings.
  */
 export function* iterateRelationTargets(relDef, ctx) {
     if (relDef === undefined || relDef === null)
@@ -46,38 +44,28 @@ export function* iterateRelationTargets(relDef, ctx) {
         }
         if (typeof d !== "object" || d === null)
             continue;
-        if ("type" in d &&
-            typeof d.type === "string") {
+        if ("type" in d && typeof d.type === "string") {
             const reverse = "reverse" in d && typeof d.reverse === "string"
-                ? (d.reverse)
+                ? d.reverse
                 : undefined;
             yield {
                 kind: "typed",
                 entityType: d.type,
                 reverse,
             };
-            continue;
-        }
-        if ("relation" in d &&
-            typeof d.relation === "string") {
-            const condition = "condition" in d && typeof d.condition === "string"
-                ? (d.condition)
-                : undefined;
-            yield classifyStringRef(d.relation, ctx, condition);
         }
     }
 }
 /**
- * Walk a relation's local userset rewrites to produce every `(relation,
- * condition)` pair it transitively contains, given a seed of either bare
- * relation names or `{relation, condition}` pairs (the shape stored on
- * `EntityDefinition.permissions`).
+ * Expand a seed set of relation names into every relation name they
+ * transitively contain via local userset rewrites on `objectType`.
  */
 export function expandRelationTargets(schema, objectType, seed, options = {}) {
     const strict = options.strictLocalRefs ?? false;
     const localRelations = schema.entities[objectType]?.relations ?? {};
     const results = [];
-    const recurseString = (ref, cond) => {
+    const seen = new Set();
+    const recurseString = (ref) => {
         if (ref.includes("."))
             return;
         if (strict) {
@@ -86,36 +74,24 @@ export function expandRelationTargets(schema, objectType, seed, options = {}) {
             if (localRelations[ref] === undefined)
                 return;
         }
-        expand(ref, cond);
+        expand(ref);
     };
-    const expand = (rel, currentCondition) => {
-        if (results.some((r) => r.relation === rel && r.condition === currentCondition)) {
+    const expand = (rel) => {
+        if (seen.has(rel))
             return;
-        }
-        results.push({ relation: rel, condition: currentCondition });
+        seen.add(rel);
+        results.push(rel);
         const relDef = localRelations[rel];
         if (!relDef)
             return;
         const defs = Array.isArray(relDef) ? relDef : [relDef];
         for (const d of defs) {
-            if (typeof d === "string") {
-                recurseString(d, currentCondition);
-            }
-            else if (typeof d === "object" && d !== null && "relation" in d) {
-                const relRef = d.relation;
-                if (typeof relRef === "string") {
-                    const cond = d.condition ?? currentCondition;
-                    recurseString(relRef, cond);
-                }
-            }
+            if (typeof d === "string")
+                recurseString(d);
         }
     };
-    for (const s of seed) {
-        if (typeof s === "string")
-            expand(s, undefined);
-        else
-            expand(s.relation, s.condition);
-    }
+    for (const s of seed)
+        expand(s);
     return results;
 }
 //# sourceMappingURL=relation-def.js.map

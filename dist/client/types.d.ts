@@ -1,41 +1,18 @@
-import type { GenericActionCtx, GenericDataModel, GenericQueryCtx } from "convex/server";
 import type { ObjectType as ConvexObjectType, PropertyValidators } from "convex/values";
-export interface PolicyContext<Data = any> {
-    subject: {
-        type: string;
-        id: string;
-    };
-    resource?: {
-        type: string;
-        id: string;
-    };
-    action?: string;
-    data: Data;
-}
-export type ConditionFunction<Data = any> = (ctx: GenericQueryCtx<GenericDataModel> | GenericActionCtx<GenericDataModel>, policyCtx: PolicyContext<Data>) => boolean | Partial<Data> | Promise<boolean | Partial<Data>>;
 export type SchemaRelation = string | {
     type: string;
 } | {
     type: string;
     reverse: string;
-} | {
-    relation: string;
-    condition: string;
 } | Array<string | {
     type: string;
 } | {
     type: string;
     reverse: string;
-} | {
-    relation: string;
-    condition: string;
 }>;
 export interface EntityDefinition {
     relations?: Record<string, SchemaRelation>;
-    permissions?: Record<string, Array<string | {
-        relation: string;
-        condition: string;
-    }>>;
+    permissions?: Record<string, Array<string>>;
     propertyValidators?: Record<string, PropertyValidators>;
     /**
      * Dot-path relations evaluated at read time instead of materialised at
@@ -46,23 +23,18 @@ export interface EntityDefinition {
         dotPath: string;
     }>;
 }
-export interface ZbarSchema<Data = any> {
-    conditions?: Record<string, ConditionFunction<Data>>;
+export interface ZbarSchema {
     entities: Record<string, EntityDefinition>;
 }
-export type BuiltZbarSchema<Data, Conditions extends Record<string, any>, Entities extends Record<string, {
+export type BuiltZbarSchema<Entities extends Record<string, {
     relations: Record<string, string>;
     permissions: string;
     properties: Record<string, PropertyValidators>;
 }>> = {
-    conditions: Record<keyof Conditions & string, ConditionFunction<Data>>;
     entities: {
         [E in keyof Entities]: {
             relations: Record<keyof Entities[E]["relations"] & string, SchemaRelation>;
-            permissions: Record<Entities[E]["permissions"] & string, Array<string | {
-                relation: string;
-                condition: string;
-            }>>;
+            permissions: Record<Entities[E]["permissions"] & string, Array<string>>;
             propertyValidators: Entities[E]["properties"];
         };
     };
@@ -77,9 +49,6 @@ export type EntityPermissions<Schema extends ZbarSchema, ObjectType extends keyo
 export type EntityRelations<Schema extends ZbarSchema, ObjectType extends keyof Schema["entities"]> = Schema["entities"][ObjectType] extends {
     relations: infer R;
 } ? keyof R & string : never;
-export type SchemaConditions<Schema extends ZbarSchema<any>> = Schema extends {
-    conditions: infer C;
-} ? keyof C & string : never;
 /**
  * Extract the property validators for a specific relation on an entity type.
  * Returns `never` if the relation has no properties defined.

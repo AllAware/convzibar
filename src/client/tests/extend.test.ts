@@ -239,13 +239,16 @@ describe("SchemaBuilder.extend()", () => {
       .entity("system", (e) =>
         e
           .relation("owner", "user")
+          .relation("has_group")      // placeholder
           .relation("device_member")  // placeholder
       )
       .entity("group", (e) =>
         e.relation("device_member", "user")
       )
       .extend("system", (e) =>
-        e.relation("device_member", "has_group.device_member")
+        e
+          .relation("has_group", "group")
+          .relation("device_member", "has_group.device_member")
       )
       .build();
 
