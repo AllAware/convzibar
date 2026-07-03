@@ -11,6 +11,18 @@ const setup = () => {
   return t;
 };
 
+// Inspect effective rows for (subject, relations, object) via the collapsed
+// forward query.
+const checkFast = (
+  runner: any,
+  a: { subject: any; relations: string[]; object: any },
+) =>
+  runner.query(api.queries.effectiveForward, {
+    subjects: [a.subject],
+    relations: a.relations,
+    objectPoints: [`${a.object.type}:${a.object.id}`],
+  });
+
 async function assertDbState(
   t: any,
   expectedRelationships: number,
@@ -28,7 +40,7 @@ async function assertDbState(
   expect(effectiveRelationships.length).toBe(expectedEffectiveRelationships);
 }
 
-const zbarSchema = createZbarSchema<any>()
+const zbarSchema = createZbarSchema()
   .entity("user")
   .entity("org", (e) =>
     e
@@ -55,7 +67,6 @@ const mkCtx = (t: any) =>
 const mkZbar = () =>
   new Zbar(api, {
     schema: zbarSchema,
-    tenantId: "t1",
     asyncWrites: false,
   });
 
@@ -72,8 +83,7 @@ describe("Mutation Operations", () => {
     await zbar.addRelation(ctx, user, "owner", org);
     await zbar.addRelation(ctx, org, "parent_org", project);
 
-    const relsBefore = await t.query(api.queries.checkPermissionFast, {
-      tenantId: "t1",
+    const relsBefore = await checkFast(t, {
       subject: user,
       relations: ["owner"],
       object: org,
@@ -85,8 +95,7 @@ describe("Mutation Operations", () => {
     expect(res.relationshipsRemoved).toBe(1);
     expect(res.effectiveRelationshipsRemoved).toBeGreaterThan(0);
 
-    const relsAfter = await t.query(api.queries.checkPermissionFast, {
-      tenantId: "t1",
+    const relsAfter = await checkFast(t, {
       subject: user,
       relations: ["owner"],
       object: org,
@@ -167,52 +176,5 @@ describe("Mutation Operations", () => {
     expect(all.map((r) => r.relation)).toEqual(["owner"]);
 
     await assertDbState(t, 1, 1);
-  });
-
-  test("auditLog is disabled when enableAuditLog is false", async () => {
-    const t = setup();
-    const ctx = mkCtx(t);
-
-    const testSchema = createZbarSchema<any>()
-      .entity("user")
-      .entity("org", (e) => e.relation("owner", "user"))
-      .build();
-
-    const zbar = new Zbar(api, {
-      schema: testSchema,
-      tenantId: "t1",
-      enableAuditLog: false,
-      asyncWrites: false,
-    });
-
-    const user = { type: "user", id: "u1" } as const;
-    const org = { type: "org", id: "o1" } as const;
-
-    await zbar.addRelation(ctx, user, "owner", org);
-
-    const logs = await t.run(async (innerCtx) => {
-      return await innerCtx.db.query("auditLog").collect();
-    });
-    expect(logs.length).toBe(0);
-
-    const zbarEnabled = new Zbar(api, {
-      schema: testSchema,
-      tenantId: "t1",
-      enableAuditLog: true,
-      asyncWrites: false,
-    });
-
-    await zbarEnabled.addRelation(
-      ctx,
-      { type: "user", id: "u2" },
-      "owner",
-      org,
-    );
-    const logsAfter = await t.run(async (innerCtx) => {
-      return await innerCtx.db.query("auditLog").collect();
-    });
-    expect(logsAfter.length).toBeGreaterThan(0);
-
-    await assertDbState(t, 2, 2);
   });
 });

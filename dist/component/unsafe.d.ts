@@ -1,14 +1,11 @@
 export declare const scanRelationships: import("convex/server").RegisteredQuery<"public", any, Promise<{
     rows: {
         _id: any;
-        tenantId: any;
         subjectType: any;
         subjectId: any;
         relation: any;
         objectType: any;
         objectId: any;
-        condition: any;
-        conditionContext: any;
         properties: any;
     }[];
     cursor: any;
@@ -26,8 +23,7 @@ export declare const clearEffectiveRelationshipsChunked: import("convex/server")
 }>>;
 /**
  * Rebuild effective relationships by replaying all base relationships through
- * the graph expansion engine. This is an internal mutation that processes in
- * chunks and self-schedules for continuation.
+ * the graph expansion engine. Processes in chunks and self-schedules.
  */
 export declare const rebuildEffectiveChunk: import("convex/server").RegisteredMutation<"public", any, Promise<{
     done: boolean;

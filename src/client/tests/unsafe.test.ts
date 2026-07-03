@@ -16,7 +16,7 @@ const setup = () => {
   return t;
 };
 
-const zbarSchema = createZbarSchema<any>()
+const zbarSchema = createZbarSchema()
   .entity("user")
   .entity("org", (e) =>
     e
@@ -34,15 +34,13 @@ const zbarSchema = createZbarSchema<any>()
   )
   .build();
 
-function createClients(tenantId = "t1") {
+function createClients() {
   const zbar = new Zbar(api, {
     schema: zbarSchema,
-    tenantId,
     asyncWrites: false,
   });
   const unsafe = new ZbarUnsafe(api, {
     schema: zbarSchema,
-    tenantId,
     asyncWrites: false,
   });
   return { zbar, unsafe };
@@ -533,7 +531,7 @@ describe("ZbarUnsafe: Bulk Transform", () => {
     const result = await unsafe.transformRelationships(
       ctx,
       { relation: "viewer" },
-      (row) => ({ patch: { relation: "reader" } }),
+      () => ({ patch: { relation: "reader" } }),
     );
 
     expect(result.patched).toBe(2);
@@ -782,7 +780,7 @@ describe("ZbarUnsafe: Convenience Helpers", () => {
     await unsafe.renameRelation(ctx, "org", "owner", "superadmin");
 
     // Now create a new schema that uses "superadmin" instead of "owner"
-    const newSchema = createZbarSchema<any>()
+    const newSchema = createZbarSchema()
       .entity("user")
       .entity("org", (e) =>
         e
@@ -796,7 +794,6 @@ describe("ZbarUnsafe: Convenience Helpers", () => {
 
     const newUnsafe = new ZbarUnsafe(api, {
       schema: newSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -806,7 +803,6 @@ describe("ZbarUnsafe: Convenience Helpers", () => {
     // Create a new standard client with the new schema
     const newZbar = new Zbar(api, {
       schema: newSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -855,7 +851,7 @@ describe("ZbarUnsafe: End-to-End Migration Scenarios", () => {
     await unsafe.renameRelation(ctx, "project", "parent_org", "parent_workspace");
 
     // Step 2: Define new schema
-    const newSchema = createZbarSchema<any>()
+    const newSchema = createZbarSchema()
       .entity("user")
       .entity("workspace", (e) =>
         e
@@ -875,7 +871,6 @@ describe("ZbarUnsafe: End-to-End Migration Scenarios", () => {
 
     const newUnsafe = new ZbarUnsafe(api, {
       schema: newSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -885,7 +880,6 @@ describe("ZbarUnsafe: End-to-End Migration Scenarios", () => {
     // Step 4: Verify with new client
     const newZbar = new Zbar(api, {
       schema: newSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -1027,7 +1021,7 @@ describe("ZbarUnsafe: End-to-End Migration Scenarios", () => {
 // ============================================================================
 
 describe("ZbarUnsafe: Rebuild preserves effective reverse edges", () => {
-  const revSchema = createZbarSchema<any>()
+  const revSchema = createZbarSchema()
     .entity("user")
     .entity("system", (e) =>
       e
@@ -1049,12 +1043,10 @@ describe("ZbarUnsafe: Rebuild preserves effective reverse edges", () => {
     const ctx = makeCtx(t);
     const zbar = new Zbar(api, {
       schema: revSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
     const unsafe = new ZbarUnsafe(api, {
       schema: revSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 

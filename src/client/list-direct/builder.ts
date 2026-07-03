@@ -21,12 +21,10 @@ export class ListDirectQueryBuilder extends BaseListBuilder<DirectRelationship> 
 
     if (this._permission && objectType) {
       // Permission → expand to all relations that satisfy it (including inherited).
-      const targets = resolvePermissionRelations(z, objectType, this._permission);
-      filterRelations = targets.map((t) => t.relation);
+      filterRelations = resolvePermissionRelations(z, objectType, this._permission);
     } else if (this._relation && objectType) {
       // Relation → expand with inheritance.
-      const targets = resolveRelationInheritance(z, objectType, this._relation);
-      filterRelations = targets.map((t) => t.relation);
+      filterRelations = resolveRelationInheritance(z, objectType, this._relation);
     }
 
     // 2. Build the query args.
@@ -45,7 +43,6 @@ export class ListDirectQueryBuilder extends BaseListBuilder<DirectRelationship> 
     const rows: any[] = await ctx.runQuery(
       z.component.queries.listDirectRelationships,
       {
-        tenantId: z.tenantId,
         subject: subjectArg,
         object: objectArg,
         relations: filterRelations,

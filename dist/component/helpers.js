@@ -1,4 +1,4 @@
-import { expandRelationTargets } from "../shared/relation-def";
+import { expandRelationTargets, iterateRelationTargets, } from "../shared/relation-def";
 function expandRelation(schema, objectType, relation) {
     return expandRelationTargets(schema, objectType, [relation], {
         strictLocalRefs: true,
@@ -8,12 +8,23 @@ function getTargetEntityTypes(schema, objectType, relation) {
     const expanded = expandRelation(schema, objectType, relation);
     const types = new Set();
     for (const exp of expanded) {
-        const relDef = schema.entities[objectType]?.relations?.[exp.relation];
+        const relDef = schema.entities[objectType]?.relations?.[exp];
         if (relDef) {
             const defs = Array.isArray(relDef) ? relDef : [relDef];
             for (const d of defs) {
-                if (typeof d === "string" && schema.entities[d]) {
-                    types.add(d);
+                if (typeof d === "string") {
+                    if (d.includes("#")) {
+                        // Userset target `type#rel` — the reachable entity is `type`.
+                        // Without this, a dot-path readTimeRelation whose source relation
+                        // targets its intermediate only through a userset compiles with an
+                        // empty `sourceTypes`, silently denying at read time.
+                        const usersetType = d.split("#")[0];
+                        if (schema.entities[usersetType])
+                            types.add(usersetType);
+                    }
+                    else if (schema.entities[d]) {
+                        types.add(d);
+                    }
                 }
                 else if (typeof d === "object" && d !== null && "type" in d) {
                     if (typeof d.type === "string" &&
@@ -28,26 +39,27 @@ function getTargetEntityTypes(schema, objectType, relation) {
 }
 export function parseSchemaToGraphConfig(schema) {
     // Deep-clone entities so that Pass 2 reverse-edge resolution does not
-    // mutate the caller's schema object.
-    schema = { ...schema, entities: JSON.parse(JSON.stringify(schema.entities || {})) };
+    // mutate the caller's schema object. Use structuredClone rather than a
+    // JSON round-trip: JSON.stringify silently DROPS keys whose value is
+    // `undefined`, which is exactly how placeholder relations are stored
+    // (`.relation('admin')` with no target). Dropping them detaches any
+    // local-inheritance reference to a placeholder (e.g. `viewer: 'admin'`
+    // where `admin` is RT-derived), turning it into an "unknown" target.
+    schema = { ...schema, entities: structuredClone(schema.entities || {}) };
     const rules = [];
     // reverseEdges: objectType -> relation -> subjectType -> reverseRelation
     const reverseEdges = {};
-    // First pass: collect all reverse edges declared via { type, reverse } syntax.
-    // A single relation may target multiple entity types, each with its own
-    // reverse name, so we key by (objectType, relation, subjectType).
+    // First pass: collect all reverse edges declared via { type, reverse } syntax,
+    // keyed by (objectType, relation, subjectType). A single relation may target
+    // multiple entity types, each with its own reverse name.
     //
-    // We also store the INVERSE mapping so the lookup works symmetrically from
-    // either direction of the relationship. Given a declaration
-    //   entityType.relName = { type: targetType, reverse: reverseRel }
-    // the forward entry is reverseEdges[entityType][relName][targetType] = reverseRel
-    // and the inverse entry is reverseEdges[targetType][reverseRel][entityType] = relName.
-    // The initial-add lookup (reverseEdges[object.type][relation][subject.type])
-    // matches forward when adding the declared direction and matches the
-    // inverse when adding the reverse direction — giving bidirectional base
-    // edge auto-insertion. The BFS-effective-reverse-edge lookup uses the same
-    // key pattern, so derived relationships in either direction trigger the
-    // corresponding reverse.
+    // We store BOTH the forward entry and its INVERSE. The forward entry mirrors
+    // a written/declared edge to its reverse. The inverse entry is what mirrors a
+    // *derived* reverse-relation edge back to its forward relation at the
+    // effective level: e.g. when `system.contact_member` is materialised by a
+    // traversal, the BFS reverse-mirror uses the inverse to also materialise the
+    // declared `contact.owner` side. Dropping it breaks every primary-contact /
+    // reverse-derived effective edge (verified: 19 IoT tests).
     for (const [entityType, def] of Object.entries(schema.entities || {})) {
         const relations = def.relations || {};
         for (const [relName, relDef] of Object.entries(relations)) {
@@ -60,7 +72,7 @@ export function parseSchemaToGraphConfig(schema) {
                         reverseEdges[entityType][relName] =
                             reverseEdges[entityType][relName] || {};
                         reverseEdges[entityType][relName][objItem.type] = objItem.reverse;
-                        // Inverse entry for bidirectional lookup.
+                        // Inverse entry: maps the reverse relation back to the forward one.
                         reverseEdges[objItem.type] = reverseEdges[objItem.type] || {};
                         reverseEdges[objItem.type][objItem.reverse] =
                             reverseEdges[objItem.type][objItem.reverse] || {};
@@ -70,16 +82,13 @@ export function parseSchemaToGraphConfig(schema) {
             }
         }
     }
-    // Resolve reverse-edge target types into the receiving relation.
-    // When entity A declares { type: 'B', reverse: 'foo' }, B.foo must
-    // include A as an entity-type target so that getTargetEntityTypes can
-    // discover what types are reachable through B.foo.
-    //
-    // If B.foo is still an undefined placeholder, simply set it to A.
-    // If B.foo was already populated (e.g. by .extend()), merge A into
-    // the existing targets so the type information is not lost.
+    // Resolve reverse-edge target types into the receiving relation. When entity
+    // A declares { type: 'B', reverse: 'foo' }, B.foo must include A as an
+    // entity-type target so getTargetEntityTypes can discover what is reachable
+    // through B.foo. If B.foo is still an undefined placeholder, set it to A;
+    // if already populated (e.g. by .extend()), merge A in.
     for (const [entityType, relMap] of Object.entries(reverseEdges)) {
-        for (const [relName, subjectMap] of Object.entries(relMap)) {
+        for (const [relName] of Object.entries(relMap)) {
             const targetEntity = schema.entities[entityType];
             const relDef = targetEntity?.relations?.[relName];
             if (!relDef)
@@ -99,7 +108,6 @@ export function parseSchemaToGraphConfig(schema) {
                         receiverRels[actualReverseName] = entityType;
                     }
                     else {
-                        // Merge: ensure entityType is present as a target
                         const currentArr = Array.isArray(current) ? current : [current];
                         if (!currentArr.includes(entityType)) {
                             currentArr.push(entityType);
@@ -111,91 +119,67 @@ export function parseSchemaToGraphConfig(schema) {
             }
         }
     }
-    // Generate distant traversal rules with fully expanded local aliases
-    // Note: we NO LONGER emit rules for local inheritance to avoid materialization!
+    // Reject bare-string relation targets that resolve to neither a declared
+    // relation on the owning entity nor a known entity type. classifyStringRef
+    // tags these as `kind: "unknown"`, after which every downstream consumer
+    // silently ignores them — turning a one-character typo into a silent
+    // authorization gap. Surfacing it at schema load converts a
+    // deny-when-should-grant bug into a load-time error. Runs AFTER reverse-edge
+    // resolution so back-filled placeholder relations are seen as entity-typed.
+    for (const [entityType, def] of Object.entries(schema.entities || {})) {
+        const relations = (def.relations || {});
+        const classifyCtx = {
+            localRelations: relations,
+            entities: schema.entities,
+        };
+        for (const [relName, relDef] of Object.entries(relations)) {
+            for (const target of iterateRelationTargets(relDef, classifyCtx)) {
+                if (target.kind === "unknown") {
+                    const knownRelations = Object.keys(relations).filter((r) => r !== relName);
+                    const knownEntities = Object.keys(schema.entities || {});
+                    throw new Error(`Zbar Schema Error: relation '${relName}' on '${entityType}' references '${target.raw}', ` +
+                        `which is neither a relation declared on '${entityType}' nor a known entity type. ` +
+                        `Use a declared relation [${knownRelations.join(", ")}], an entity type [${knownEntities.join(", ")}], ` +
+                        `a dot-path ('source.target'), or a userset ('type#relation').`);
+                }
+            }
+        }
+    }
+    // Generate distant traversal rules with fully expanded local aliases.
+    // Note: we do NOT emit rules for local inheritance — that is computed in
+    // memory at read time to avoid write-time materialisation.
     for (const [entityType, def] of Object.entries(schema.entities || {})) {
         const relations = def.relations || {};
         for (const [derivedRelName, relDef] of Object.entries(relations)) {
             const defs = Array.isArray(relDef) ? relDef : [relDef];
             for (const item of defs) {
-                let traversalRel = undefined;
-                let usersetRef = undefined;
-                let refCondition = undefined;
-                if (typeof item === "string") {
-                    if (item.includes("#")) {
-                        usersetRef = item;
-                    }
-                    else if (item.includes(".")) {
-                        traversalRel = item;
-                    }
-                }
-                else if (typeof item === "object" &&
-                    item !== null &&
-                    "relation" in item) {
-                    const rel = item.relation;
-                    if (typeof rel === "string") {
-                        if (rel.includes("#")) {
-                            usersetRef = rel;
-                            refCondition = item.condition;
-                        }
-                        else if (rel.includes(".")) {
-                            traversalRel = rel;
-                            refCondition = item.condition;
-                        }
-                    }
-                }
-                if (usersetRef) {
+                if (typeof item !== "string")
+                    continue;
+                if (item.includes("#")) {
                     // Userset expansion: e.g. 'group#viewer' on device's viewer relation
                     // means "when a group is added as viewer of a device, expand through
-                    // that group's viewer relation to find transitive subjects."
-                    //
-                    // We use expandRelation to follow the local inheritance chain on the
-                    // userset entity. E.g., if viewer includes admin on the group entity,
-                    // expandRelation('viewer') = ['viewer', 'admin'], so we also check
-                    // admin records — because admins are implicitly viewers.
-                    const [usersetType, targetRelBase] = usersetRef.split("#");
-                    const expandedTargets = expandRelation(schema, usersetType, targetRelBase);
-                    for (const target of expandedTargets) {
-                        const combinedConditions = [];
-                        if (refCondition)
-                            combinedConditions.push(refCondition);
-                        if (target.condition)
-                            combinedConditions.push(target.condition);
-                        const uniqueConditions = Array.from(new Set(combinedConditions));
+                    // that group's viewer relation to find transitive subjects." We
+                    // follow the local inheritance chain on the userset entity.
+                    const [usersetType, targetRelBase] = item.split("#");
+                    for (const target of expandRelation(schema, usersetType, targetRelBase)) {
                         rules.push({
                             sourceObjectType: entityType,
                             sourceRelation: derivedRelName,
-                            targetRelation: target.relation,
+                            targetRelation: target,
                             derivedRelation: derivedRelName,
-                            conditions: uniqueConditions.length > 0 ? uniqueConditions : undefined,
                         });
                     }
                 }
-                if (traversalRel) {
-                    const [sourceRelBase, targetRelBase] = traversalRel.split(".");
-                    // Relation-based distant traversal
-                    const expandedSources = expandRelation(schema, entityType, sourceRelBase);
-                    for (const source of expandedSources) {
-                        const targetEntityTypes = getTargetEntityTypes(schema, entityType, source.relation);
-                        for (const targetType of targetEntityTypes) {
-                            const expandedTargets = expandRelation(schema, targetType, targetRelBase);
-                            for (const target of expandedTargets) {
-                                const combinedConditions = [];
-                                if (refCondition)
-                                    combinedConditions.push(refCondition);
-                                if (source.condition)
-                                    combinedConditions.push(source.condition);
-                                if (target.condition)
-                                    combinedConditions.push(target.condition);
-                                const uniqueConditions = Array.from(new Set(combinedConditions));
+                else if (item.includes(".")) {
+                    const [sourceRelBase, targetRelBase] = item.split(".");
+                    for (const source of expandRelation(schema, entityType, sourceRelBase)) {
+                        for (const targetType of getTargetEntityTypes(schema, entityType, source)) {
+                            for (const target of expandRelation(schema, targetType, targetRelBase)) {
                                 rules.push({
                                     sourceObjectType: entityType,
-                                    sourceRelation: source.relation,
-                                    targetRelation: target.relation,
+                                    sourceRelation: source,
+                                    targetRelation: target,
                                     derivedRelation: derivedRelName,
-                                    conditions: uniqueConditions.length > 0
-                                        ? uniqueConditions
-                                        : undefined,
                                 });
                             }
                         }
@@ -204,62 +188,40 @@ export function parseSchemaToGraphConfig(schema) {
             }
         }
     }
-    // Third pass: Optimize traversal rules by pruning redundant local derivations
+    // Optimise traversal rules by pruning redundant local derivations. A rule is
+    // dominated when another rule on the same trigger edge derives a relation
+    // that the dominated rule's derived relation already contains via read-time
+    // local inheritance (so a query for it still finds the survivor).
     const triggerGroups = new Map();
-    // Group rules by their trigger edge
     for (const rule of rules) {
         const triggerKey = `${rule.sourceObjectType}:${rule.sourceRelation}:${rule.targetRelation}`;
-        if (!triggerGroups.has(triggerKey)) {
+        if (!triggerGroups.has(triggerKey))
             triggerGroups.set(triggerKey, []);
-        }
         triggerGroups.get(triggerKey).push(rule);
     }
-    const optimizedRules = rules.filter((ruleB, _) => {
+    const optimizedRules = rules.filter((ruleB) => {
         const triggerKey = `${ruleB.sourceObjectType}:${ruleB.sourceRelation}:${ruleB.targetRelation}`;
         const group = triggerGroups.get(triggerKey);
         const i = group.indexOf(ruleB);
-        let isDominated = false;
         for (let j = 0; j < group.length; j++) {
             if (i === j)
                 continue;
             const ruleA = group[j];
-            let conditionCompatible = false;
-            if (!ruleA.conditions || ruleA.conditions.length === 0) {
-                conditionCompatible = true;
-            }
-            else if (ruleB.conditions) {
-                conditionCompatible = ruleA.conditions.every((c) => ruleB.conditions.includes(c));
-            }
-            if (conditionCompatible) {
-                const expandedB = expandRelation(schema, triggerKey.split(":")[0], ruleB.derivedRelation);
-                if (expandedB.some((exp) => exp.relation === ruleA.derivedRelation)) {
-                    if (ruleA.derivedRelation === ruleB.derivedRelation) {
-                        if (i > j) {
-                            isDominated = true;
-                            break;
-                        }
-                    }
-                    else {
-                        isDominated = true;
-                        break;
-                    }
+            const expandedB = expandRelation(schema, triggerKey.split(":")[0], ruleB.derivedRelation);
+            if (expandedB.includes(ruleA.derivedRelation)) {
+                if (ruleA.derivedRelation === ruleB.derivedRelation) {
+                    if (i > j)
+                        return false; // dominated
+                }
+                else {
+                    return false; // dominated
                 }
             }
         }
-        return !isDominated;
+        return true;
     });
     // Collect read-time relation declarations. These deliberately produce NO
-    // traversal rules — the BFS ignores them at write time. `can()` and
-    // `list()` evaluate them on demand.
-    //
-    // Two path shapes land here:
-    //   • dot-path `source.target` → sourceRelation=source, sourceTypes
-    //     resolved from the (placeholder-filled) schema, targetRelation=target.
-    //   • userset  `type#target`   → sourceRelation=derivedRelation (the
-    //     relation subjects of `type` are written into), sourceTypes=[type],
-    //     targetRelation=target. Validated against the derivedRelation's
-    //     declared typed targets so a broken declaration fails at schema load
-    //     instead of silently returning empty at read time.
+    // traversal rules — the BFS ignores them at write time.
     const readTimePaths = [];
     for (const [entityType, def] of Object.entries(schema.entities || {})) {
         const rtRels = def.readTimeRelations;
@@ -270,9 +232,8 @@ export function parseSchemaToGraphConfig(schema) {
                 const [sourceType, targetRelation] = rt.dotPath.split("#");
                 if (!sourceType || !targetRelation)
                     continue;
-                // Validation: the derived relation must declare `sourceType` as a
-                // typed target — otherwise there's no way to write a subject of
-                // that type to the relation, and the RT declaration is dead weight.
+                // The derived relation must declare `sourceType` as a typed target —
+                // otherwise there's no way to write a subject of that type to it.
                 const derivedTargetTypes = getTargetEntityTypes(schema, entityType, rt.derivedRelation);
                 if (!derivedTargetTypes.includes(sourceType)) {
                     throw new Error(`Zbar Schema Error: readTimeRelation('${rt.derivedRelation}', '${rt.dotPath}') on '${entityType}' requires '${rt.derivedRelation}' to declare '${sourceType}' as a typed target. Add it to the .relation('${rt.derivedRelation}', ...) declaration.`);
@@ -287,8 +248,9 @@ export function parseSchemaToGraphConfig(schema) {
             }
             else {
                 const parts = rt.dotPath.split(".");
-                if (parts.length !== 2)
-                    continue;
+                if (parts.length !== 2) {
+                    throw new Error(`Zbar Schema Error: readTimeRelation('${rt.derivedRelation}', '${rt.dotPath}') on '${entityType}' must be a single dot-path of the form 'source.target' (exactly one '.'). Got ${parts.length} segment(s).`);
+                }
                 const [sourceRelation, targetRelation] = parts;
                 const sourceTypes = getTargetEntityTypes(schema, entityType, sourceRelation);
                 readTimePaths.push({
@@ -301,14 +263,11 @@ export function parseSchemaToGraphConfig(schema) {
             }
         }
     }
-    // Reject schemas whose read-time declarations form a cycle. A cyclic RT
-    // path at runtime would either loop forever or — with the
-    // `readTimeChainDepth` cap — silently return false when the cap is hit,
-    // which is a denies-when-should-grant correctness bug. Rejecting at
-    // schema load makes the problem surface at enableComponent time, long
-    // before any request would see the wrong answer.
+    // Reject schemas whose read-time declarations form a cycle. A cyclic RT path
+    // at runtime would silently return false when the depth cap is hit — a
+    // denies-when-should-grant bug. Rejecting at schema load surfaces it early.
     if (readTimePaths.length > 0) {
-        detectReadTimePathCycle(readTimePaths);
+        detectReadTimePathCycle(readTimePaths, schema);
     }
     return {
         traversalRules: optimizedRules,
@@ -318,18 +277,22 @@ export function parseSchemaToGraphConfig(schema) {
 }
 /**
  * 3-color DFS over the read-time-path graph. Nodes are `(entityType,
- * relation)` pairs; edges run from a derived relation to the target
- * relation on each of its declared source types. Throws on the first
- * cycle encountered, with the full loop in the error message.
+ * relation)` pairs; edges run from a derived relation to every relation the
+ * target relation locally contains (mirroring runtime inheritance chaining).
+ * Throws on the first cycle, with the full loop in the message.
  */
-function detectReadTimePathCycle(paths) {
+function detectReadTimePathCycle(paths, schema) {
     const edges = new Map();
     const keyOf = (type, rel) => `${type}#${rel}`;
     for (const rt of paths) {
         const from = keyOf(rt.objectType, rt.derivedRelation);
         const bucket = edges.get(from) ?? [];
         for (const sourceType of rt.sourceTypes) {
-            bucket.push(keyOf(sourceType, rt.targetRelation));
+            for (const member of expandRelationTargets(schema, sourceType, [
+                rt.targetRelation,
+            ])) {
+                bucket.push(keyOf(sourceType, member));
+            }
         }
         edges.set(from, bucket);
     }

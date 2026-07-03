@@ -7,9 +7,5 @@ export const objectValidator = v.object({
     type: v.string(),
     id: v.string(),
 });
-export const conditionValidator = v.optional(v.object({
-    condition: v.string(),
-    conditionContext: v.optional(v.any()),
-}));
 export const propertiesValidator = v.optional(v.any());
 //# sourceMappingURL=validators.js.map

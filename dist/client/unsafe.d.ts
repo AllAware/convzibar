@@ -6,25 +6,19 @@ type MutationCtx = Pick<GenericMutationCtx<GenericDataModel>, "runMutation">;
 type ActionCtx = Pick<GenericActionCtx<GenericDataModel>, "runQuery" | "runMutation" | "runAction">;
 export interface RawRelationship {
     _id: string;
-    tenantId?: string;
     subjectType: string;
     subjectId: string;
     relation: string;
     objectType: string;
     objectId: string;
-    condition?: string;
-    conditionContext?: unknown;
     properties?: unknown;
 }
 export interface RawRelationshipFields {
-    tenantId?: string;
     subjectType: string;
     subjectId: string;
     relation: string;
     objectType: string;
     objectId: string;
-    condition?: string;
-    conditionContext?: unknown;
     properties?: unknown;
 }
 export interface ScanFilter {
@@ -66,30 +60,18 @@ export declare class ZbarUnsafe<Schema extends ZbarSchema = ZbarSchema> {
     private graphConfig;
     constructor(component: any, options: {
         schema: Schema;
-        tenantId: string;
         asyncWrites?: boolean;
     });
-    /**
-     * Scan base relationships with flexible filtering.
-     * No schema validation. Returns raw rows with cursor-based pagination.
-     */
     scanRelationships(ctx: QueryCtx | ActionCtx, filter?: ScanFilter, options?: {
         cursor?: string;
         limit?: number;
     }): Promise<ScanResult>;
-    /**
-     * Count base relationships matching a filter.
-     * Useful for migration progress tracking.
-     */
     countRelationships(ctx: QueryCtx | ActionCtx, filter?: CountFilter): Promise<number>;
     /**
-     * Insert a base relationship tuple directly. No schema validation,
-     * no effective relationship expansion, and — unlike the production
-     * `addRelation` path — no auto-insertion of the declared reverse base
-     * row. Callers that want both sides of a `{ type, reverse }` declaration
-     * as base rows must insert both explicitly. `rebuildEffectiveRelationships()`
-     * will still materialise derived reverse effectives via BFS. Returns
-     * the relationship ID.
+     * Insert a base relationship tuple directly. No schema validation, no
+     * effective relationship expansion, and no auto-insertion of the declared
+     * reverse base row. `rebuildEffectiveRelationships()` will still materialise
+     * derived effectives via BFS.
      */
     insertRelationship(ctx: MutationCtx | ActionCtx, row: {
         subjectType: string;
@@ -97,35 +79,23 @@ export declare class ZbarUnsafe<Schema extends ZbarSchema = ZbarSchema> {
         relation: string;
         objectType: string;
         objectId: string;
-        condition?: string;
-        conditionContext?: unknown;
+        properties?: unknown;
     }): Promise<string>;
-    /**
-     * Patch fields on an existing base relationship in-place.
-     * No schema validation, no effective relationship recalculation.
-     * This is the workhorse for renames — change relation name, entity
-     * type, condition, etc. without delete+recreate.
-     */
+    /** Patch fields on an existing base relationship in-place. */
     patchRelationship(ctx: MutationCtx | ActionCtx, relationshipId: string, patch: {
         subjectType?: string;
         subjectId?: string;
         relation?: string;
         objectType?: string;
         objectId?: string;
-        condition?: string | null;
-        conditionContext?: unknown | null;
+        properties?: unknown | null;
     }): Promise<void>;
-    /**
-     * Delete a base relationship by ID. No cascading removal of
-     * effective relationships.
-     */
+    /** Delete a base relationship by ID. No cascading removal of effectives. */
     deleteRelationship(ctx: MutationCtx | ActionCtx, relationshipId: string): Promise<void>;
     /**
-     * Wipe ALL effective relationships (for this tenant) and rebuild
-     * them from base relationships using the current graph config.
-     *
-     * This is the "nuclear option" — always correct, potentially slow.
-     * Call this after you've finished transforming base relationships.
+     * Wipe ALL effective relationships and rebuild them from base relationships
+     * using the current graph config. The "nuclear option" — always correct,
+     * potentially slow. Call after transforming base relationships.
      */
     rebuildEffectiveRelationships(ctx: MutationCtx | ActionCtx, options?: {
         graphConfig?: GraphConfig;
@@ -134,24 +104,13 @@ export declare class ZbarUnsafe<Schema extends ZbarSchema = ZbarSchema> {
         removed: number;
         rebuilt: number;
     }>;
-    /**
-     * Wipe effective relationships without rebuilding.
-     * Useful if you want to rebuild in a separate step, or if you
-     * want to clear and let lazy evaluation handle it.
-     */
+    /** Wipe effective relationships without rebuilding. */
     clearEffectiveRelationships(ctx: MutationCtx | ActionCtx, filter?: CountFilter): Promise<{
         removed: number;
     }>;
     /**
-     * Apply a transform function to every relationship matching the filter.
-     * The transform returns instructions for each row:
-     *
-     * - `{ patch: { ... } }` — modify fields in-place
-     * - `{ replace: [...] }` — delete original and insert replacements
-     * - `{ delete: true }` — remove the row
-     * - `null` — skip, keep as-is
-     *
-     * Processes in chunks to stay within Convex mutation limits.
+     * Apply a transform function to every relationship matching the filter,
+     * processing in chunks to stay within Convex mutation limits.
      */
     transformRelationships(ctx: MutationCtx | ActionCtx, filter: CountFilter, transform: (row: RawRelationship) => TransformResult, options?: {
         batchSize?: number;
@@ -161,20 +120,11 @@ export declare class ZbarUnsafe<Schema extends ZbarSchema = ZbarSchema> {
         deleted: number;
         skipped: number;
     }>;
-    /**
-     * Rename a relation across all base relationships for a given object type.
-     * Does NOT rebuild effective relationships — call
-     * `rebuildEffectiveRelationships()` after.
-     */
+    /** Rename a relation across all base relationships for a given object type. */
     renameRelation(ctx: MutationCtx | ActionCtx, objectType: string, oldRelation: string, newRelation: string): Promise<{
         updated: number;
     }>;
-    /**
-     * Rename an entity type across all base relationships.
-     * Updates both subject and object type references.
-     * Does NOT rebuild effective relationships — call
-     * `rebuildEffectiveRelationships()` after.
-     */
+    /** Rename an entity type across all base relationships (subject + object). */
     renameEntityType(ctx: MutationCtx | ActionCtx, oldType: string, newType: string): Promise<{
         updated: number;
     }>;

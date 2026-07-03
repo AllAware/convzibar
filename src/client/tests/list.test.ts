@@ -15,7 +15,7 @@ const setup = () => {
 // Shared schemas
 // ============================================================================
 
-const iotSchema = createZbarSchema<any>()
+const iotSchema = createZbarSchema()
   .entity("user")
   .entity("group", (e) => e.relation("member", "user"))
   .entity("system", (e) =>
@@ -35,7 +35,7 @@ const iotSchema = createZbarSchema<any>()
   )
   .build();
 
-const orgSchema = createZbarSchema<any>()
+const orgSchema = createZbarSchema()
   .entity("user")
   .entity("org", (e) =>
     e
@@ -61,7 +61,6 @@ describe("Fluent .list() Query Builder", () => {
   const mkZbar = () =>
     new Zbar(api, {
       schema: iotSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -207,7 +206,7 @@ describe("Fluent .list() Query Builder", () => {
     const t = setup();
     const ctx = mkCtx(t);
 
-    const chainSchema = createZbarSchema<any>()
+    const chainSchema = createZbarSchema()
       .entity("user")
       .entity("group", (e) =>
         e.relation("member", "user"),
@@ -228,7 +227,6 @@ describe("Fluent .list() Query Builder", () => {
 
     const zbar = new Zbar(api, {
       schema: chainSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -255,7 +253,7 @@ describe("Fluent .list() Query Builder", () => {
     const t = setup();
     const ctx = mkCtx(t);
 
-    const chainSchema = createZbarSchema<any>()
+    const chainSchema = createZbarSchema()
       .entity("user")
       .entity("group", (e) =>
         e.relation("member", "user"),
@@ -276,7 +274,6 @@ describe("Fluent .list() Query Builder", () => {
 
     const zbar = new Zbar(api, {
       schema: chainSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -506,7 +503,7 @@ describe("Fluent .list() Query Builder", () => {
     // The interior chain link is checked with *every* relation on the
     // intermediate type, so the non-composing `watched_by` edge bridges the
     // chain — but it must not grant `view` on devY.
-    const bridgeSchema = createZbarSchema<any>()
+    const bridgeSchema = createZbarSchema()
       .entity("user")
       .entity("system", (e) =>
         e
@@ -530,7 +527,6 @@ describe("Fluent .list() Query Builder", () => {
 
     const zbar = new Zbar(api, {
       schema: bridgeSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -693,7 +689,6 @@ describe("Fluent .listDirect() Query Builder", () => {
   const mkZbar = () =>
     new Zbar(api, {
       schema: orgSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 

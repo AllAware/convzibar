@@ -1,57 +1,49 @@
 import { v } from "convex/values";
-import { buildScopeKey, decodeScopeKey } from "../shared/keys";
+import { buildScopeKey } from "../shared/keys";
 import { internal } from "./_generated/api";
 import { internalMutation, mutation } from "./_generated/server";
-import { writeAuditLog } from "./audit";
-import { applyTraversalRulesToItem } from "./expand";
+import { loadConfig } from "./config";
+import { applyTraversalRulesToItem, collectRuleDerivations } from "./expand";
 import { canonicalizePath, pathKey } from "./paths";
 import { runOrEnqueue } from "./runOrEnqueue";
 import type { GraphConfig } from "./types";
 import {
-  conditionValidator,
   objectValidator,
   propertiesValidator,
   subjectValidator,
 } from "./validators";
 
-export const addRelation = mutation({
-  args: {
-    tenantId: v.optional(v.string()),
-    subject: subjectValidator,
-    relation: v.string(),
-    object: objectValidator,
-    condition: conditionValidator,
-    properties: propertiesValidator,
-    createdBy: v.optional(v.string()),
-    graphConfig: v.any(), // GraphConfig
-    enableAuditLog: v.optional(v.boolean()),
-    asyncWrites: v.optional(v.boolean()),
-    onComplete: v.optional(v.any()), // { action: "remove", args: any } | { action: "removeBatch", args: any[] }
-  },
-  handler: async (ctx: any, args: any) => {
-    return addRelationInternal(ctx, args);
-  },
-});
+type Entity = { type: string; id: string };
 
-async function addRelationInternal(ctx: any, args: any) {
-  const {
-    tenantId,
-    subject,
-    relation,
-    object,
-    condition,
-    properties,
-    createdBy,
-    enableAuditLog,
-    onComplete,
-  } = args;
-  const graphConfig = args.graphConfig as GraphConfig;
+// The config arg shape shared by every public mutation: the client always
+// sends the content hash, and additionally the full compiled config the first
+// time it uses a hash (which the component registers).
+const configHashArg = v.string();
+const graphConfigArg = v.optional(v.any());
 
-  const existingRel = await ctx.db
+// ---------------------------------------------------------------------------
+// Reverse-edge helpers (single source of truth — used by add/remove/delete).
+// ---------------------------------------------------------------------------
+
+function reverseEdgeName(
+  config: GraphConfig,
+  objectType: string,
+  relation: string,
+  subjectType: string,
+): string | undefined {
+  return config.reverseEdges?.[objectType]?.[relation]?.[subjectType];
+}
+
+async function findRelationship(
+  ctx: any,
+  subject: Entity,
+  relation: string,
+  object: Entity,
+) {
+  return ctx.db
     .query("relationships")
-    .withIndex("by_tenant_subject_relation_object", (q: any) =>
+    .withIndex("by_subject_relation_object", (q: any) =>
       q
-        .eq("tenantId", tenantId)
         .eq("subjectType", subject.type)
         .eq("subjectId", subject.id)
         .eq("relation", relation)
@@ -59,40 +51,79 @@ async function addRelationInternal(ctx: any, args: any) {
         .eq("objectId", object.id),
     )
     .unique();
+}
+
+/**
+ * If `(subject)-[relation]->(object)` declares a reverse, insert the mirrored
+ * base edge (unless it already exists) and return its descriptor for queueing.
+ */
+async function insertReverseEdge(
+  ctx: any,
+  config: GraphConfig,
+  subject: Entity,
+  relation: string,
+  object: Entity,
+): Promise<{ revId: string; reverseRel: string } | null> {
+  const reverseRel = reverseEdgeName(config, object.type, relation, subject.type);
+  if (!reverseRel) return null;
+  const existing = await findRelationship(ctx, object, reverseRel, subject);
+  if (existing) return null;
+  const revId = await ctx.db.insert("relationships", {
+    subjectType: object.type,
+    subjectId: object.id,
+    relation: reverseRel,
+    objectType: subject.type,
+    objectId: subject.id,
+  });
+  return { revId, reverseRel };
+}
+
+/** Mirror of `insertReverseEdge` for removal. */
+async function deleteReverseEdge(
+  ctx: any,
+  config: GraphConfig,
+  subject: Entity,
+  relation: string,
+  object: Entity,
+): Promise<{ revId: string; reverseRel: string } | null> {
+  const reverseRel = reverseEdgeName(config, object.type, relation, subject.type);
+  if (!reverseRel) return null;
+  const existing = await findRelationship(ctx, object, reverseRel, subject);
+  if (!existing) return null;
+  await ctx.db.delete(existing._id);
+  return { revId: existing._id, reverseRel };
+}
+
+// ---------------------------------------------------------------------------
+// addRelation
+// ---------------------------------------------------------------------------
+
+export const addRelation = mutation({
+  args: {
+    subject: subjectValidator,
+    relation: v.string(),
+    object: objectValidator,
+    properties: propertiesValidator,
+    configHash: configHashArg,
+    graphConfig: graphConfigArg,
+    asyncWrites: v.optional(v.boolean()),
+    onComplete: v.optional(v.any()),
+  },
+  handler: async (ctx: any, args: any) => {
+    const config = await loadConfig(ctx, args.configHash, args.graphConfig);
+    return addRelationInternal(ctx, { ...args, config });
+  },
+});
+
+async function addRelationInternal(ctx: any, args: any): Promise<string> {
+  const { subject, relation, object, properties, onComplete, configHash, asyncWrites } = args;
+  const config = args.config as GraphConfig;
+
+  const existingRel = await findRelationship(ctx, subject, relation, object);
 
   if (existingRel) {
-    // Existing-row semantics:
-    //   • If the caller's condition (or conditionContext) differs, we cannot
-    //     silently keep the old one — every derived effective row baked the
-    //     prior condition into its `path.conditions`. Mutating only the base
-    //     row would leave stale baked conditions in the materialised view,
-    //     so we throw and direct the caller at updateRelation, which runs
-    //     a remove-cascade before the add.
-    //   • If only `properties` differ, patch in place — properties live on
-    //     the base edge only and are not replicated through the BFS.
-    //   • Otherwise, no-op and return the existing id.
-    //
-    // Either way, pending `onComplete` cleanups still fire because the
-    // caller's intent (typically "old relation removed by update/set") is
-    // independent of whether the new add was a no-op or a real insert.
-    const existingCondition = existingRel.condition ?? undefined;
-    const existingConditionContext = existingRel.conditionContext ?? undefined;
-    const newCondition = condition?.condition ?? undefined;
-    const newConditionContext = condition?.conditionContext ?? undefined;
-
-    const conditionChanged =
-      existingCondition !== newCondition ||
-      JSON.stringify(existingConditionContext) !==
-        JSON.stringify(newConditionContext);
-
-    if (conditionChanged) {
-      throw new Error(
-        `Zbar: addRelation cannot change the condition on an existing relationship ` +
-          `(${subject.type}:${subject.id} -[${relation}]-> ${object.type}:${object.id}). ` +
-          `Use updateRelation to replace the relation, or removeRelation followed by addRelation.`,
-      );
-    }
-
+    // Only `properties` can differ now (conditions are gone). Patch in place;
+    // properties live on the base edge and are not replicated through the BFS.
     if (
       properties !== undefined &&
       JSON.stringify(existingRel.properties ?? null) !==
@@ -100,115 +131,51 @@ async function addRelationInternal(ctx: any, args: any) {
     ) {
       await ctx.db.patch(existingRel._id, { properties });
     }
-
-    if (onComplete) {
-      await executeOnComplete(ctx, onComplete, args.asyncWrites);
-    }
+    if (onComplete) await executeOnComplete(ctx, onComplete, config, configHash, asyncWrites);
     return existingRel._id;
   }
 
   const relId = await ctx.db.insert("relationships", {
-    tenantId,
     subjectType: subject.type,
     subjectId: subject.id,
     relation,
     objectType: object.type,
     objectId: object.id,
-    condition: condition?.condition,
-    conditionContext: condition?.conditionContext,
     properties,
   });
 
-  await writeAuditLog(ctx, {
-    tenantId,
-    enableAuditLog,
-    action: "relation_added",
-    subject,
-    relation,
-    object,
-    actorId: createdBy,
-  });
-
-  const pathItem = {
-    baseIds: [relId],
-    conditions: condition ? [condition] : undefined,
-  };
-
-  const queue: Array<{
-    subject: { type: string; id: string };
-    relation: string;
-    object: { type: string; id: string };
-    path: any;
-    depth: number;
-    skipReverse?: boolean;
-  }> = [
+  const queue: any[] = [
     {
       subject,
       relation,
       object,
-      path: pathItem,
+      path: { baseIds: [relId] },
       depth: 1,
-      // The auto-inserted reverse below handles the base-reverse side for
-      // this explicit add. Skip the BFS effective-reverse-edge push here so
-      // we don't create duplicate effective paths for the same underlying
-      // base pair.
+      // The auto-inserted reverse below handles the base-reverse side for this
+      // explicit add; skip the BFS effective-reverse push here to avoid
+      // duplicate effective paths for the same underlying base pair.
       skipReverse: true,
     },
   ];
 
-  // Auto-insert reverse edge if declared in the schema.
-  // e.g. device.container has { type: 'group', reverse: 'device_member' }
-  // → when (group → container → device) is added, also insert (device → device_member → group)
-  const reverseRel =
-    graphConfig.reverseEdges?.[object.type]?.[relation]?.[subject.type];
-  if (reverseRel) {
-    const existingReverse = await ctx.db
-      .query("relationships")
-      .withIndex("by_tenant_subject_relation_object", (q: any) =>
-        q
-          .eq("tenantId", tenantId)
-          .eq("subjectType", object.type)
-          .eq("subjectId", object.id)
-          .eq("relation", reverseRel)
-          .eq("objectType", subject.type)
-          .eq("objectId", subject.id),
-      )
-      .unique();
-
-    if (!existingReverse) {
-      const revId = await ctx.db.insert("relationships", {
-        tenantId,
-        subjectType: object.type,
-        subjectId: object.id,
-        relation: reverseRel,
-        objectType: subject.type,
-        objectId: subject.id,
-      });
-
-      queue.push({
-        subject: object,
-        relation: reverseRel,
-        object: subject,
-        path: { baseIds: [revId] },
-        depth: 1,
-        skipReverse: true,
-      });
-    }
+  const rev = await insertReverseEdge(ctx, config, subject, relation, object);
+  if (rev) {
+    queue.push({
+      subject: object,
+      relation: rev.reverseRel,
+      object: subject,
+      path: { baseIds: [rev.revId] },
+      depth: 1,
+      skipReverse: true,
+    });
   }
 
   await runOrEnqueue(ctx, {
-    asyncWrites: args.asyncWrites,
-    graphConfig,
+    asyncWrites,
+    mockWorkpool: config.mockWorkpool,
     chunkRef: internal.mutations.processAddChunk,
-    payload: {
-      tenantId,
-      baseRelId: relId,
-      queue,
-      graphConfig,
-      onComplete,
-      asyncWrites: args.asyncWrites ?? false,
-    },
-    inlineFn: processAddChunkInternal,
+    payload: { baseRelId: relId, queue, configHash, onComplete, asyncWrites: asyncWrites ?? false },
+    inlineFn: (c, p) => processAddChunkInternal(c, { ...p, config }),
   });
 
   return relId;
@@ -216,71 +183,31 @@ async function addRelationInternal(ctx: any, args: any) {
 
 export const processAddChunk = internalMutation({
   args: {
-    tenantId: v.optional(v.string()),
     baseRelId: v.id("relationships"),
     queue: v.array(v.any()),
-    graphConfig: v.any(),
+    configHash: v.string(),
     onComplete: v.optional(v.any()),
     asyncWrites: v.optional(v.boolean()),
   },
   handler: async (ctx: any, args: any) => {
-    await processAddChunkInternal(ctx, args);
+    const config = await loadConfig(ctx, args.configHash);
+    await processAddChunkInternal(ctx, { ...args, config });
   },
 });
 
-async function executeOnComplete(
-  ctx: any,
-  onComplete: any,
-  asyncWrites?: boolean,
-): Promise<void> {
-  if (!onComplete) return;
+async function processAddChunkInternal(ctx: any, args: any): Promise<void> {
+  const { baseRelId, queue, onComplete, asyncWrites, configHash } = args;
+  const config = args.config as GraphConfig;
 
-  // Normalise single/batch variants to a uniform array so each action has
-  // one branch, not two.
-  const kind = onComplete.action === "removeRelationBatch"
-    ? "removeRelation"
-    : onComplete.action === "enqueueRemoveChunkBatch"
-      ? "enqueueRemoveChunk"
-      : onComplete.action;
-  const isBatch =
-    onComplete.action === "removeRelationBatch" ||
-    onComplete.action === "enqueueRemoveChunkBatch";
-  const argsList: any[] = isBatch ? onComplete.args : [onComplete.args];
-
-  for (const args of argsList) {
-    if (kind === "removeRelation") {
-      await removeRelationInternal(ctx, { ...args, asyncWrites });
-    } else if (kind === "enqueueRemoveChunk") {
-      await runOrEnqueue(ctx, {
-        asyncWrites,
-        graphConfig: args.graphConfig,
-        chunkRef: internal.mutations.processRemoveChunk,
-        payload: args,
-        inlineFn: processRemoveChunkInternal,
-      });
-    }
-  }
-}
-
-async function processAddChunkInternal(
-  ctx: any,
-  args: any,
-): Promise<void> {
-  const { tenantId, baseRelId, queue, graphConfig, onComplete, asyncWrites } =
-    args;
-
-  // Validation: Ensure the base relationship still exists. If not, abort.
+  // Abort if the base relationship was deleted by a rapid subsequent update,
+  // but still fire cleanups so nothing is orphaned.
   const baseRel = await ctx.db.get(baseRelId);
   if (!baseRel) {
-    // If we get aborted by a rapid subsequent update,
-    // ensure we still fire our cleanup tasks so nothing gets orphaned!
-    if (onComplete) {
-      await executeOnComplete(ctx, onComplete, asyncWrites);
-    }
-    return; // Base relation was deleted, abort expansion
+    if (onComplete) await executeOnComplete(ctx, onComplete, config, configHash, asyncWrites);
+    return;
   }
 
-  const CHUNK_SIZE = graphConfig.maxChunkSize ?? 50;
+  const CHUNK_SIZE = config.maxChunkSize ?? 50;
   let processed = 0;
 
   while (queue.length > 0 && (!asyncWrites || processed < CHUNK_SIZE)) {
@@ -291,24 +218,18 @@ async function processAddChunkInternal(
 
     let eff = await ctx.db
       .query("effectiveRelationships")
-      .withIndex("by_tenant_subject_relation_object", (q: any) =>
-        q
-          .eq("tenantId", tenantId)
-          .eq("subjectKey", sKey)
-          .eq("relation", current.relation)
-          .eq("objectKey", oKey),
+      .withIndex("by_subject_relation_object", (q: any) =>
+        q.eq("subjectKey", sKey).eq("relation", current.relation).eq("objectKey", oKey),
       )
       .unique();
 
     let isNewOrUpdated = false;
-
     const currentPathKey = pathKey(current.path);
     const canonicalCurrentPath = canonicalizePath(current.path);
 
     if (!eff) {
       eff = {
         _id: await ctx.db.insert("effectiveRelationships", {
-          tenantId,
           subjectKey: sKey,
           relation: current.relation,
           objectKey: oKey,
@@ -316,25 +237,13 @@ async function processAddChunkInternal(
         }),
       };
       isNewOrUpdated = true;
-    } else {
-      const pathExists = eff.paths.some(
-        (p: any) => pathKey(p) === currentPathKey,
-      );
-
-      if (!pathExists) {
-        const newPaths = [...eff.paths, canonicalCurrentPath];
-        await ctx.db.patch(eff._id, { paths: newPaths });
-        isNewOrUpdated = true;
-      }
+    } else if (!eff.paths.some((p: any) => pathKey(p) === currentPathKey)) {
+      await ctx.db.patch(eff._id, { paths: [...eff.paths, canonicalCurrentPath] });
+      isNewOrUpdated = true;
     }
 
     if (isNewOrUpdated) {
-      await applyTraversalRulesToItem(ctx, {
-        tenantId,
-        current,
-        queue,
-        graphConfig,
-      });
+      await applyTraversalRulesToItem(ctx, { current, queue, graphConfig: config });
     }
   }
 
@@ -342,228 +251,123 @@ async function processAddChunkInternal(
     if (asyncWrites) {
       await runOrEnqueue(ctx, {
         asyncWrites,
-        graphConfig,
+        mockWorkpool: config.mockWorkpool,
         chunkRef: internal.mutations.processAddChunk,
-        payload: {
-          tenantId,
-          baseRelId,
-          queue,
-          graphConfig,
-          onComplete,
-          asyncWrites,
-        },
+        payload: { baseRelId, queue, configHash, onComplete, asyncWrites },
       });
     }
   } else if (onComplete) {
-    await executeOnComplete(ctx, onComplete, asyncWrites);
+    await executeOnComplete(ctx, onComplete, config, configHash, asyncWrites);
   }
 }
 
-async function deleteBaseRelationAndLog(ctx: any, args: any) {
-  const {
-    tenantId,
-    subject,
-    relation,
-    object,
-    actorId,
-    enableAuditLog,
-    existingRel,
-  } = args;
+// ---------------------------------------------------------------------------
+// onComplete (Add-Before-Remove chaining)
+// ---------------------------------------------------------------------------
 
-  await ctx.db.delete(existingRel._id);
+async function executeOnComplete(
+  ctx: any,
+  onComplete: any,
+  config: GraphConfig,
+  configHash: string,
+  asyncWrites?: boolean,
+): Promise<void> {
+  if (!onComplete) return;
 
-  await writeAuditLog(ctx, {
-    tenantId,
-    enableAuditLog,
-    action: "relation_removed",
-    subject,
-    relation,
-    object,
-    actorId,
-  });
+  const kind =
+    onComplete.action === "removeRelationBatch"
+      ? "removeRelation"
+      : onComplete.action === "enqueueRemoveChunkBatch"
+        ? "enqueueRemoveChunk"
+        : onComplete.action;
+  const isBatch =
+    onComplete.action === "removeRelationBatch" ||
+    onComplete.action === "enqueueRemoveChunkBatch";
+  const argsList: any[] = isBatch ? onComplete.args : [onComplete.args];
 
-  const queue: Array<{
-    subject: { type: string; id: string };
-    relation: string;
-    object: { type: string; id: string };
-    removedRelationId: string;
-  }> = [
-    {
-      subject,
-      relation,
-      object,
-      removedRelationId: existingRel._id,
-    },
-  ];
-
-  // Auto-remove reverse edge if declared in the schema.
-  const graphConfig = args.graphConfig as GraphConfig;
-  const reverseRel =
-    graphConfig.reverseEdges?.[object.type]?.[relation]?.[subject.type];
-  if (reverseRel) {
-    const existingReverse = await ctx.db
-      .query("relationships")
-      .withIndex("by_tenant_subject_relation_object", (q: any) =>
-        q
-          .eq("tenantId", tenantId)
-          .eq("subjectType", object.type)
-          .eq("subjectId", object.id)
-          .eq("relation", reverseRel)
-          .eq("objectType", subject.type)
-          .eq("objectId", subject.id),
-      )
-      .unique();
-
-    if (existingReverse) {
-      await ctx.db.delete(existingReverse._id);
-      queue.push({
-        subject: object,
-        relation: reverseRel,
-        object: subject,
-        removedRelationId: existingReverse._id,
+  for (const a of argsList) {
+    if (kind === "removeRelation") {
+      await removeRelationInternal(ctx, { ...a, config, configHash, asyncWrites });
+    } else if (kind === "enqueueRemoveChunk") {
+      await runOrEnqueue(ctx, {
+        asyncWrites,
+        mockWorkpool: config.mockWorkpool,
+        chunkRef: internal.mutations.processRemoveChunk,
+        payload: { queue: a.queue, configHash, asyncWrites },
+        inlineFn: (c, p) => processRemoveChunkInternal(c, { ...p, config }),
       });
     }
   }
+}
 
-  return {
-    tenantId,
-    queue,
-    graphConfig: args.graphConfig,
-  };
+// ---------------------------------------------------------------------------
+// removeRelation
+// ---------------------------------------------------------------------------
+
+/** Delete a base edge (+ its declared reverse) and return the cascade seed queue. */
+async function deleteBaseRelation(ctx: any, config: GraphConfig, existingRel: any) {
+  const subject = { type: existingRel.subjectType, id: existingRel.subjectId };
+  const object = { type: existingRel.objectType, id: existingRel.objectId };
+  await ctx.db.delete(existingRel._id);
+
+  const queue: any[] = [
+    { subject, relation: existingRel.relation, object, removedRelationId: existingRel._id },
+  ];
+  const rev = await deleteReverseEdge(ctx, config, subject, existingRel.relation, object);
+  if (rev) {
+    queue.push({ subject: object, relation: rev.reverseRel, object: subject, removedRelationId: rev.revId });
+  }
+  return { queue };
 }
 
 async function removeRelationInternal(
   ctx: any,
   args: any,
 ): Promise<false | { removed: true; effectiveRelationshipsRemoved: number }> {
-  const {
-    tenantId,
-    subject,
-    relation,
-    object,
-    actorId,
-    enableAuditLog,
-    expectedRelId,
-  } = args;
-  const graphConfig = args.graphConfig as GraphConfig;
+  const { subject, relation, object, configHash, asyncWrites } = args;
+  const config = args.config as GraphConfig;
 
-  const existingRel = await ctx.db
-    .query("relationships")
-    .withIndex("by_tenant_subject_relation_object", (q: any) =>
-      q
-        .eq("tenantId", tenantId)
-        .eq("subjectType", subject.type)
-        .eq("subjectId", subject.id)
-        .eq("relation", relation)
-        .eq("objectType", object.type)
-        .eq("objectId", object.id),
-    )
-    .unique();
+  const existingRel = await findRelationship(ctx, subject, relation, object);
+  if (!existingRel) return false;
 
-  if (!existingRel) {
-    return false;
-  }
-
-  // In a concurrent rapid-update scenario, the relation might have been deleted and re-added.
-  // If we are executing an onComplete cleanup from an older update, we MUST NOT delete the new row!
-  if (expectedRelId && existingRel._id !== expectedRelId) {
-    return false;
-  }
-
-  await ctx.db.delete(existingRel._id);
-
-  await writeAuditLog(ctx, {
-    tenantId,
-    enableAuditLog,
-    action: "relation_removed",
-    subject,
-    relation,
-    object,
-    actorId,
-  });
-
-  const queue: Array<{
-    subject: { type: string; id: string };
-    relation: string;
-    object: { type: string; id: string };
-    removedRelationId: string;
-  }> = [
-    {
-      subject,
-      relation,
-      object,
-      removedRelationId: existingRel._id,
-    },
-  ];
-
-  // Auto-remove reverse edge if declared in the schema.
-  const reverseRel =
-    graphConfig.reverseEdges?.[object.type]?.[relation]?.[subject.type];
-  if (reverseRel) {
-    const existingReverse = await ctx.db
-      .query("relationships")
-      .withIndex("by_tenant_subject_relation_object", (q: any) =>
-        q
-          .eq("tenantId", tenantId)
-          .eq("subjectType", object.type)
-          .eq("subjectId", object.id)
-          .eq("relation", reverseRel)
-          .eq("objectType", subject.type)
-          .eq("objectId", subject.id),
-      )
-      .unique();
-
-    if (existingReverse) {
-      await ctx.db.delete(existingReverse._id);
-      queue.push({
-        subject: object,
-        relation: reverseRel,
-        object: subject,
-        removedRelationId: existingReverse._id,
-      });
-    }
-  }
+  const { queue } = await deleteBaseRelation(ctx, config, existingRel);
 
   const inlineRemoved = await runOrEnqueue<number>(ctx, {
-    asyncWrites: args.asyncWrites,
-    graphConfig,
+    asyncWrites,
+    mockWorkpool: config.mockWorkpool,
     chunkRef: internal.mutations.processRemoveChunk,
-    payload: { tenantId, queue, graphConfig },
-    inlineFn: processRemoveChunkInternal,
+    payload: { queue, configHash, asyncWrites },
+    inlineFn: (c, p) => processRemoveChunkInternal(c, { ...p, config }),
   });
 
-  return {
-    removed: true,
-    effectiveRelationshipsRemoved: inlineRemoved ?? 0,
-  };
+  return { removed: true, effectiveRelationshipsRemoved: inlineRemoved ?? 0 };
 }
 
 export const processRemoveChunk = internalMutation({
   args: {
-    tenantId: v.optional(v.string()),
     queue: v.array(v.any()),
-    graphConfig: v.any(),
+    configHash: v.string(),
     asyncWrites: v.optional(v.boolean()),
   },
   handler: async (ctx: any, args: any) => {
-    await processRemoveChunkInternal(ctx, args);
+    const config = await loadConfig(ctx, args.configHash);
+    await processRemoveChunkInternal(ctx, { ...args, config });
   },
 });
 
-async function processRemoveChunkInternal(
-  ctx: any,
-  args: any,
-): Promise<number> {
-  const { tenantId, queue, graphConfig, asyncWrites } = args;
-  let effectiveRelationshipsRemoved = 0;
-  const CHUNK_SIZE = graphConfig.maxChunkSize ?? 50;
+async function processRemoveChunkInternal(ctx: any, args: any): Promise<number> {
+  const { queue, configHash, asyncWrites } = args;
+  const config = args.config as GraphConfig;
+  let removedCount = 0;
+  const CHUNK_SIZE = config.maxChunkSize ?? 50;
   let processed = 0;
   const seen = new Set<string>();
 
+  const queueKey = (s: Entity, rel: string, o: Entity, id: string) =>
+    `${buildScopeKey(s.type, s.id)}:${rel}:${buildScopeKey(o.type, o.id)}:${id}`;
+
   for (const item of queue) {
-    seen.add(
-      `${buildScopeKey(item.subject.type, item.subject.id)}:${item.relation}:${buildScopeKey(item.object.type, item.object.id)}:${item.removedRelationId}`,
-    );
+    seen.add(queueKey(item.subject, item.relation, item.object, item.removedRelationId));
   }
 
   while (queue.length > 0 && (!asyncWrites || processed < CHUNK_SIZE)) {
@@ -571,173 +375,240 @@ async function processRemoveChunkInternal(
     const current = queue.shift()!;
     const sKey = buildScopeKey(current.subject.type, current.subject.id);
     const oKey = buildScopeKey(current.object.type, current.object.id);
+    const cascadeId = current.removedRelationId;
 
     const eff = await ctx.db
       .query("effectiveRelationships")
-      .withIndex("by_tenant_subject_relation_object", (q: any) =>
-        q
-          .eq("tenantId", tenantId)
-          .eq("subjectKey", sKey)
-          .eq("relation", current.relation)
-          .eq("objectKey", oKey),
+      .withIndex("by_subject_relation_object", (q: any) =>
+        q.eq("subjectKey", sKey).eq("relation", current.relation).eq("objectKey", oKey),
       )
       .unique();
+    if (!eff) continue;
 
-    if (eff) {
-      const remainingPaths = eff.paths.filter(
-        (p: any) =>
-          !p.baseIds || !p.baseIds.includes(current.removedRelationId),
-      );
+    const remainingPaths = eff.paths.filter(
+      (p: any) => !p.baseIds || !p.baseIds.includes(cascadeId),
+    );
 
-      let shouldCascade = false;
-      const cascadeId = current.removedRelationId;
+    let shouldCascade = false;
+    if (remainingPaths.length === 0) {
+      await ctx.db.delete(eff._id);
+      removedCount++;
+      shouldCascade = true;
+    } else if (remainingPaths.length !== eff.paths.length) {
+      await ctx.db.patch(eff._id, { paths: remainingPaths });
+      shouldCascade = true;
+    }
 
-      if (remainingPaths.length === 0) {
-        await ctx.db.delete(eff._id);
-        effectiveRelationshipsRemoved++;
-        shouldCascade = true;
-      } else if (remainingPaths.length !== eff.paths.length) {
-        await ctx.db.patch(eff._id, { paths: remainingPaths });
-        shouldCascade = true;
-      }
+    if (!shouldCascade) continue;
 
-      if (shouldCascade) {
-        // If this effective relationship was modified or deleted, cascade the token downstream
-        for (const rule of graphConfig.traversalRules) {
-          if (
-            current.object.type === rule.sourceObjectType &&
-            current.relation === rule.sourceRelation
-          ) {
-            const matches = await ctx.db
-              .query("effectiveRelationships")
-              .withIndex("by_tenant_object_relation_subject", (q: any) =>
-                q
-                  .eq("tenantId", tenantId)
-                  .eq("objectKey", sKey)
-                  .eq("relation", rule.targetRelation),
-              )
-              .collect();
+    // Propagate the token deletion downstream through the same rule matching
+    // the add-path BFS uses (shared via collectRuleDerivations).
+    const enqueue = (s: Entity, rel: string, o: Entity) => {
+      const k = queueKey(s, rel, o, cascadeId);
+      if (seen.has(k)) return;
+      seen.add(k);
+      queue.push({ subject: s, relation: rel, object: o, removedRelationId: cascadeId });
+    };
 
-            for (const match of matches) {
-              const [matchSubjectType, matchSubjectId] = decodeScopeKey(
-                match.subjectKey,
-              );
-              const derivedSubject = {
-                type: matchSubjectType,
-                id: matchSubjectId,
-              };
-              const derivedObject = current.object;
-              const queueKey = `${buildScopeKey(derivedSubject.type, derivedSubject.id)}:${rule.derivedRelation}:${buildScopeKey(derivedObject.type, derivedObject.id)}:${cascadeId}`;
-              if (!seen.has(queueKey)) {
-                seen.add(queueKey);
-                queue.push({
-                  subject: derivedSubject,
-                  relation: rule.derivedRelation,
-                  object: derivedObject,
-                  removedRelationId: cascadeId,
-                });
-              }
-            }
-          }
+    for (const { rule, derivedSubject, derivedObject } of await collectRuleDerivations(
+      ctx,
+      current,
+      config,
+    )) {
+      enqueue(derivedSubject, rule.derivedRelation, derivedObject);
+    }
 
-          if (current.relation === rule.targetRelation) {
-            const matches = await ctx.db
-              .query("effectiveRelationships")
-              .withIndex("by_tenant_subject_relation_object", (q: any) =>
-                q
-                  .eq("tenantId", tenantId)
-                  .eq("subjectKey", oKey)
-                  .eq("relation", rule.sourceRelation),
-              )
-              .collect();
-
-            for (const match of matches) {
-              const [matchObjectType, matchObjectId] = decodeScopeKey(
-                match.objectKey,
-              );
-              if (matchObjectType === rule.sourceObjectType) {
-                const derivedSubject = current.subject;
-                const derivedObject = {
-                  type: matchObjectType,
-                  id: matchObjectId,
-                };
-                const queueKey = `${buildScopeKey(derivedSubject.type, derivedSubject.id)}:${rule.derivedRelation}:${buildScopeKey(derivedObject.type, derivedObject.id)}:${cascadeId}`;
-                if (!seen.has(queueKey)) {
-                  seen.add(queueKey);
-                  queue.push({
-                    subject: derivedSubject,
-                    relation: rule.derivedRelation,
-                    object: derivedObject,
-                    removedRelationId: cascadeId,
-                  });
-                }
-              }
-            }
-          }
-        }
-
-        // Cascade through effective reverse edges — mirror of the add-path
-        // logic. When a derived relationship is torn down, the effective
-        // relationship on the reverse side must be pruned too. The `seen`
-        // set prevents reverse-of-reverse loops since re-queuing the same
-        // (subject, relation, object, cascadeId) is a no-op.
-        if (graphConfig.reverseEdges) {
-          const reverseRel =
-            graphConfig.reverseEdges?.[current.object.type]?.[
-              current.relation
-            ]?.[current.subject.type];
-          if (reverseRel) {
-            const queueKey = `${buildScopeKey(current.object.type, current.object.id)}:${reverseRel}:${buildScopeKey(current.subject.type, current.subject.id)}:${cascadeId}`;
-            if (!seen.has(queueKey)) {
-              seen.add(queueKey);
-              queue.push({
-                subject: current.object,
-                relation: reverseRel,
-                object: current.subject,
-                removedRelationId: cascadeId,
-              });
-            }
-          }
-        }
-      }
+    // Effective reverse-edge cascade (mirror of the add path).
+    const reverseRel = reverseEdgeName(
+      config,
+      current.object.type,
+      current.relation,
+      current.subject.type,
+    );
+    if (reverseRel) {
+      enqueue(current.object, reverseRel, current.subject);
     }
   }
 
-  if (queue.length > 0) {
-    if (asyncWrites) {
-      await runOrEnqueue(ctx, {
-        asyncWrites,
-        graphConfig,
-        chunkRef: internal.mutations.processRemoveChunk,
-        payload: {
-          tenantId,
-          queue,
-          graphConfig,
-          asyncWrites,
-        },
-      });
-    }
+  if (queue.length > 0 && asyncWrites) {
+    await runOrEnqueue(ctx, {
+      asyncWrites,
+      mockWorkpool: config.mockWorkpool,
+      chunkRef: internal.mutations.processRemoveChunk,
+      payload: { queue, configHash, asyncWrites },
+    });
   }
 
-  return effectiveRelationshipsRemoved;
+  return removedCount;
 }
 
 export const removeRelation = mutation({
   args: {
-    tenantId: v.optional(v.string()),
     subject: subjectValidator,
     relation: v.string(),
     object: objectValidator,
-    actorId: v.optional(v.string()),
-    graphConfig: v.any(), // GraphConfig
-    enableAuditLog: v.optional(v.boolean()),
+    configHash: configHashArg,
+    graphConfig: graphConfigArg,
     asyncWrites: v.optional(v.boolean()),
   },
   handler: async (ctx: any, args: any) => {
-    const res = await removeRelationInternal(ctx, args);
+    const config = await loadConfig(ctx, args.configHash, args.graphConfig);
+    const res = await removeRelationInternal(ctx, { ...args, config });
     return res ? res.removed : false;
   },
 });
+
+// ---------------------------------------------------------------------------
+// updateRelation / setRelation (Add-Before-Remove)
+// ---------------------------------------------------------------------------
+
+export const updateRelation = mutation({
+  args: {
+    subject: subjectValidator,
+    oldRelation: v.string(),
+    newRelation: v.string(),
+    object: objectValidator,
+    properties: propertiesValidator,
+    configHash: configHashArg,
+    graphConfig: graphConfigArg,
+    asyncWrites: v.optional(v.boolean()),
+  },
+  handler: async (ctx: any, args: any) => {
+    const { subject, oldRelation, newRelation, object, properties, configHash, asyncWrites } = args;
+    const config = await loadConfig(ctx, configHash, args.graphConfig);
+
+    let onComplete: any = undefined;
+    const existingOldRel = await findRelationship(ctx, subject, oldRelation, object);
+    if (existingOldRel) {
+      const removedData = await deleteBaseRelation(ctx, config, existingOldRel);
+      onComplete = { action: "enqueueRemoveChunk", args: removedData };
+    }
+
+    return addRelationInternal(ctx, {
+      subject,
+      relation: newRelation,
+      object,
+      properties,
+      config,
+      configHash,
+      asyncWrites,
+      onComplete,
+    });
+  },
+});
+
+export const setRelation = mutation({
+  args: {
+    subject: subjectValidator,
+    relation: v.string(),
+    object: objectValidator,
+    objectRelations: v.array(v.string()),
+    properties: propertiesValidator,
+    configHash: configHashArg,
+    graphConfig: graphConfigArg,
+    asyncWrites: v.optional(v.boolean()),
+  },
+  handler: async (ctx: any, args: any) => {
+    const { subject, relation, object, objectRelations, properties, configHash, asyncWrites } = args;
+    const config = await loadConfig(ctx, configHash, args.graphConfig);
+
+    const queries = objectRelations
+      .filter((r: string) => r !== relation)
+      .map((candidateRel: string) => findRelationship(ctx, subject, candidateRel, object));
+    const results = await Promise.all(queries);
+    const relationsToDrop = results.filter((r: any) => r !== null);
+
+    const onCompleteArgs = [];
+    for (const r of relationsToDrop) {
+      onCompleteArgs.push(await deleteBaseRelation(ctx, config, r));
+    }
+
+    const onComplete =
+      onCompleteArgs.length > 0
+        ? { action: "enqueueRemoveChunkBatch", args: onCompleteArgs }
+        : undefined;
+
+    return addRelationInternal(ctx, {
+      subject,
+      relation,
+      object,
+      properties,
+      config,
+      configHash,
+      asyncWrites,
+      onComplete,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// deleteEntity
+// ---------------------------------------------------------------------------
+
+export const deleteEntity = mutation({
+  args: {
+    entity: subjectValidator,
+    configHash: configHashArg,
+    graphConfig: graphConfigArg,
+    asyncWrites: v.optional(v.boolean()),
+  },
+  handler: async (ctx: any, args: any) => {
+    const { entity, configHash, asyncWrites } = args;
+    const config = await loadConfig(ctx, configHash, args.graphConfig);
+
+    let relationshipsRemoved = 0;
+    let effectiveRelationshipsRemoved = 0;
+
+    const remove = async (subject: Entity, relation: string, object: Entity) => {
+      const res = await removeRelationInternal(ctx, {
+        subject,
+        relation,
+        object,
+        config,
+        configHash,
+        asyncWrites,
+      });
+      if (res) {
+        relationshipsRemoved++;
+        effectiveRelationshipsRemoved += res.effectiveRelationshipsRemoved;
+      }
+    };
+
+    const subjectMatches = await ctx.db
+      .query("relationships")
+      .withIndex("by_subject_relation_object", (q: any) =>
+        q.eq("subjectType", entity.type).eq("subjectId", entity.id),
+      )
+      .collect();
+    for (const m of subjectMatches) {
+      await remove(
+        { type: m.subjectType, id: m.subjectId },
+        m.relation,
+        { type: m.objectType, id: m.objectId },
+      );
+    }
+
+    const objectMatches = await ctx.db
+      .query("relationships")
+      .withIndex("by_object", (q: any) =>
+        q.eq("objectType", entity.type).eq("objectId", entity.id),
+      )
+      .collect();
+    for (const m of objectMatches) {
+      await remove(
+        { type: m.subjectType, id: m.subjectId },
+        m.relation,
+        { type: m.objectType, id: m.objectId },
+      );
+    }
+
+    return { relationshipsRemoved, effectiveRelationshipsRemoved };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Test-only mock workpool helpers.
+// ---------------------------------------------------------------------------
 
 export const popMockWorkpool = internalMutation({
   args: {},
@@ -762,260 +633,5 @@ export const deleteMockWorkpoolTask = internalMutation({
   args: { id: v.id("mockWorkpool") },
   handler: async (ctx: any, args: any) => {
     await ctx.db.delete(args.id);
-  },
-});
-
-export const deleteEntity = mutation({
-  args: {
-    tenantId: v.optional(v.string()),
-    entity: subjectValidator, // { type, id }
-    actorId: v.optional(v.string()),
-    graphConfig: v.any(),
-    enableAuditLog: v.optional(v.boolean()),
-    asyncWrites: v.optional(v.boolean()),
-  },
-  handler: async (ctx: any, args: any) => {
-    const {
-      tenantId,
-      entity,
-      actorId,
-      graphConfig,
-      enableAuditLog,
-      asyncWrites,
-    } = args;
-
-    let relationshipsRemoved = 0;
-    let effectiveRelationshipsRemoved = 0;
-
-    // 1. Where entity is subject
-    const subjectMatches = await ctx.db
-      .query("relationships")
-      .withIndex("by_tenant_subject_relation_object", (q: any) =>
-        q
-          .eq("tenantId", tenantId)
-          .eq("subjectType", entity.type)
-          .eq("subjectId", entity.id),
-      )
-      .collect();
-
-    for (const match of subjectMatches) {
-      const res = await removeRelationInternal(ctx, {
-        tenantId,
-        subject: { type: match.subjectType, id: match.subjectId },
-        relation: match.relation,
-        object: { type: match.objectType, id: match.objectId },
-        actorId,
-        graphConfig,
-        enableAuditLog,
-        asyncWrites,
-      });
-      if (res) {
-        relationshipsRemoved++;
-        effectiveRelationshipsRemoved += res.effectiveRelationshipsRemoved;
-      }
-    }
-
-    // 2. Where entity is object
-    const objectMatches = await ctx.db
-      .query("relationships")
-      .withIndex("by_tenant_object", (q: any) =>
-        q
-          .eq("tenantId", tenantId)
-          .eq("objectType", entity.type)
-          .eq("objectId", entity.id),
-      )
-      .collect();
-
-    for (const match of objectMatches) {
-      const res = await removeRelationInternal(ctx, {
-        tenantId,
-        subject: { type: match.subjectType, id: match.subjectId },
-        relation: match.relation,
-        object: { type: match.objectType, id: match.objectId },
-        actorId,
-        graphConfig,
-        enableAuditLog,
-        asyncWrites,
-      });
-      if (res) {
-        relationshipsRemoved++;
-        effectiveRelationshipsRemoved += res.effectiveRelationshipsRemoved;
-      }
-    }
-
-    return {
-      relationshipsRemoved,
-      effectiveRelationshipsRemoved,
-    };
-  },
-});
-
-export const updateRelation = mutation({
-  args: {
-    tenantId: v.optional(v.string()),
-    subject: subjectValidator,
-    oldRelation: v.string(),
-    newRelation: v.string(),
-    object: objectValidator,
-    condition: conditionValidator,
-    properties: propertiesValidator,
-    createdBy: v.optional(v.string()),
-    graphConfig: v.any(), // GraphConfig
-    enableAuditLog: v.optional(v.boolean()),
-    asyncWrites: v.optional(v.boolean()),
-  },
-  handler: async (ctx: any, args: any) => {
-    const {
-      tenantId,
-      subject,
-      oldRelation,
-      newRelation,
-      object,
-      condition,
-      properties,
-      createdBy,
-      enableAuditLog,
-      graphConfig,
-      asyncWrites,
-    } = args;
-
-    const existingOldRel = await ctx.db
-      .query("relationships")
-      .withIndex("by_tenant_subject_relation_object", (q: any) =>
-        q
-          .eq("tenantId", tenantId)
-          .eq("subjectType", subject.type)
-          .eq("subjectId", subject.id)
-          .eq("relation", oldRelation)
-          .eq("objectType", object.type)
-          .eq("objectId", object.id),
-      )
-      .unique();
-
-    let onComplete: any = undefined;
-
-    if (existingOldRel) {
-      const removedData = await deleteBaseRelationAndLog(ctx, {
-        tenantId,
-        subject,
-        relation: oldRelation,
-        object,
-        actorId: createdBy,
-        enableAuditLog,
-        existingRel: existingOldRel,
-        graphConfig,
-      });
-
-      onComplete = {
-        action: "enqueueRemoveChunk",
-        args: removedData,
-      };
-    }
-
-    return addRelationInternal(ctx, {
-      tenantId,
-      subject,
-      relation: newRelation,
-      object,
-      condition,
-      properties,
-      createdBy,
-      enableAuditLog,
-      graphConfig,
-      asyncWrites,
-      onComplete,
-    });
-  },
-});
-
-export const setRelation = mutation({
-  args: {
-    tenantId: v.optional(v.string()),
-    subject: subjectValidator,
-    relation: v.string(),
-    object: objectValidator,
-    objectRelations: v.array(v.string()),
-    condition: conditionValidator,
-    properties: propertiesValidator,
-    createdBy: v.optional(v.string()),
-    graphConfig: v.any(), // GraphConfig
-    enableAuditLog: v.optional(v.boolean()),
-    asyncWrites: v.optional(v.boolean()),
-  },
-  handler: async (ctx: any, args: any) => {
-    const {
-      tenantId,
-      subject,
-      relation,
-      object,
-      condition,
-      properties,
-      createdBy,
-      enableAuditLog,
-      graphConfig,
-      asyncWrites,
-    } = args;
-
-    // Query each known relation for this object type using the fully-qualified index.
-    // The client passes objectRelations (all relation names for this object type),
-    // so we can issue precise index lookups instead of a broad subject-only scan.
-    const { objectRelations } = args;
-
-    const queries = objectRelations
-      .filter((r: string) => r !== relation)
-      .map((candidateRel: string) =>
-        ctx.db
-          .query("relationships")
-          .withIndex("by_tenant_subject_relation_object", (q: any) =>
-            q
-              .eq("tenantId", tenantId)
-              .eq("subjectType", subject.type)
-              .eq("subjectId", subject.id)
-              .eq("relation", candidateRel)
-              .eq("objectType", object.type)
-              .eq("objectId", object.id),
-          )
-          .unique(),
-      );
-
-    const results = await Promise.all(queries);
-    const relationsToDrop = results.filter((r: any) => r !== null);
-
-    const onCompleteArgs = [];
-    for (const r of relationsToDrop) {
-      const removedData = await deleteBaseRelationAndLog(ctx, {
-        tenantId,
-        subject,
-        relation: r.relation,
-        object,
-        actorId: createdBy,
-        enableAuditLog,
-        existingRel: r,
-        graphConfig,
-      });
-      onCompleteArgs.push(removedData);
-    }
-
-    const onComplete =
-      onCompleteArgs.length > 0
-        ? {
-            action: "enqueueRemoveChunkBatch",
-            args: onCompleteArgs,
-          }
-        : undefined;
-
-    return addRelationInternal(ctx, {
-      tenantId,
-      subject,
-      relation,
-      object,
-      condition,
-      properties,
-      createdBy,
-      enableAuditLog,
-      graphConfig,
-      asyncWrites,
-      onComplete,
-    });
   },
 });

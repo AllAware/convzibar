@@ -49,7 +49,7 @@ async function assertDbState(
   expect(effectiveRelationships.length).toBe(expectedEffectiveRelationships);
 }
 
-const benchSchema = createZbarSchema<any>()
+const benchSchema = createZbarSchema()
   .entity("user")
   .entity("folder", (e) =>
     e
@@ -79,7 +79,6 @@ describe("Benchmarks & High Contention Stress Tests", () => {
 
     const zbar = new Zbar(api, {
       schema: benchSchema,
-      tenantId: "bench1",
       asyncWrites: true,
     });
 
@@ -151,7 +150,6 @@ describe("Benchmarks & High Contention Stress Tests", () => {
 
     const zbar = new Zbar(api, {
       schema: benchSchema,
-      tenantId: "bench2",
       asyncWrites: true,
       maxWriteDepth: 20, // ensure we can traverse deep enough
     });

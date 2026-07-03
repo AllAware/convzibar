@@ -1,12 +1,12 @@
 {
   "name": "convzibar",
-  "description": "A highly-optimized ReBAC and ABAC authorization engine tailored for Convex, inspired by Google Zanzibar.",
+  "description": "A highly-optimized ReBAC authorization engine tailored for Convex, inspired by Google Zanzibar.",
   "repository": "github:AllAware/convzibar",
   "homepage": "https://github.com/AllAware/convzibar#readme",
   "bugs": {
     "url": "https://github.com/AllAware/convzibar/issues"
   },
-  "version": "1.0.0",
+  "version": "2.0.0",
   "license": "Apache-2.0",
   "keywords": [
     "convex",

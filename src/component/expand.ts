@@ -1,13 +1,12 @@
 /**
  * Shared rule-application core for the BFS that materialises
- * `effectiveRelationships`. Both the add-path BFS (`processAddChunk` in
- * `mutations.ts`) and the rebuild BFS (`expandTraversalRules` in
- * `unsafe.ts`) call this helper to apply every traversal rule + reverse
- * edge to a single "current" queue item.
+ * `effectiveRelationships`.
  *
- * The caller still owns the outer loop, the effective-relationship
- * upsert, and the `seen`/dedup strategy (which differs between add and
- * rebuild). This function only produces the new queue pushes.
+ * `collectRuleDerivations` is the single place that knows how a traversal rule
+ * matches a "current" edge and which effective rows it joins against. Both the
+ * add-path BFS (`applyTraversalRulesToItem`) and the remove-path cascade
+ * (`processRemoveChunkInternal` in `mutations.ts`) call it, so the two
+ * directions can never drift in how they walk the rule set.
  */
 
 import { buildScopeKey, decodeScopeKey } from "../shared/keys";
@@ -17,72 +16,135 @@ export interface QueueItem {
   subject: { type: string; id: string };
   relation: string;
   object: { type: string; id: string };
-  path: {
-    baseIds: string[];
-    conditions?: Array<{ condition: string; conditionContext?: unknown }>;
-  };
+  path: { baseIds: string[] };
   depth: number;
   skipReverse?: boolean;
 }
 
+/** One effective-row match produced by a traversal rule against a current edge. */
+export interface RuleDerivation {
+  rule: TraversalRule;
+  /** The matched `effectiveRelationships` row (carries `paths`). */
+  match: any;
+  derivedSubject: { type: string; id: string };
+  derivedObject: { type: string; id: string };
+}
+
 /**
- * For a single `current` item, scan every traversal rule + reverse-edge
- * declaration and push the derived items onto `queue`. The depth / cycle
- * / reverse-edge invariants mirror what the original inline loops enforced.
- *
- * `combineConditionsLeading` controls the order conditions are stitched
- * together when a rule matches as the *source* side — which determines
- * whether `matchPath.conditions` come before or after `current.path.conditions`.
- * The add-path and rebuild-path always agree, so this isn't configurable.
+ * For a single `current` edge, find every traversal rule it triggers and the
+ * effective rows each rule joins against, yielding the derived
+ * `(subject, derivedRelation, object)` endpoints. Order-independent of what the
+ * caller does with the result (combine paths on add, propagate token deletion
+ * on remove).
+ */
+export async function collectRuleDerivations(
+  ctx: any,
+  current: { subject: { type: string; id: string }; relation: string; object: { type: string; id: string } },
+  graphConfig: GraphConfig,
+): Promise<RuleDerivation[]> {
+  const sKey = buildScopeKey(current.subject.type, current.subject.id);
+  const oKey = buildScopeKey(current.object.type, current.object.id);
+  const out: RuleDerivation[] = [];
+
+  for (const rule of graphConfig.traversalRules) {
+    // Source-side: `current` is the `source` hop. Find rows pointing INTO
+    // current.subject via the rule's target relation; each is a predecessor.
+    if (
+      current.object.type === rule.sourceObjectType &&
+      current.relation === rule.sourceRelation
+    ) {
+      const matches = await ctx.db
+        .query("effectiveRelationships")
+        .withIndex("by_object_relation_subject", (q: any) =>
+          q.eq("objectKey", sKey).eq("relation", rule.targetRelation),
+        )
+        .collect();
+      for (const match of matches) {
+        const [t, id] = decodeScopeKey(match.subjectKey);
+        out.push({
+          rule,
+          match,
+          derivedSubject: { type: t, id },
+          derivedObject: current.object,
+        });
+      }
+    }
+
+    // Target-side: `current` is the `target` hop. Find rows whose object is
+    // current.object via the rule's source relation; each completes a two-hop.
+    if (current.relation === rule.targetRelation) {
+      const matches = await ctx.db
+        .query("effectiveRelationships")
+        .withIndex("by_subject_relation_object", (q: any) =>
+          q.eq("subjectKey", oKey).eq("relation", rule.sourceRelation),
+        )
+        .collect();
+      for (const match of matches) {
+        const [matchObjectType, matchObjectId] = decodeScopeKey(match.objectKey);
+        if (matchObjectType !== rule.sourceObjectType) continue;
+        out.push({
+          rule,
+          match,
+          derivedSubject: current.subject,
+          derivedObject: { type: matchObjectType, id: matchObjectId },
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Add-path: for a single `current` queue item, apply every traversal rule +
+ * reverse-edge declaration and push the derived items onto `queue`.
  */
 export async function applyTraversalRulesToItem(
   ctx: any,
   args: {
-    tenantId: string | undefined;
     current: QueueItem;
     queue: QueueItem[];
     graphConfig: GraphConfig;
   },
 ): Promise<void> {
-  const { tenantId, current, queue, graphConfig } = args;
+  const { current, queue, graphConfig } = args;
   const maxWriteDepth = graphConfig.maxWriteDepth ?? 10;
-  const sKey = buildScopeKey(current.subject.type, current.subject.id);
-  const oKey = buildScopeKey(current.object.type, current.object.id);
 
-  for (const rule of graphConfig.traversalRules) {
-    // Source-side match: current is the `source` of a rule, look up its
-    // existing `target` rows as subjects pointing into us.
-    if (
-      current.object.type === rule.sourceObjectType &&
-      current.relation === rule.sourceRelation
-    ) {
-      await applySourceSideMatch(ctx, {
-        tenantId,
-        current,
-        rule,
-        sKey,
-        queue,
-        maxWriteDepth,
-      });
-    }
+  for (const { rule, match, derivedSubject, derivedObject } of await collectRuleDerivations(
+    ctx,
+    current,
+    graphConfig,
+  )) {
+    for (const matchPath of match.paths) {
+      // Cycle guard: a path may not reuse a base edge it already traversed.
+      const hasCycle = current.path.baseIds.some((t: string) =>
+        matchPath.baseIds.includes(t),
+      );
+      if (hasCycle) continue;
+      if (current.depth >= maxWriteDepth) continue;
 
-    // Target-side match: current is the `target` of a rule; look up
-    // `source` rows whose object points at our object, deriving a two-hop.
-    if (current.relation === rule.targetRelation) {
-      await applyTargetSideMatch(ctx, {
-        tenantId,
-        current,
-        rule,
-        oKey,
-        queue,
-        maxWriteDepth,
+      queue.push({
+        subject: derivedSubject,
+        relation: rule.derivedRelation,
+        object: derivedObject,
+        path: combinePath(current.path, matchPath),
+        depth: current.depth + 1,
       });
     }
   }
 
-  // Effective reverse edges: mirror a declared `{ reverse: … }` across the
-  // materialised side. `skipReverse` is set by producers that already
-  // handled the reverse side (e.g. initial-add pairs) to prevent loops.
+  // Effective reverse edges. A declared `{ reverse: … }` must also be mirrored
+  // on the materialised side, but how depends on whether this edge has a base
+  // row:
+  //   • Explicit edges (depth 1) are flagged `skipReverse: true` by the caller
+  //     because their reverse is a REAL base row that is queued separately — it
+  //     materialises the reverse effective edge itself AND expands its own
+  //     traversals. Synthesising it here too would double-materialise it.
+  //   • Derived edges (depth ≥ 2) have no base row, so we synthesise the
+  //     reverse effective edge here, flagging the synthesised item `skipReverse`
+  //     so reverse-of-reverse can't loop.
+  // (This is why the flag can't simply be dropped — the two cases genuinely
+  // differ; the base row is the source of truth for the explicit case.)
   if (graphConfig.reverseEdges && !current.skipReverse) {
     const reverseRel =
       graphConfig.reverseEdges?.[current.object.type]?.[current.relation]?.[
@@ -101,154 +163,12 @@ export async function applyTraversalRulesToItem(
   }
 }
 
-async function applySourceSideMatch(
-  ctx: any,
-  args: {
-    tenantId: string | undefined;
-    current: QueueItem;
-    rule: TraversalRule;
-    sKey: string;
-    queue: QueueItem[];
-    maxWriteDepth: number;
-  },
-): Promise<void> {
-  const { tenantId, current, rule, sKey, queue, maxWriteDepth } = args;
-  const matches = await ctx.db
-    .query("effectiveRelationships")
-    .withIndex("by_tenant_object_relation_subject", (q: any) =>
-      q
-        .eq("tenantId", tenantId)
-        .eq("objectKey", sKey)
-        .eq("relation", rule.targetRelation),
-    )
-    .collect();
-
-  for (const match of matches) {
-    const [matchSubjectType, matchSubjectId] = decodeScopeKey(
-      match.subjectKey,
-    );
-    const derivedSubject = { type: matchSubjectType, id: matchSubjectId };
-    const derivedObject = current.object;
-
-    for (const matchPath of match.paths) {
-      const hasCycle = current.path.baseIds.some((t: string) =>
-        matchPath.baseIds.includes(t),
-      );
-      if (hasCycle) continue;
-      if (current.depth >= maxWriteDepth) continue;
-
-      queue.push({
-        subject: derivedSubject,
-        relation: rule.derivedRelation,
-        object: derivedObject,
-        path: combinePath(current.path, matchPath, rule, "matchFirst"),
-        depth: current.depth + 1,
-      });
-    }
-  }
-}
-
-async function applyTargetSideMatch(
-  ctx: any,
-  args: {
-    tenantId: string | undefined;
-    current: QueueItem;
-    rule: TraversalRule;
-    oKey: string;
-    queue: QueueItem[];
-    maxWriteDepth: number;
-  },
-): Promise<void> {
-  const { tenantId, current, rule, oKey, queue, maxWriteDepth } = args;
-  const matches = await ctx.db
-    .query("effectiveRelationships")
-    .withIndex("by_tenant_subject_relation_object", (q: any) =>
-      q
-        .eq("tenantId", tenantId)
-        .eq("subjectKey", oKey)
-        .eq("relation", rule.sourceRelation),
-    )
-    .collect();
-
-  for (const match of matches) {
-    const [matchObjectType, matchObjectId] = decodeScopeKey(match.objectKey);
-    if (matchObjectType !== rule.sourceObjectType) continue;
-
-    const derivedSubject = current.subject;
-    const derivedObject = { type: matchObjectType, id: matchObjectId };
-
-    for (const matchPath of match.paths) {
-      const hasCycle = current.path.baseIds.some((t: string) =>
-        matchPath.baseIds.includes(t),
-      );
-      if (hasCycle) continue;
-      if (current.depth >= maxWriteDepth) continue;
-
-      queue.push({
-        subject: derivedSubject,
-        relation: rule.derivedRelation,
-        object: derivedObject,
-        path: combinePath(current.path, matchPath, rule, "currentFirst"),
-        depth: current.depth + 1,
-      });
-    }
-  }
-}
-
-/**
- * Join `current.path` with `matchPath` conditions in the order appropriate
- * to which side of the rule matched, append any schema-defined rule
- * conditions, and produce the canonicalised new path (deduped + sorted
- * baseIds). Returns `undefined` for conditions when the combined list is
- * empty, to match the pre-refactor wire format.
- */
+/** Union two paths' baseIds into a canonical (deduped, sorted) path. */
 function combinePath(
   currentPath: QueueItem["path"],
-  matchPath: { baseIds: string[]; conditions?: Array<{ condition: string; conditionContext?: unknown }> },
-  rule: TraversalRule,
-  order: "matchFirst" | "currentFirst",
+  matchPath: { baseIds: string[] },
 ): QueueItem["path"] {
-  const schemaCondition = rule.conditions
-    ? rule.conditions.map((c: string) => ({ condition: c }))
-    : [];
-  const rawConditions =
-    order === "matchFirst"
-      ? [
-          ...(matchPath.conditions || []),
-          ...(currentPath.conditions || []),
-          ...schemaCondition,
-        ]
-      : [
-          ...(currentPath.conditions || []),
-          ...(matchPath.conditions || []),
-          ...schemaCondition,
-        ];
-
-  // De-duplicate conditions by (name + static context), preserving first-seen
-  // order. A derived path can legitimately collect the same condition from
-  // more than one segment (e.g. the same condition is baked on both the
-  // matched path and the rule). Evaluating it twice re-runs context-returning
-  // ("middleware") conditions against already-augmented data, which can flip
-  // the final allow/deny — so the runtime BFS must dedupe just as the schema
-  // compiler already does for rule-level conditions.
-  const seenConditions = new Set<string>();
-  const combinedConditions = rawConditions.filter(
-    (c: { condition: string; conditionContext?: unknown }) => {
-      const key = JSON.stringify({
-        condition: c.condition,
-        conditionContext: c.conditionContext ?? null,
-      });
-      if (seenConditions.has(key)) return false;
-      seenConditions.add(key);
-      return true;
-    },
-  );
-
   return {
-    baseIds: [
-      ...new Set([...currentPath.baseIds, ...matchPath.baseIds]),
-    ].sort(),
-    conditions:
-      combinedConditions.length > 0 ? combinedConditions : undefined,
+    baseIds: [...new Set([...currentPath.baseIds, ...matchPath.baseIds])].sort(),
   };
 }

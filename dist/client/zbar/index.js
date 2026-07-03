@@ -1,3 +1,4 @@
+import { CONFIG_UNREGISTERED_MARKER } from "../../component/config";
 import { parseSchemaToGraphConfig } from "../../component/helpers";
 import { PermissionError } from "../types";
 import { ListDirectQueryBuilder } from "../list-direct/builder";
@@ -5,11 +6,37 @@ import { ListQueryBuilder } from "../list/builder";
 import { resolvePermissionRelations, resolveRelationInheritance, } from "./resolvers";
 import { evaluateManyPermissions, planRelation } from "./traversal";
 import { validateProperties, validateRelationParameter, } from "./validation";
+// ---------------------------------------------------------------------------
+// Stable content hash of the compiled config — lets mutations ship a short
+// hash instead of the full rule set (the component stores config by hash).
+// ---------------------------------------------------------------------------
+function stableStringify(v) {
+    if (v === null || typeof v !== "object")
+        return JSON.stringify(v);
+    if (Array.isArray(v))
+        return "[" + v.map(stableStringify).join(",") + "]";
+    const keys = Object.keys(v).sort();
+    return "{" + keys.map((k) => JSON.stringify(k) + ":" + stableStringify(v[k])).join(",") + "}";
+}
+function fnv1a(s, seed) {
+    let h = seed >>> 0;
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16).padStart(8, "0");
+}
+function hashGraphConfig(config) {
+    const s = stableStringify(config);
+    // Two FNV-1a passes with different offset bases → 64-bit-ish identity.
+    return "cfg_" + fnv1a(s, 0x811c9dc5) + fnv1a(s, 0x01000193);
+}
+/** Whether an error from a component mutation is the unregistered-config throw. */
+function isConfigUnregisteredError(error) {
+    return (error instanceof Error && error.message.includes(CONFIG_UNREGISTERED_MARKER));
+}
 /**
  * Create a new Zbar client instance.
- * @param component The imported convzibar component
- * @param options Configuration options
- * @returns Zbar client
  */
 export function createZbar(component, options) {
     return new Zbar(component, options);
@@ -17,12 +44,9 @@ export function createZbar(component, options) {
 export class Zbar {
     component;
     options;
-    /**
-     * Internal mutable state shared with helper modules and query builders.
-     * Held in a single bundle so helpers can be plain functions instead of
-     * methods reaching into a `this` reference.
-     */
     _internal;
+    /** Whether this instance has registered its config with the component yet. */
+    _configRegistered = false;
     constructor(component, options) {
         this.component = component;
         this.options = options;
@@ -30,73 +54,52 @@ export class Zbar {
         if (options.maxWriteDepth !== undefined) {
             graphConfig.maxWriteDepth = options.maxWriteDepth;
         }
-        this.options.enableAuditLog = options.enableAuditLog ?? true;
         this.options.asyncWrites = options.asyncWrites ?? true;
         this._internal = {
             component,
             schema: options.schema,
-            tenantId: options.tenantId,
-            defaultActorId: options.defaultActorId,
-            enableAuditLog: this.options.enableAuditLog,
             asyncWrites: this.options.asyncWrites,
             graphConfig,
+            configHash: hashGraphConfig(graphConfig),
             readTimeChainDepth: options.readTimeChainDepth ?? 3,
             permissionRelationsCache: new Map(),
         };
     }
     /**
-     * The compiled graph configuration. Exposed for advanced use cases (and a
-     * handful of tests) that need to inspect or tweak runtime parameters such
-     * as `maxChunkSize` or `mockWorkpool`. Mutations are reflected immediately
-     * because the Zbar instance and its helpers share the same reference.
+     * The compiled graph configuration. Exposed for advanced use cases and a
+     * handful of tests that inspect or tweak runtime parameters such as
+     * `maxChunkSize` or `mockWorkpool`.
      */
     get graphConfig() {
         return this._internal.graphConfig;
     }
-    withTenant(tenantId) {
-        return new Zbar(this.component, {
-            ...this.options,
-            tenantId,
-        });
+    /** Stable content hash of the compiled config (mutations ship this). */
+    get configHash() {
+        return this._internal.configHash;
     }
     /**
      * Determine if a subject has a specific relationship with an object.
-     *
-     * Plan-driven: compiles a `Union(ValidatedMaterialised, RT)` plan and
-     * evaluates its `check`. One path for both materialised + RT answers —
-     * no hand-rolled "try materialised, fall back to RT" scaffolding.
      */
-    async hasRelationship(ctx, subject, relation, object, requestContext) {
+    async hasRelationship(ctx, subject, relation, object) {
         const z = this._internal;
         const targets = resolveRelationInheritance(z, object.type, relation);
         if (targets.length === 0)
             return false;
-        const plan = planRelation(z, object.type, targets, relation, requestContext);
-        return plan.check(ctx, subject, object);
+        return planRelation(z, object.type, targets).check(ctx, subject, object);
     }
-    async can(ctx, subject, permission, object, requestContext) {
+    async can(ctx, subject, permission, object) {
         const z = this._internal;
         const targets = resolvePermissionRelations(z, object.type, permission);
         if (targets.length === 0)
             return false;
-        const plan = planRelation(z, object.type, targets, permission, requestContext);
-        return plan.check(ctx, subject, object);
+        return planRelation(z, object.type, targets).check(ctx, subject, object);
     }
     /**
-     * Return every permission the subject currently holds on the object.
-     *
-     * Delegates to `evaluateManyPermissions`, the minimum-work multi-
-     * permission evaluator: a single materialised query covers every
-     * target relation on the schema, and each permission's RT fallback is
-     * a parallel RT-branch plan on only the relations the materialised
-     * branch didn't resolve. Declaration order is preserved.
-     *
-     * ```ts
-     * const perms = await zbar.getPermissions(ctx, user, device);
-     * // perms: Array<"view" | "edit" | "delete" | ...>
-     * ```
+     * Return every permission the subject currently holds on the object,
+     * resolved in one materialised query plus at most one shared RT branch per
+     * unique derived relation. Declaration order is preserved.
      */
-    async getPermissions(ctx, subject, object, requestContext) {
+    async getPermissions(ctx, subject, object) {
         const z = this._internal;
         const permissions = Object.keys(z.schema.entities[object.type]?.permissions || {});
         if (permissions.length === 0)
@@ -105,132 +108,66 @@ export class Zbar {
             permission: permission,
             targets: resolvePermissionRelations(z, object.type, permission),
         }));
-        const granted = await evaluateManyPermissions(z, ctx, subject, object, perms, requestContext);
-        // `evaluateManyPermissions` already preserves input order — just narrow
-        // back to the typed literal union so callers get autocomplete.
+        const granted = await evaluateManyPermissions(z, ctx, subject, object, perms);
         return granted;
     }
     /**
-     * Asserts that a subject has a specific permission on an object, throwing a PermissionError if denied.
+     * Asserts that a subject has a permission on an object, throwing a
+     * PermissionError if denied.
      */
-    async require(ctx, subject, permission, object, requestContext) {
-        const allowed = await this.can(ctx, subject, permission, object, requestContext);
-        if (!allowed) {
+    async require(ctx, subject, permission, object) {
+        if (!(await this.can(ctx, subject, permission, object))) {
             throw new PermissionError(`Permission denied: ${permission} on ${object.type}:${object.id}`);
         }
     }
-    /**
-     * Fluent query builder for listing objects or subjects.
-     *
-     * **Listing objects** (pass object type as string, subject as `{type, id}`):
-     * ```ts
-     * const devices = await zbar.list()
-     *   .object("device")
-     *   .permission("view")
-     *   .subject({ type: "user", id: userId })
-     *   .collect(ctx);
-     * // devices: Array<{ objectId: string }>
-     * ```
-     *
-     * **Listing subjects** (pass object as `{type, id}`, subject type as string):
-     * ```ts
-     * const users = await zbar.list()
-     *   .object({ type: "device", id: deviceId })
-     *   .relation("admin")
-     *   .subject("user")
-     *   .collect(ctx);
-     * // users: Array<{ subjectId: string }>
-     * ```
-     *
-     * **With intermediary filtering** (`.via()` is optional):
-     * ```ts
-     * const devices = await zbar.list()
-     *   .object("device")
-     *   .relation("admin")
-     *   .subject({ type: "user", id: userId })
-     *   .via({ type: "system", id: sysId }, { type: "group", id: groupId })
-     *   .collect(ctx, requestContext);
-     * ```
-     */
+    /** Fluent query builder for listing objects or subjects. */
     list() {
         return new ListQueryBuilder(this._internal);
     }
-    /**
-     * Fluent query builder for listing **direct** (base) relationships.
-     *
-     * Unlike `.list()` which queries the materialised effective-relationship
-     * graph, `.listDirect()` reads the raw `relationships` table — only
-     * explicitly-written edges, no transitive or inherited expansions.
-     *
-     * Provide `.object()`, `.subject()`, or both to scope the query.
-     * Optionally add `.relation()` or `.permission()` to filter by
-     * relation name (`.permission()` expands to all contributing relations
-     * including inherited ones).
-     *
-     * ```ts
-     * // All direct relationships where org1 is the object
-     * const rels = await zbar.listDirect()
-     *   .object({ type: "org", id: "org1" })
-     *   .collect(ctx);
-     *
-     * // Direct relationships between a specific subject and object
-     * const rels = await zbar.listDirect()
-     *   .object({ type: "org", id: "org1" })
-     *   .subject({ type: "user", id: "u1" })
-     *   .collect(ctx);
-     *
-     * // Filter by relation (with inheritance: owner → admin → viewer)
-     * const viewers = await zbar.listDirect()
-     *   .object({ type: "org", id: "org1" })
-     *   .relation("viewer")
-     *   .collect(ctx);
-     *
-     * // Filter by permission (expands to all contributing relations)
-     * const editors = await zbar.listDirect()
-     *   .object({ type: "org", id: "org1" })
-     *   .permission("edit_settings")
-     *   .collect(ctx);
-     * ```
-     */
+    /** Fluent query builder for listing **direct** (base) relationships. */
     listDirect() {
         return new ListDirectQueryBuilder(this._internal);
     }
-    /** Shared fields carried on every mutation payload. */
-    _commonWriteArgs(actorOverride) {
+    /**
+     * Run a component write mutation, shipping the full compiled config only
+     * until the component has registered it (once per instance); thereafter
+     * only the hash travels.
+     *
+     * `_configRegistered` is client-side memory of server-side state, so it can
+     * go stale: the registering transaction may roll back after the flag flips
+     * (parent mutation throws, OCC retry), or component data may be wiped or
+     * restored while a warm isolate still holds this instance. When the
+     * component reports the hash unknown, resend the full config once instead
+     * of failing every subsequent write from this instance.
+     */
+    async _runWrite(ctx, mutationRef, payload) {
         const z = this._internal;
-        return {
-            tenantId: z.tenantId,
-            createdBy: actorOverride ?? z.defaultActorId,
-            graphConfig: z.graphConfig,
-            enableAuditLog: z.enableAuditLog,
+        const attempt = (withConfig) => ctx.runMutation(mutationRef, {
+            ...payload,
+            configHash: z.configHash,
+            graphConfig: withConfig ? z.graphConfig : undefined,
             asyncWrites: z.asyncWrites,
-        };
-    }
-    /** Normalise the options object into a ready-to-ship write payload slice. */
-    _optionsToArgs(options) {
-        return {
-            condition: options?.condition
-                ? {
-                    condition: options.condition,
-                    conditionContext: options.conditionContext,
-                }
-                : undefined,
-            properties: options?.properties,
-            ...this._commonWriteArgs(options?.createdBy),
-        };
+        });
+        let result;
+        if (!this._configRegistered) {
+            result = await attempt(true);
+        }
+        else {
+            try {
+                result = await attempt(false);
+            }
+            catch (error) {
+                if (!isConfigUnregisteredError(error))
+                    throw error;
+                result = await attempt(true);
+            }
+        }
+        this._configRegistered = true;
+        return result;
     }
     /**
-     * Add a relationship between a subject and an object.
-     *
-     * If the relation has properties defined in the schema, pass them
-     * via `options.properties`. Properties are validated at write-time
-     * and stored on the direct edge.
-     *
-     * ```ts
-     * await zbar.addRelation(ctx, user, "editor", project, {
-     *   properties: { weight: 0.8, note: "Lead editor" },
-     * });
-     * ```
+     * Add a relationship between a subject and an object. If the relation has
+     * schema-defined properties, pass them via `options.properties`.
      */
     async addRelation(ctx, subject, relation, object, options) {
         const z = this._internal;
@@ -238,15 +175,16 @@ export class Zbar {
         if (options?.properties !== undefined) {
             validateProperties(z, object.type, relation, options.properties);
         }
-        return ctx.runMutation(this.component.mutations.addRelation, {
+        return this._runWrite(ctx, this.component.mutations.addRelation, {
             subject,
             relation,
             object,
-            ...this._optionsToArgs(options),
+            properties: options?.properties,
         });
     }
     /**
-     * Update a relationship between a subject and an object to a new relation, executed atomically via Add-Before-Remove.
+     * Update a relationship to a new relation, executed atomically via
+     * Add-Before-Remove.
      */
     async updateRelation(ctx, subject, oldRelation, newRelation, object, options) {
         const z = this._internal;
@@ -255,16 +193,17 @@ export class Zbar {
         if (options?.properties !== undefined) {
             validateProperties(z, object.type, newRelation, options.properties);
         }
-        return ctx.runMutation(this.component.mutations.updateRelation, {
+        return this._runWrite(ctx, this.component.mutations.updateRelation, {
             subject,
             oldRelation,
             newRelation,
             object,
-            ...this._optionsToArgs(options),
+            properties: options?.properties,
         });
     }
     /**
-     * Add a relationship between a subject and an object, clearing any existing relationships between them atomically.
+     * Add a relationship, clearing any existing relationships between the
+     * subject and object atomically.
      */
     async setRelation(ctx, subject, relation, object, options) {
         const z = this._internal;
@@ -273,45 +212,28 @@ export class Zbar {
             validateProperties(z, object.type, relation, options.properties);
         }
         const objectRelations = Object.keys(z.schema.entities[object.type]?.relations || {});
-        return ctx.runMutation(this.component.mutations.setRelation, {
+        return this._runWrite(ctx, this.component.mutations.setRelation, {
             subject,
             relation,
             object,
             objectRelations,
-            ...this._optionsToArgs(options),
+            properties: options?.properties,
         });
     }
-    /**
-     * Remove a relationship between a subject and an object.
-     */
-    async removeRelation(ctx, subject, relation, object, actorId) {
+    /** Remove a relationship between a subject and an object. */
+    async removeRelation(ctx, subject, relation, object) {
         const z = this._internal;
         validateRelationParameter(z, subject, relation, object);
-        const { tenantId, graphConfig, enableAuditLog, asyncWrites } = this._commonWriteArgs();
-        return ctx.runMutation(this.component.mutations.removeRelation, {
-            tenantId,
+        return this._runWrite(ctx, this.component.mutations.removeRelation, {
             subject,
             relation,
             object,
-            actorId: actorId ?? z.defaultActorId,
-            graphConfig,
-            enableAuditLog,
-            asyncWrites,
         });
     }
-    /**
-     * Delete an entity and all its associated relationships (both as subject and object).
-     */
-    async deleteEntity(ctx, entity, actorId) {
-        const z = this._internal;
-        const { tenantId, graphConfig, enableAuditLog, asyncWrites } = this._commonWriteArgs();
-        return ctx.runMutation(this.component.mutations.deleteEntity, {
-            tenantId,
+    /** Delete an entity and all its associated relationships. */
+    async deleteEntity(ctx, entity) {
+        return this._runWrite(ctx, this.component.mutations.deleteEntity, {
             entity,
-            actorId: actorId ?? z.defaultActorId,
-            graphConfig,
-            enableAuditLog,
-            asyncWrites,
         });
     }
 }

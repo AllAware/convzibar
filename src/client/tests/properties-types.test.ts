@@ -52,9 +52,8 @@ describe("Edge Properties — Type Inference", () => {
       )
       .build();
 
-    const zbar = new Zbar({} as any, {
+    const _zbar = new Zbar({} as any, {
       schema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -62,33 +61,33 @@ describe("Edge Properties — Type Inference", () => {
     // because we pass a dummy component. We're testing that the
     // TypeScript compiler accepts the right property shapes.
 
-    // @ts-expect-error — "owner" has no properties, so `properties` should not be allowed
-    void ((z: typeof zbar) =>
+    void ((z: typeof _zbar) =>
       z.addRelation({} as any, { type: "user", id: "u1" }, "owner", { type: "org", id: "o1" }, {
+        // @ts-expect-error — "owner" has no properties, so `properties` should not be allowed
         properties: { anything: true },
       }));
 
     // Valid: all required fields present
-    void ((z: typeof zbar) =>
+    void ((z: typeof _zbar) =>
       z.addRelation({} as any, { type: "user", id: "u1" }, "admin", { type: "org", id: "o1" }, {
         properties: { title: "CTO", level: 1 },
       }));
 
     // Valid: required + optional fields
-    void ((z: typeof zbar) =>
+    void ((z: typeof _zbar) =>
       z.addRelation({} as any, { type: "user", id: "u1" }, "admin", { type: "org", id: "o1" }, {
         properties: { title: "CTO", level: 1, note: "founder" },
       }));
 
-    // @ts-expect-error — missing required field "level"
-    void ((z: typeof zbar) =>
+    void ((z: typeof _zbar) =>
       z.addRelation({} as any, { type: "user", id: "u1" }, "admin", { type: "org", id: "o1" }, {
+        // @ts-expect-error — missing required field "level"
         properties: { title: "CTO" },
       }));
 
-    // @ts-expect-error — wrong type for "level"
-    void ((z: typeof zbar) =>
+    void ((z: typeof _zbar) =>
       z.addRelation({} as any, { type: "user", id: "u1" }, "admin", { type: "org", id: "o1" }, {
+        // @ts-expect-error — wrong type for "level"
         properties: { title: "CTO", level: "high" },
       }));
   });
@@ -104,17 +103,16 @@ describe("Edge Properties — Type Inference", () => {
       )
       .build();
 
-    const zbar = new Zbar({} as any, {
+    const _zbar = new Zbar({} as any, {
       schema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
     // Should compile fine without properties
-    void ((z: typeof zbar) =>
+    void ((z: typeof _zbar) =>
       z.addRelation({} as any, { type: "user", id: "u1" }, "owner", { type: "org", id: "o1" }));
 
-    void ((z: typeof zbar) =>
+    void ((z: typeof _zbar) =>
       z.addRelation({} as any, { type: "user", id: "u1" }, "admin", { type: "org", id: "o1" }));
   });
 });

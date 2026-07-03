@@ -1,30 +1,7 @@
-/* eslint-disable @typescript-eslint/no-empty-object-type */
-import type {
-  GenericActionCtx,
-  GenericDataModel,
-  GenericMutationCtx,
-  GenericQueryCtx,
-} from "convex/server";
 import type {
   ObjectType as ConvexObjectType,
   PropertyValidators,
 } from "convex/values";
-
-// ============================================================================
-// Policy / condition types
-// ============================================================================
-
-export interface PolicyContext<Data = any> {
-  subject: { type: string; id: string };
-  resource?: { type: string; id: string };
-  action?: string;
-  data: Data;
-}
-
-export type ConditionFunction<Data = any> = (
-  ctx: GenericQueryCtx<GenericDataModel> | GenericActionCtx<GenericDataModel>,
-  policyCtx: PolicyContext<Data>,
-) => boolean | Partial<Data> | Promise<boolean | Partial<Data>>;
 
 // ============================================================================
 // Schema shape (as stored/parsed)
@@ -34,15 +11,11 @@ export type SchemaRelation =
   | string
   | { type: string }
   | { type: string; reverse: string }
-  | { relation: string; condition: string }
-  | Array<string | { type: string } | { type: string; reverse: string } | { relation: string; condition: string }>;
+  | Array<string | { type: string } | { type: string; reverse: string }>;
 
 export interface EntityDefinition {
   relations?: Record<string, SchemaRelation>;
-  permissions?: Record<
-    string,
-    Array<string | { relation: string; condition: string }>
-  >;
+  permissions?: Record<string, Array<string>>;
   propertyValidators?: Record<string, PropertyValidators>;
   /**
    * Dot-path relations evaluated at read time instead of materialised at
@@ -51,30 +24,20 @@ export interface EntityDefinition {
   readTimeRelations?: Array<{ derivedRelation: string; dotPath: string }>;
 }
 
-export interface ZbarSchema<Data = any> {
-  conditions?: Record<string, ConditionFunction<Data>>;
+export interface ZbarSchema {
   entities: Record<string, EntityDefinition>;
 }
 
 export type BuiltZbarSchema<
-  Data,
-  Conditions extends Record<string, any>,
   Entities extends Record<
     string,
     { relations: Record<string, string>; permissions: string; properties: Record<string, PropertyValidators> }
   >,
 > = {
-  conditions: Record<keyof Conditions & string, ConditionFunction<Data>>;
   entities: {
     [E in keyof Entities]: {
-      relations: Record<
-        keyof Entities[E]["relations"] & string,
-        SchemaRelation
-      >;
-      permissions: Record<
-        Entities[E]["permissions"] & string,
-        Array<string | { relation: string; condition: string }>
-      >;
+      relations: Record<keyof Entities[E]["relations"] & string, SchemaRelation>;
+      permissions: Record<Entities[E]["permissions"] & string, Array<string>>;
       propertyValidators: Entities[E]["properties"];
     };
   };
@@ -101,12 +64,6 @@ export type EntityRelations<
   ObjectType extends keyof Schema["entities"],
 > = Schema["entities"][ObjectType] extends { relations: infer R }
   ? keyof R & string
-  : never;
-
-export type SchemaConditions<Schema extends ZbarSchema<any>> = Schema extends {
-  conditions: infer C;
-}
-  ? keyof C & string
   : never;
 
 /**

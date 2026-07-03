@@ -28,13 +28,7 @@ async function assertDbState(
   expect(effectiveRelationships.length).toBe(expectedEffectiveRelationships);
 }
 
-const zbarSchema = createZbarSchema<any>()
-  .condition("isBusinessHours", (ctx, policyCtx) => {
-    return policyCtx.data?.timezone === "EST";
-  })
-  .condition("hasPaidPlan", (ctx, policyCtx) => {
-    return policyCtx.subject.id === "user_paid";
-  })
+const zbarSchema = createZbarSchema()
   .entity("user")
   .entity("org", (e) =>
     e
@@ -42,8 +36,7 @@ const zbarSchema = createZbarSchema<any>()
       .relation("admin", "user", "owner")
       .relation("viewer", "user", "admin")
       .permission("edit_settings", "admin")
-      .permission("view_dashboard", "viewer")
-      .permission("audit", { relation: "admin", condition: "hasPaidPlan" }),
+      .permission("view_dashboard", "viewer"),
   )
   .entity("project", (e) =>
     e
@@ -62,7 +55,6 @@ const mkCtx = (t: any) =>
 const mkZbar = () =>
   new Zbar(api, {
     schema: zbarSchema,
-    tenantId: "t1",
     asyncWrites: false,
   });
 
@@ -158,7 +150,7 @@ describe("Permission Checks & Inference", () => {
     await assertDbState(t, 2, 2);
   });
 
-  test("hasRelationship respects inheritance and conditions", async () => {
+  test("hasRelationship respects inheritance", async () => {
     const t = setup();
     const ctx = mkCtx(t);
     const zbar = mkZbar();
@@ -177,13 +169,11 @@ describe("Permission Checks & Inference", () => {
     await assertDbState(t, 2, 2);
   });
 
-  test("deeply nested conditional read-time inference and deletions", async () => {
+  test("deeply nested read-time inference and deletions", async () => {
     const t = setup();
     const ctx = mkCtx(t);
 
-    const deepSchema = createZbarSchema<any>()
-      .condition("isApproved", (ctx, policy) => policy.data?.approved === true)
-      .condition("isActive", (ctx, policy) => policy.data?.active === true)
+    const deepSchema = createZbarSchema()
       .entity("user")
       .entity("org", (e) => e.relation("viewer", "user"))
       .entity("project", (e) =>
@@ -200,13 +190,12 @@ describe("Permission Checks & Inference", () => {
         e
           .relation("parent_folder", "folder")
           .relation("viewer", "user", "parent_folder.viewer")
-          .permission("read", { relation: "viewer", condition: "isApproved" }),
+          .permission("read", "viewer"),
       )
       .build();
 
     const zbar = new Zbar(api, {
       schema: deepSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -221,111 +210,26 @@ describe("Permission Checks & Inference", () => {
     await zbar.addRelation(ctx, org, "parent_org", project);
     await zbar.addRelation(ctx, user, "viewer", org);
 
-    expect(await zbar.can(ctx, user, "read", document)).toBe(false);
-    expect(await zbar.can(ctx, user, "read", document, { approved: true })).toBe(true);
+    expect(await zbar.can(ctx, user, "read", document)).toBe(true);
 
     const accessibleDocs = await zbar
       .list()
       .object("document")
       .permission("read")
       .subject(user)
-      .collect(ctx, { approved: true });
+      .collect(ctx);
     expect(accessibleDocs.length).toBe(1);
     expect(accessibleDocs[0].objectId).toBe("d1");
 
-    // Sever the graph
+    // Sever the graph — the nested inference chain must break.
     await zbar.removeRelation(ctx, project, "parent_project", folder);
-    expect(await zbar.can(ctx, user, "read", document, { approved: true })).toBe(false);
+    expect(await zbar.can(ctx, user, "read", document)).toBe(false);
 
-    // Re-link with failing edge condition
-    await zbar.addRelation(ctx, project, "parent_project", folder, {
-      condition: "isActive",
-      conditionContext: { active: false },
-    });
-    expect(await zbar.can(ctx, user, "read", document, { approved: true })).toBe(false);
-
-    // Fix the edge condition
-    await zbar.removeRelation(ctx, project, "parent_project", folder);
-    await zbar.addRelation(ctx, project, "parent_project", folder, {
-      condition: "isActive",
-      conditionContext: { active: true },
-    });
-    expect(await zbar.can(ctx, user, "read", document, { approved: true })).toBe(true);
+    // Re-link — access is restored once the chain is whole again.
+    await zbar.addRelation(ctx, project, "parent_project", folder);
+    expect(await zbar.can(ctx, user, "read", document)).toBe(true);
 
     await assertDbState(t, 4, 7);
-  });
-
-  test("conditional relation in schema evaluated at read-time", async () => {
-    const t = setup();
-    const ctx = mkCtx(t);
-
-    const testSchema = createZbarSchema<any>()
-      .condition("isActive", (ctx, policy) => policy.data?.active === true)
-      .entity("user")
-      .entity("folder", (e) => e.relation("viewer", "user"))
-      .entity("document", (e) =>
-        e
-          .relation("parent_folder", "folder")
-          .relation("viewer", "user", {
-            relation: "parent_folder.viewer",
-            condition: "isActive",
-          })
-          .permission("view", "viewer"),
-      )
-      .build();
-
-    const zbar = new Zbar(api, {
-      schema: testSchema,
-      tenantId: "t1",
-      asyncWrites: false,
-    });
-
-    const user = { type: "user", id: "u1" } as const;
-    const document = { type: "document", id: "d1" } as const;
-    const folder = { type: "folder", id: "f1" } as const;
-
-    await zbar.addRelation(ctx, folder, "parent_folder", document);
-    await zbar.addRelation(ctx, user, "viewer", folder);
-
-    expect(await zbar.can(ctx, user, "view", document)).toBe(false);
-    expect(await zbar.can(ctx, user, "view", document, { active: true })).toBe(true);
-
-    await assertDbState(t, 2, 3);
-  });
-
-  test("resolvePermissionRelations correctly parses object-based conditional aliases", async () => {
-    const t = setup();
-    const ctx = mkCtx(t);
-
-    const testSchema = createZbarSchema<any>()
-      .condition("isPaid", (ctx, policy) => policy.data?.paid === true)
-      .entity("user")
-      .entity("org", (e) =>
-        e
-          .relation("admin", "user")
-          .relation("viewer", "user", {
-            relation: "admin",
-            condition: "isPaid",
-          })
-          .permission("view", "viewer"),
-      )
-      .build();
-
-    const zbar = new Zbar(api, {
-      schema: testSchema,
-      tenantId: "t1",
-      asyncWrites: false,
-    });
-
-    const user = { type: "user" as const, id: "u_cond_alias" };
-    const org = { type: "org" as const, id: "org_cond_alias" };
-
-    await zbar.addRelation(ctx, user, "admin", org);
-
-    expect(await zbar.can(ctx, user, "view", org)).toBe(false);
-    expect(await zbar.can(ctx, user, "view", org, { paid: true })).toBe(true);
-
-    await assertDbState(t, 1, 1);
   });
 });
 

@@ -4,7 +4,6 @@ import { api } from "./_generated/api";
 import { internalMutation, mutation, query } from "./_generated/server";
 import { applyTraversalRulesToItem } from "./expand";
 import { canonicalizePath, pathKey } from "./paths";
-import type { GraphConfig } from "./types";
 import { expansionPool } from "./workpool";
 
 // ============================================================================
@@ -13,7 +12,6 @@ import { expansionPool } from "./workpool";
 
 export const scanRelationships = query({
   args: {
-    tenantId: v.optional(v.string()),
     filter: v.optional(
       v.object({
         subjectType: v.optional(v.string()),
@@ -27,19 +25,22 @@ export const scanRelationships = query({
     limit: v.optional(v.number()),
   },
   handler: async (ctx: any, args: any) => {
-    const { tenantId, filter, limit: rawLimit } = args;
+    const { filter, limit: rawLimit } = args;
     const limit = Math.min(rawLimit ?? 100, 1000);
 
-    // Choose the best index based on available filters
     let results: any[];
 
-    if (filter?.subjectType && filter?.subjectId && filter?.relation && filter?.objectType && filter?.objectId) {
-      // Fully specified — use the most selective index
+    if (
+      filter?.subjectType &&
+      filter?.subjectId &&
+      filter?.relation &&
+      filter?.objectType &&
+      filter?.objectId
+    ) {
       const row = await ctx.db
         .query("relationships")
-        .withIndex("by_tenant_subject_relation_object", (q: any) =>
+        .withIndex("by_subject_relation_object", (q: any) =>
           q
-            .eq("tenantId", tenantId)
             .eq("subjectType", filter.subjectType)
             .eq("subjectId", filter.subjectId)
             .eq("relation", filter.relation)
@@ -49,89 +50,59 @@ export const scanRelationships = query({
         .unique();
       results = row ? [row] : [];
     } else if (filter?.subjectType && filter?.subjectId) {
-      // Subject-scoped scan
       results = await ctx.db
         .query("relationships")
-        .withIndex("by_tenant_subject_relation_object", (q: any) => {
-          let q2 = q
-            .eq("tenantId", tenantId)
-            .eq("subjectType", filter.subjectType)
-            .eq("subjectId", filter.subjectId);
+        .withIndex("by_subject_relation_object", (q: any) => {
+          let q2 = q.eq("subjectType", filter.subjectType).eq("subjectId", filter.subjectId);
           if (filter.relation) q2 = q2.eq("relation", filter.relation);
           return q2;
         })
         .collect();
     } else if (filter?.objectType && filter?.objectId) {
-      // Object-scoped scan
       results = await ctx.db
         .query("relationships")
-        .withIndex("by_tenant_object", (q: any) =>
-          q
-            .eq("tenantId", tenantId)
-            .eq("objectType", filter.objectType)
-            .eq("objectId", filter.objectId),
+        .withIndex("by_object", (q: any) =>
+          q.eq("objectType", filter.objectType).eq("objectId", filter.objectId),
         )
         .collect();
     } else if (filter?.objectType) {
-      // Object type scan
       results = await ctx.db
         .query("relationships")
-        .withIndex("by_tenant_object", (q: any) =>
-          q.eq("tenantId", tenantId).eq("objectType", filter.objectType),
-        )
+        .withIndex("by_object", (q: any) => q.eq("objectType", filter.objectType))
         .collect();
     } else {
-      // Full table scan for this tenant — use the object index as a prefix scan
-      results = await ctx.db
-        .query("relationships")
-        .withIndex("by_tenant_object", (q: any) =>
-          q.eq("tenantId", tenantId),
-        )
-        .collect();
+      results = await ctx.db.query("relationships").collect();
     }
 
-    // Apply remaining client-side filters that weren't covered by the index
     if (filter) {
       results = results.filter((r: any) => {
-        if (filter.subjectType && r.subjectType !== filter.subjectType)
-          return false;
+        if (filter.subjectType && r.subjectType !== filter.subjectType) return false;
         if (filter.subjectId && r.subjectId !== filter.subjectId) return false;
         if (filter.relation && r.relation !== filter.relation) return false;
-        if (filter.objectType && r.objectType !== filter.objectType)
-          return false;
+        if (filter.objectType && r.objectType !== filter.objectType) return false;
         if (filter.objectId && r.objectId !== filter.objectId) return false;
         return true;
       });
     }
 
-    // Apply cursor-based pagination
     let startIndex = 0;
     if (args.cursor) {
-      const cursorIdx = results.findIndex(
-        (r: any) => r._id === args.cursor,
-      );
-      if (cursorIdx >= 0) {
-        startIndex = cursorIdx + 1;
-      }
+      const cursorIdx = results.findIndex((r: any) => r._id === args.cursor);
+      if (cursorIdx >= 0) startIndex = cursorIdx + 1;
     }
 
     const page = results.slice(startIndex, startIndex + limit);
     const nextCursor =
-      startIndex + limit < results.length
-        ? page[page.length - 1]?._id
-        : undefined;
+      startIndex + limit < results.length ? page[page.length - 1]?._id : undefined;
 
     return {
       rows: page.map((r: any) => ({
         _id: r._id,
-        tenantId: r.tenantId,
         subjectType: r.subjectType,
         subjectId: r.subjectId,
         relation: r.relation,
         objectType: r.objectType,
         objectId: r.objectId,
-        condition: r.condition,
-        conditionContext: r.conditionContext,
         properties: r.properties,
       })),
       cursor: nextCursor,
@@ -142,7 +113,6 @@ export const scanRelationships = query({
 
 export const countRelationships = query({
   args: {
-    tenantId: v.optional(v.string()),
     filter: v.optional(
       v.object({
         subjectType: v.optional(v.string()),
@@ -152,33 +122,23 @@ export const countRelationships = query({
     ),
   },
   handler: async (ctx: any, args: any) => {
-    const { tenantId, filter } = args;
+    const { filter } = args;
 
     let results: any[];
-
     if (filter?.objectType) {
       results = await ctx.db
         .query("relationships")
-        .withIndex("by_tenant_object", (q: any) =>
-          q.eq("tenantId", tenantId).eq("objectType", filter.objectType),
-        )
+        .withIndex("by_object", (q: any) => q.eq("objectType", filter.objectType))
         .collect();
     } else {
-      results = await ctx.db
-        .query("relationships")
-        .withIndex("by_tenant_object", (q: any) =>
-          q.eq("tenantId", tenantId),
-        )
-        .collect();
+      results = await ctx.db.query("relationships").collect();
     }
 
     if (filter) {
       results = results.filter((r: any) => {
-        if (filter.subjectType && r.subjectType !== filter.subjectType)
-          return false;
+        if (filter.subjectType && r.subjectType !== filter.subjectType) return false;
         if (filter.relation && r.relation !== filter.relation) return false;
-        if (filter.objectType && r.objectType !== filter.objectType)
-          return false;
+        if (filter.objectType && r.objectType !== filter.objectType) return false;
         return true;
       });
     }
@@ -193,26 +153,20 @@ export const countRelationships = query({
 
 export const insertRelationship = mutation({
   args: {
-    tenantId: v.optional(v.string()),
     subjectType: v.string(),
     subjectId: v.string(),
     relation: v.string(),
     objectType: v.string(),
     objectId: v.string(),
-    condition: v.optional(v.string()),
-    conditionContext: v.optional(v.any()),
     properties: v.optional(v.any()),
   },
   handler: async (ctx: any, args: any) => {
     return await ctx.db.insert("relationships", {
-      tenantId: args.tenantId,
       subjectType: args.subjectType,
       subjectId: args.subjectId,
       relation: args.relation,
       objectType: args.objectType,
       objectId: args.objectId,
-      condition: args.condition,
-      conditionContext: args.conditionContext,
       properties: args.properties,
     });
   },
@@ -227,38 +181,25 @@ export const patchRelationship = mutation({
       relation: v.optional(v.string()),
       objectType: v.optional(v.string()),
       objectId: v.optional(v.string()),
-      condition: v.optional(v.union(v.string(), v.null())),
-      conditionContext: v.optional(v.any()),
       properties: v.optional(v.union(v.any(), v.null())),
     }),
   },
   handler: async (ctx: any, args: any) => {
     const existing = await ctx.db.get(args.relationshipId);
     if (!existing) {
-      throw new Error(
-        `Relationship ${args.relationshipId} not found`,
-      );
+      throw new Error(`Relationship ${args.relationshipId} not found`);
     }
-
     const patchData: any = {};
     for (const [key, value] of Object.entries(args.patch)) {
       if (value === undefined) continue;
-      if (value === null) {
-        // null means clear the field
-        patchData[key] = undefined;
-      } else {
-        patchData[key] = value;
-      }
+      patchData[key] = value === null ? undefined : value;
     }
-
     await ctx.db.patch(args.relationshipId, patchData);
   },
 });
 
 export const deleteRelationship = mutation({
-  args: {
-    relationshipId: v.id("relationships"),
-  },
+  args: { relationshipId: v.id("relationships") },
   handler: async (ctx: any, args: any) => {
     const existing = await ctx.db.get(args.relationshipId);
     if (!existing) return;
@@ -272,7 +213,6 @@ export const deleteRelationship = mutation({
 
 export const clearEffectiveRelationships = mutation({
   args: {
-    tenantId: v.optional(v.string()),
     filter: v.optional(
       v.object({
         subjectType: v.optional(v.string()),
@@ -287,18 +227,10 @@ export const clearEffectiveRelationships = mutation({
 });
 
 async function clearEffectiveRelationshipsInternal(ctx: any, args: any) {
-  const { tenantId, filter } = args;
-
-  // Collect all effective relationships for this tenant
-  const allEffective = await ctx.db
-    .query("effectiveRelationships")
-    .withIndex("by_tenant_subject_relation_object", (q: any) =>
-      q.eq("tenantId", tenantId),
-    )
-    .collect();
+  const { filter } = args;
+  const allEffective = await ctx.db.query("effectiveRelationships").collect();
 
   let toDelete = allEffective;
-
   if (filter) {
     toDelete = allEffective.filter((eff: any) => {
       if (filter.relation && eff.relation !== filter.relation) return false;
@@ -317,13 +249,11 @@ async function clearEffectiveRelationshipsInternal(ctx: any, args: any) {
   for (const eff of toDelete) {
     await ctx.db.delete(eff._id);
   }
-
   return { removed: toDelete.length };
 }
 
 export const clearEffectiveRelationshipsChunked = internalMutation({
   args: {
-    tenantId: v.optional(v.string()),
     filter: v.optional(
       v.object({
         subjectType: v.optional(v.string()),
@@ -340,86 +270,47 @@ export const clearEffectiveRelationshipsChunked = internalMutation({
 
 /**
  * Rebuild effective relationships by replaying all base relationships through
- * the graph expansion engine. This is an internal mutation that processes in
- * chunks and self-schedules for continuation.
+ * the graph expansion engine. Processes in chunks and self-schedules.
  */
 export const rebuildEffectiveChunk = mutation({
   args: {
-    tenantId: v.optional(v.string()),
     graphConfig: v.any(),
-    cursor: v.optional(v.string()), // last processed relationship _id
+    cursor: v.optional(v.string()),
     batchSize: v.optional(v.number()),
-    stats: v.optional(
-      v.object({
-        processed: v.number(),
-        total: v.number(),
-      }),
-    ),
+    stats: v.optional(v.object({ processed: v.number(), total: v.number() })),
     mockWorkpool: v.optional(v.boolean()),
   },
   handler: async (ctx: any, args: any) => {
-    const { tenantId, graphConfig, cursor, mockWorkpool } = args;
+    const { graphConfig, cursor, mockWorkpool } = args;
     const batchSize = args.batchSize ?? 25;
     const stats = args.stats ?? { processed: 0, total: 0 };
 
-    // Fetch a batch of base relationships
-    let query = ctx.db
-      .query("relationships")
-      .withIndex("by_tenant_object", (q: any) =>
-        q.eq("tenantId", tenantId),
-      );
+    const allRels = await ctx.db.query("relationships").collect();
 
-    const allRels = await query.collect();
-
-    // Find our start position
     let startIdx = 0;
     if (cursor) {
       const cursorIdx = allRels.findIndex((r: any) => r._id === cursor);
       if (cursorIdx >= 0) startIdx = cursorIdx + 1;
     }
-
-    if (stats.total === 0) {
-      stats.total = allRels.length;
-    }
+    if (stats.total === 0) stats.total = allRels.length;
 
     const batch = allRels.slice(startIdx, startIdx + batchSize);
+    if (batch.length === 0) return { done: true, stats };
 
-    if (batch.length === 0) {
-      return { done: true, stats };
-    }
-
-    // For each base relationship, create the direct effective relationship
     for (const rel of batch) {
       const sKey = buildScopeKey(rel.subjectType, rel.subjectId);
       const oKey = buildScopeKey(rel.objectType, rel.objectId);
+      const pathItem = { baseIds: [rel._id] };
 
-      const pathItem = {
-        baseIds: [rel._id],
-        conditions: rel.condition
-          ? [
-              {
-                condition: rel.condition,
-                conditionContext: rel.conditionContext,
-              },
-            ]
-          : undefined,
-      };
-
-      // Check if this effective relationship already exists
       const existing = await ctx.db
         .query("effectiveRelationships")
-        .withIndex("by_tenant_subject_relation_object", (q: any) =>
-          q
-            .eq("tenantId", tenantId)
-            .eq("subjectKey", sKey)
-            .eq("relation", rel.relation)
-            .eq("objectKey", oKey),
+        .withIndex("by_subject_relation_object", (q: any) =>
+          q.eq("subjectKey", sKey).eq("relation", rel.relation).eq("objectKey", oKey),
         )
         .unique();
 
       if (!existing) {
         await ctx.db.insert("effectiveRelationships", {
-          tenantId,
           subjectKey: sKey,
           relation: rel.relation,
           objectKey: oKey,
@@ -428,15 +319,11 @@ export const rebuildEffectiveChunk = mutation({
       } else {
         const itemKey = pathKey(pathItem);
         if (!existing.paths.some((p: any) => pathKey(p) === itemKey)) {
-          await ctx.db.patch(existing._id, {
-            paths: [...existing.paths, pathItem],
-          });
+          await ctx.db.patch(existing._id, { paths: [...existing.paths, pathItem] });
         }
       }
 
-      // Now expand traversal rules for this relationship
       await expandTraversalRules(ctx, {
-        tenantId,
         subject: { type: rel.subjectType, id: rel.subjectId },
         relation: rel.relation,
         object: { type: rel.objectType, id: rel.objectId },
@@ -454,27 +341,15 @@ export const rebuildEffectiveChunk = mutation({
       if (mockWorkpool) {
         await ctx.db.insert("mockWorkpool", {
           mutationName: "rebuildEffectiveChunk",
-          args: {
-            tenantId,
-            graphConfig,
-            cursor: lastId,
-            batchSize,
-            stats,
-            mockWorkpool,
-          },
+          args: { graphConfig, cursor: lastId, batchSize, stats, mockWorkpool },
         });
       } else {
-        await expansionPool.enqueueMutation(
-          ctx,
-          api.unsafe.rebuildEffectiveChunk,
-          {
-            tenantId,
-            graphConfig,
-            cursor: lastId,
-            batchSize,
-            stats,
-          },
-        );
+        await expansionPool.enqueueMutation(ctx, api.unsafe.rebuildEffectiveChunk, {
+          graphConfig,
+          cursor: lastId,
+          batchSize,
+          stats,
+        });
       }
     }
 
@@ -483,16 +358,9 @@ export const rebuildEffectiveChunk = mutation({
 });
 
 async function expandTraversalRules(ctx: any, args: any) {
-  const { tenantId, subject, relation, object, path, graphConfig } = args;
+  const { subject, relation, object, path, graphConfig } = args;
 
-  const queue: Array<{
-    subject: { type: string; id: string };
-    relation: string;
-    object: { type: string; id: string };
-    path: any;
-    depth: number;
-    skipReverse?: boolean;
-  }> = [
+  const queue: any[] = [
     {
       subject,
       relation,
@@ -501,8 +369,7 @@ async function expandTraversalRules(ctx: any, args: any) {
       depth: 1,
       // Rebuild walks every base row independently, so both sides of a
       // reverse-edge declaration are already scheduled. Skip the depth-1
-      // reverse push to avoid creating duplicate effective paths for the
-      // same underlying base pair.
+      // reverse push to avoid creating duplicate effective paths.
       skipReverse: true,
     },
   ];
@@ -512,28 +379,20 @@ async function expandTraversalRules(ctx: any, args: any) {
     const sKey = buildScopeKey(current.subject.type, current.subject.id);
     const oKey = buildScopeKey(current.object.type, current.object.id);
 
-    // For items beyond depth 1, upsert the effective relationship. Depth 1
-    // was already written by the caller (rebuildEffectiveChunk) so we only
-    // need to check the dedup and short-circuit when nothing changes.
     if (current.depth > 1) {
       const canonicalPath = canonicalizePath(current.path);
       const currentPathKey = pathKey(canonicalPath);
 
       const existing = await ctx.db
         .query("effectiveRelationships")
-        .withIndex("by_tenant_subject_relation_object", (q: any) =>
-          q
-            .eq("tenantId", tenantId)
-            .eq("subjectKey", sKey)
-            .eq("relation", current.relation)
-            .eq("objectKey", oKey),
+        .withIndex("by_subject_relation_object", (q: any) =>
+          q.eq("subjectKey", sKey).eq("relation", current.relation).eq("objectKey", oKey),
         )
         .unique();
 
       let isNew = false;
       if (!existing) {
         await ctx.db.insert("effectiveRelationships", {
-          tenantId,
           subjectKey: sKey,
           relation: current.relation,
           objectKey: oKey,
@@ -541,21 +400,14 @@ async function expandTraversalRules(ctx: any, args: any) {
         });
         isNew = true;
       } else if (!existing.paths.some((p: any) => pathKey(p) === currentPathKey)) {
-        await ctx.db.patch(existing._id, {
-          paths: [...existing.paths, canonicalPath],
-        });
+        await ctx.db.patch(existing._id, { paths: [...existing.paths, canonicalPath] });
         isNew = true;
       }
 
       if (!isNew) continue;
     }
 
-    await applyTraversalRulesToItem(ctx, {
-      tenantId,
-      current,
-      queue,
-      graphConfig,
-    });
+    await applyTraversalRulesToItem(ctx, { current, queue, graphConfig });
   }
 }
 
@@ -565,8 +417,6 @@ async function expandTraversalRules(ctx: any, args: any) {
 
 export const transformChunk = mutation({
   args: {
-    tenantId: v.optional(v.string()),
-    // Array of operations: { id, action: "patch"|"delete"|"skip", patch?, inserts? }
     operations: v.array(
       v.object({
         id: v.id("relationships"),
@@ -583,22 +433,17 @@ export const transformChunk = mutation({
             relation: v.optional(v.string()),
             objectType: v.optional(v.string()),
             objectId: v.optional(v.string()),
-            condition: v.optional(v.union(v.string(), v.null())),
-            conditionContext: v.optional(v.any()),
             properties: v.optional(v.union(v.any(), v.null())),
           }),
         ),
         inserts: v.optional(
           v.array(
             v.object({
-              tenantId: v.optional(v.string()),
               subjectType: v.string(),
               subjectId: v.string(),
               relation: v.string(),
               objectType: v.string(),
               objectId: v.string(),
-              condition: v.optional(v.string()),
-              conditionContext: v.optional(v.any()),
               properties: v.optional(v.any()),
             }),
           ),
@@ -617,7 +462,6 @@ export const transformChunk = mutation({
         skipped++;
         continue;
       }
-
       if (op.action === "delete") {
         const existing = await ctx.db.get(op.id);
         if (existing) {
@@ -626,28 +470,19 @@ export const transformChunk = mutation({
         }
         continue;
       }
-
       if (op.action === "patch") {
         const existing = await ctx.db.get(op.id);
         if (!existing) continue;
-
         const patchData: any = {};
         for (const [key, value] of Object.entries(op.patch || {})) {
           if (value === undefined) continue;
-          if (value === null) {
-            patchData[key] = undefined;
-          } else {
-            patchData[key] = value;
-          }
+          patchData[key] = value === null ? undefined : value;
         }
-
         await ctx.db.patch(op.id, patchData);
         patched++;
         continue;
       }
-
       if (op.action === "replace") {
-        // Delete original, insert replacements
         const existing = await ctx.db.get(op.id);
         if (existing) {
           await ctx.db.delete(op.id);
@@ -671,20 +506,15 @@ export const transformChunk = mutation({
 
 export const renameRelation = mutation({
   args: {
-    tenantId: v.optional(v.string()),
     objectType: v.string(),
     oldRelation: v.string(),
     newRelation: v.string(),
   },
   handler: async (ctx: any, args: any) => {
-    const { tenantId, objectType, oldRelation, newRelation } = args;
-
-    // Find all relationships where this object type has the old relation
+    const { objectType, oldRelation, newRelation } = args;
     const matches = await ctx.db
       .query("relationships")
-      .withIndex("by_tenant_object", (q: any) =>
-        q.eq("tenantId", tenantId).eq("objectType", objectType),
-      )
+      .withIndex("by_object", (q: any) => q.eq("objectType", objectType))
       .collect();
 
     let updated = 0;
@@ -694,50 +524,35 @@ export const renameRelation = mutation({
         updated++;
       }
     }
-
     return { updated };
   },
 });
 
 export const renameEntityType = mutation({
   args: {
-    tenantId: v.optional(v.string()),
     oldType: v.string(),
     newType: v.string(),
   },
   handler: async (ctx: any, args: any) => {
-    const { tenantId, oldType, newType } = args;
-
+    const { oldType, newType } = args;
     let updated = 0;
 
-    // Update relationships where entity appears as object
     const objectMatches = await ctx.db
       .query("relationships")
-      .withIndex("by_tenant_object", (q: any) =>
-        q.eq("tenantId", tenantId).eq("objectType", oldType),
-      )
+      .withIndex("by_object", (q: any) => q.eq("objectType", oldType))
       .collect();
-
     for (const rel of objectMatches) {
       await ctx.db.patch(rel._id, { objectType: newType });
       updated++;
     }
 
-    // Update relationships where entity appears as subject
     const subjectMatches = await ctx.db
       .query("relationships")
-      .withIndex("by_tenant_subject_relation_object", (q: any) =>
-        q.eq("tenantId", tenantId).eq("subjectType", oldType),
-      )
+      .withIndex("by_subject_relation_object", (q: any) => q.eq("subjectType", oldType))
       .collect();
-
     for (const rel of subjectMatches) {
-      // Don't double-count if same row was already patched as object
       await ctx.db.patch(rel._id, { subjectType: newType });
-      // Only count if this wasn't already counted above
-      if (rel.objectType !== oldType) {
-        updated++;
-      }
+      if (rel.objectType !== oldType) updated++;
     }
 
     return { updated };

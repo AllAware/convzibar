@@ -22,7 +22,7 @@ const mkCtx = (t: any) =>
 // Schema with edge properties
 // ============================================================================
 
-const propsSchema = createZbarSchema<any>()
+const propsSchema = createZbarSchema()
   .entity("user")
   .entity("org", (e) =>
     e
@@ -55,7 +55,6 @@ const propsSchema = createZbarSchema<any>()
 const mkZbar = () =>
   new Zbar(api, {
     schema: propsSchema,
-    tenantId: "t1",
     asyncWrites: false,
   });
 

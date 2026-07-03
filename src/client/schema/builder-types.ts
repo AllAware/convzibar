@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-empty-object-type */
 import type { PropertyValidators } from "convex/values";
 
 // Distributive helper: resolves relation keys for a target type, handling

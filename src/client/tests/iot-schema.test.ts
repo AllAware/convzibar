@@ -10,7 +10,6 @@ import { register as registerWorkpool } from "@convex-dev/workpool/test";
 // ============================================================================
 
 const modules = import.meta.glob("../../component/**/*.ts");
-const TENANT = "iot-tenant";
 
 const setup = () => {
   const t = convexTest(schema, modules);
@@ -84,7 +83,7 @@ async function effectiveRowExists(
 // group / system admin checks are the hot path for management permissions.
 // ============================================================================
 
-const iotSchema = createZbarSchema<any>()
+const iotSchema = createZbarSchema()
   .entity("user", (e) => e.relation("primary_contact"))
 
   .entity("system", (e) =>
@@ -199,7 +198,6 @@ const iotSchema = createZbarSchema<any>()
 const mkZbar = (opts?: { readTimeChainDepth?: number }) =>
   new Zbar(api, {
     schema: iotSchema,
-    tenantId: TENANT,
     asyncWrites: false,
     readTimeChainDepth: opts?.readTimeChainDepth,
   });
@@ -1052,17 +1050,16 @@ describe("Stress: multi-system IoT deployment", () => {
     const DEVICES_PER_GROUP = 4;
     const RULES_PER_SYSTEM = 3;
 
-    type Entity = { type: string; id: string };
-    const systems: Entity[] = [];
-    const groups: Entity[] = [];
-    const devices: Entity[] = [];
-    const rules: Entity[] = [];
+    const systems: Array<{ type: "system"; id: string }> = [];
+    const groups: Array<{ type: "group"; id: string }> = [];
+    const devices: Array<{ type: "device"; id: string }> = [];
+    const rules: Array<{ type: "notification_rule"; id: string }> = [];
 
     // Users: every system gets its own admin + viewer; one user ("spy")
     // belongs to no system and should be denied across the board.
     const spy = { type: "user" as const, id: "spy" };
-    const viewersBySystem: Record<string, Entity> = {};
-    const adminsBySystem: Record<string, Entity> = {};
+    const viewersBySystem: Record<string, { type: "user"; id: string }> = {};
+    const adminsBySystem: Record<string, { type: "user"; id: string }> = {};
 
     // Build the world.
     for (let s = 0; s < SYSTEMS; s++) {

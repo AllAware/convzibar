@@ -38,7 +38,7 @@ const mkCtx = (t: any) =>
 // Schema: IoT notification system with reverse edges
 // ============================================================================
 
-const notificationSchema = createZbarSchema<any>()
+const notificationSchema = createZbarSchema()
   .entity("user")
   .entity("system", (e) =>
     e
@@ -122,7 +122,6 @@ describe("Reverse Edge: Auto-insertion and removal", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -157,7 +156,6 @@ describe("Reverse Edge: Auto-insertion and removal", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -181,7 +179,6 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -207,7 +204,6 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -261,7 +257,6 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -303,7 +298,6 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -343,7 +337,6 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -381,7 +374,6 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -409,7 +401,6 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -448,7 +439,6 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -486,7 +476,6 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -520,7 +509,6 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: notificationSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -556,7 +544,7 @@ describe("Reverse Edge: Notification source expansion via userset", () => {
 // Schema: Multi-target reverse edges (one relation → multiple { type, reverse })
 // ============================================================================
 
-const multiReverseSchema = createZbarSchema<any>()
+const multiReverseSchema = createZbarSchema()
   .entity("user")
   .entity("org", (e) =>
     e
@@ -583,7 +571,6 @@ describe("Reverse Edge: Multi-target reverse declarations", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: multiReverseSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -617,7 +604,6 @@ describe("Reverse Edge: Multi-target reverse declarations", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: multiReverseSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 

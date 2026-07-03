@@ -1,5 +1,4 @@
 import type { ActionCtx, QueryCtx } from "../internal";
-import type { ZbarSchema } from "../types";
 import { BaseListBuilder } from "./base";
 type ListResult = {
     objectId: string;
@@ -7,18 +6,13 @@ type ListResult = {
     subjectId: string;
 };
 /**
- * Internal implementation of the fluent list query builder.
- * A single class implements all builder interfaces; the TypeScript interfaces
- * (in ./types.ts) restrict which methods are visible at each step.
+ * Internal implementation of the fluent list query builder. A single class
+ * implements all builder interfaces; the TypeScript interfaces (in ./types.ts)
+ * restrict which methods are visible at each step.
  */
-export declare class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> extends BaseListBuilder<ListResult> {
+export declare class ListQueryBuilder extends BaseListBuilder<ListResult> {
     private _via;
     private _mode;
-    /**
-     * Overridden to set `_mode` alongside the normal object/type assignment:
-     * `object(string)` is the "list objects" flavour, `object({type, id})` is
-     * the "list subjects" flavour.
-     */
     object(objectOrType: string | {
         type: string;
         id: string;
@@ -27,7 +21,7 @@ export declare class ListQueryBuilder<Schema extends ZbarSchema<Data>, Data> ext
         type: string;
         id: string;
     } | null | undefined>): this;
-    collect(ctx: QueryCtx | ActionCtx, requestContext?: Data): Promise<ListResult[]>;
+    collect(ctx: QueryCtx | ActionCtx): Promise<ListResult[]>;
 }
 export {};
 //# sourceMappingURL=builder.d.ts.map

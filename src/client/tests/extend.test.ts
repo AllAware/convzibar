@@ -21,12 +21,7 @@ const mkCtx = (t: any) =>
 // Schema using .extend() for forward references — NO `as any` needed
 // ============================================================================
 
-interface ZbarContext {
-  ip?: string;
-  role?: string;
-}
-
-const extendSchema = createZbarSchema<ZbarContext>()
+const extendSchema = createZbarSchema()
   .entity("user")
   .entity("system", (e) =>
     e
@@ -141,7 +136,6 @@ describe("SchemaBuilder.extend()", () => {
     const ctx = mkCtx(t);
     const zbar = new Zbar(api, {
       schema: extendSchema,
-      tenantId: "t1",
       asyncWrites: false,
     });
 
@@ -167,7 +161,7 @@ describe("SchemaBuilder.extend()", () => {
   test("extend merges targets into existing relation instead of overwriting", () => {
     // When .extend() calls .relation() on a name that already has targets,
     // the new targets should be appended, not replace the originals.
-    const schema = createZbarSchema<ZbarContext>()
+    const schema = createZbarSchema()
       .entity("user")
       .entity("system", (e) =>
         e
@@ -196,7 +190,7 @@ describe("SchemaBuilder.extend()", () => {
   });
 
   test("extend merge deduplicates identical string targets", () => {
-    const schema = createZbarSchema<ZbarContext>()
+    const schema = createZbarSchema()
       .entity("user")
       .entity("system", (e) =>
         e
@@ -215,7 +209,7 @@ describe("SchemaBuilder.extend()", () => {
   });
 
   test("extend merge deduplicates identical object targets", () => {
-    const schema = createZbarSchema<ZbarContext>()
+    const schema = createZbarSchema()
       .entity("user")
       .entity("system", (e) =>
         e
@@ -240,18 +234,21 @@ describe("SchemaBuilder.extend()", () => {
   test("extend on placeholder relation sets value without merging", () => {
     // When the original relation is a placeholder (undefined), extend
     // should just set the new value normally.
-    const schema = createZbarSchema<ZbarContext>()
+    const schema = createZbarSchema()
       .entity("user")
       .entity("system", (e) =>
         e
           .relation("owner", "user")
+          .relation("has_group")      // placeholder
           .relation("device_member")  // placeholder
       )
       .entity("group", (e) =>
         e.relation("device_member", "user")
       )
       .extend("system", (e) =>
-        e.relation("device_member", "has_group.device_member")
+        e
+          .relation("has_group", "group")
+          .relation("device_member", "has_group.device_member")
       )
       .build();
 
@@ -261,7 +258,7 @@ describe("SchemaBuilder.extend()", () => {
 
   test("extend throws for undefined entity", () => {
     expect(() => {
-      createZbarSchema<any>()
+      createZbarSchema()
         .entity("user")
         // @ts-expect-error — 'bogus' is not a defined entity
         .extend("bogus", (e: any) => e.relation("foo"))
@@ -279,7 +276,7 @@ describe("Reverse type inference", () => {
     // This schema compiles — has_group is resolved to 'group' via the
     // reverse declaration, so 'has_group.device_member' is validated
     // against group's actual relations.
-    const _schema = createZbarSchema<ZbarContext>()
+    const _schema = createZbarSchema()
       .entity("user")
       .entity("system", (e) =>
         e.relation("owner", "user").relation("has_group"),
@@ -303,7 +300,7 @@ describe("Reverse type inference", () => {
   });
 
   test("invalid dot-paths through resolved placeholders are caught", () => {
-    createZbarSchema<ZbarContext>()
+    createZbarSchema()
       .entity("user")
       .entity("system", (e) =>
         e.relation("owner", "user").relation("has_group"),
@@ -321,7 +318,7 @@ describe("Reverse type inference", () => {
   });
 
   test("invalid reverse relation names are caught", () => {
-    createZbarSchema<ZbarContext>()
+    createZbarSchema()
       .entity("user")
       .entity("system", (e) =>
         e.relation("owner", "user").relation("has_group"),
@@ -336,7 +333,7 @@ describe("Reverse type inference", () => {
   });
 
   test("unresolved placeholders reject dot-paths (no ${string} fallback)", () => {
-    createZbarSchema<ZbarContext>()
+    createZbarSchema()
       .entity("user")
       .entity("system", (e) =>
         e
